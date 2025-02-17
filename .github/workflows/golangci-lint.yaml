@@ -29,5 +29,5 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: 1.64.5
+          version: v1.64.5
           args: cli/... server/...
