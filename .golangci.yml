@@ -1,0 +1,58 @@
+linters-settings:
+  funlen:
+    lines: 120
+    statements: 50
+  gocyclo:
+    min-complexity: 15
+  goimports:
+    local-prefixes: github.com/golang-templates/seed
+  misspell:
+    locale: UK
+  nolintlint:
+    allow-unused: false # report any unused nolint directives
+    require-explanation: true # require an explanation for nolint directives
+    require-specific: true # require nolint directives to be specific about which linter is being skipped
+  revive:
+    confidence: 0
+
+linters:
+  disable-all: true
+  enable:
+    - asasalint
+    - bodyclose
+    - dogsled
+    - dupl
+    - dupword
+    - errcheck
+    - funlen
+    - gocritic
+    - goconst
+    - gocyclo
+    - gofumpt
+    - goimports
+    - revive
+    - rowserrcheck
+    - godot
+    - goprintffuncname
+    - gosec
+    - gosimple
+    - govet
+    - ineffassign
+    - misspell
+    - mnd
+    - nakedret
+    - noctx
+    - nolintlint
+    - perfsprint
+    - staticcheck
+    - stylecheck
+    - sqlclosecheck
+    - typecheck
+    - unconvert
+    - unparam
+    - unused
+    - whitespace
+
+issues:
+  exclude:
+    - EXC0001
