@@ -8,13 +8,11 @@ on:
 # Cancel any previous runs of this workflow for the same PR.
 concurrency:
   group: ${{ github.event.pull_request.number }}
-  #group: pr
   cancel-in-progress: true
 
 jobs:
   pr:
     runs-on: ubuntu-latest
-    if: contains(github.event.pull_request.labels.*.name, 'ready')
 
     steps:
       - name: Checkout
