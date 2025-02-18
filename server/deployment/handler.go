@@ -12,8 +12,10 @@ import (
 	"github.com/puravida-software/bondi/server/docker"
 )
 
-type ClientFactory func(registryUser *string, registryPass *string) (docker.DockerClient, error)
-type StrategyFactory func(dockerClient docker.DockerClient) strategies.Strategy
+type (
+	ClientFactory   func(registryUser *string, registryPass *string) (docker.Client, error)
+	StrategyFactory func(dockerClient docker.Client) strategies.Strategy
+)
 
 func NewHandler(factory ClientFactory, strategyFactory StrategyFactory) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

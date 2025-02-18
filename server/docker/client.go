@@ -18,7 +18,7 @@ import (
 	"github.com/docker/go-connections/nat"
 )
 
-type DockerClient interface {
+type Client interface {
 	GetContainer(ctx context.Context, imageName string) (*types.Container, error)
 	PullImage(ctx context.Context, imageName string, tag string) error
 	RemoveContainerAndImage(ctx context.Context, cont *types.Container) error
@@ -26,12 +26,12 @@ type DockerClient interface {
 	StopContainer(ctx context.Context, containerID string) error
 }
 
-type Client struct {
+type LiveClient struct {
 	apiClient    *client.Client
 	registryAuth *string
 }
 
-func NewDockerClient(registryUser *string, registryPass *string) (DockerClient, error) {
+func NewDockerClient(registryUser *string, registryPass *string) (Client, error) {
 	// Set up the Docker client
 	apiClient, err := client.NewClientWithOpts(client.FromEnv)
 	if err != nil {
@@ -47,9 +47,9 @@ func NewDockerClient(registryUser *string, registryPass *string) (DockerClient, 
 	return dockerClient, nil
 }
 
-func NewDockerClientWithClient(client *client.Client, registryUser *string, registryPass *string) (*Client, error) {
+func NewDockerClientWithClient(client *client.Client, registryUser *string, registryPass *string) (*LiveClient, error) {
 	if registryUser == nil || registryPass == nil {
-		return &Client{apiClient: client, registryAuth: nil}, nil
+		return &LiveClient{apiClient: client, registryAuth: nil}, nil
 	}
 
 	authConfig := registry.AuthConfig{
@@ -62,10 +62,10 @@ func NewDockerClientWithClient(client *client.Client, registryUser *string, regi
 	}
 	registryAuth := base64.StdEncoding.EncodeToString(jsonBytes)
 
-	return &Client{apiClient: client, registryAuth: &registryAuth}, nil
+	return &LiveClient{apiClient: client, registryAuth: &registryAuth}, nil
 }
 
-func (c *Client) GetContainer(ctx context.Context, imageName string) (*types.Container, error) {
+func (c *LiveClient) GetContainer(ctx context.Context, imageName string) (*types.Container, error) {
 	containers, err := c.apiClient.ContainerList(ctx, container.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list containers: %w", err)
@@ -81,7 +81,7 @@ func (c *Client) GetContainer(ctx context.Context, imageName string) (*types.Con
 	return currentContainer, nil
 }
 
-func (c *Client) PullImage(ctx context.Context, imageName string, tag string) error {
+func (c *LiveClient) PullImage(ctx context.Context, imageName string, tag string) error {
 	newImage := fmt.Sprintf("%s:%s", imageName, tag)
 	log.Printf("Pulling image: %s", newImage)
 
@@ -114,7 +114,7 @@ func (c *Client) PullImage(ctx context.Context, imageName string, tag string) er
 	return nil
 }
 
-func (c *Client) RemoveContainerAndImage(ctx context.Context, cont *types.Container) error {
+func (c *LiveClient) RemoveContainerAndImage(ctx context.Context, cont *types.Container) error {
 	err := c.apiClient.ContainerRemove(ctx, cont.ID, container.RemoveOptions{
 		RemoveVolumes: true,
 		RemoveLinks:   false,
@@ -143,7 +143,7 @@ type RunImageOptions struct {
 	EnvVars   map[string]string
 }
 
-func (c *Client) RunImage(ctx context.Context, opts RunImageOptions) (string, error) {
+func (c *LiveClient) RunImage(ctx context.Context, opts RunImageOptions) (string, error) {
 	newImage := fmt.Sprintf("%s:%s", opts.ImageName, opts.Tag)
 
 	env := []string{}
@@ -178,7 +178,7 @@ func (c *Client) RunImage(ctx context.Context, opts RunImageOptions) (string, er
 	return newContainer.ID, nil
 }
 
-func (c *Client) StopContainer(ctx context.Context, containerID string) error {
+func (c *LiveClient) StopContainer(ctx context.Context, containerID string) error {
 	err := c.apiClient.ContainerStop(ctx, containerID, container.StopOptions{
 		// 10 seconds
 		Timeout: &[]int{10}[0],

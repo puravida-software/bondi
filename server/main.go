@@ -13,7 +13,7 @@ import (
 	"github.com/puravida-software/bondi/server/health"
 )
 
-func NewDockerClient(registryUser *string, registryPass *string) (docker.DockerClient, error) {
+func NewDockerClient(registryUser *string, registryPass *string) (docker.Client, error) {
 	// Set up the Docker client
 	apiClient, err := client.NewClientWithOpts(client.FromEnv)
 	if err != nil {
@@ -29,7 +29,7 @@ func NewDockerClient(registryUser *string, registryPass *string) (docker.DockerC
 	return dockerClient, nil
 }
 
-func NewSimpleDeployment(dockerClient docker.DockerClient) strategies.Strategy {
+func NewSimpleDeployment(dockerClient docker.Client) strategies.Strategy {
 	return strategies.NewSimpleDeployment(dockerClient)
 }
 

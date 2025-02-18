@@ -20,23 +20,23 @@ import (
 // fakeDockerClient is a dummy implementation of the DockerClient interface.
 type fakeDockerClient struct{}
 
-func (f *fakeDockerClient) GetContainer(ctx context.Context, imageName string) (*types.Container, error) {
+func (f *fakeDockerClient) GetContainer(_ context.Context, _ string) (*types.Container, error) {
 	return nil, nil
 }
 
-func (f *fakeDockerClient) PullImage(ctx context.Context, imageName string, tag string) error {
+func (f *fakeDockerClient) PullImage(_ context.Context, _ string, _ string) error {
 	return nil
 }
 
-func (f *fakeDockerClient) RemoveContainerAndImage(ctx context.Context, cont *types.Container) error {
+func (f *fakeDockerClient) RemoveContainerAndImage(_ context.Context, _ *types.Container) error {
 	return nil
 }
 
-func (f *fakeDockerClient) RunImage(ctx context.Context, opts docker.RunImageOptions) (string, error) {
+func (f *fakeDockerClient) RunImage(_ context.Context, _ docker.RunImageOptions) (string, error) {
 	return "fake-container-id", nil
 }
 
-func (f *fakeDockerClient) StopContainer(ctx context.Context, containerID string) error {
+func (f *fakeDockerClient) StopContainer(_ context.Context, _ string) error {
 	return nil
 }
 
@@ -45,17 +45,18 @@ type fakeStrategy struct {
 	deployErr error
 }
 
-func (f fakeStrategy) Deploy(ctx context.Context, input *models.DeployInput) error {
+func (f fakeStrategy) Deploy(_ context.Context, _ *models.DeployInput) error {
 	return f.deployErr
 }
 
+//nolint:gocyclo,funlen // This is a test file, and we can tolerate a few cyclomatic complexities.
 func TestDeploymentHandler(t *testing.T) {
 	// dummyFactory always returns a fakeDockerClient without errors.
-	dummyFactory := func(registryUser *string, registryPass *string) (docker.DockerClient, error) {
+	dummyFactory := func(_ *string, _ *string) (docker.Client, error) {
 		return &fakeDockerClient{}, nil
 	}
 	// dummyStrategyFactory always returns a fakeStrategy with no deployment error.
-	dummyStrategyFactory := func(dc docker.DockerClient) strategies.Strategy {
+	dummyStrategyFactory := func(_ docker.Client) strategies.Strategy {
 		return fakeStrategy{deployErr: nil}
 	}
 
@@ -102,7 +103,7 @@ func TestDeploymentHandler(t *testing.T) {
 		rr := httptest.NewRecorder()
 
 		// errorFactory simulates a failure in creating the Docker client.
-		errorFactory := func(registryUser *string, registryPass *string) (docker.DockerClient, error) {
+		errorFactory := func(_ *string, _ *string) (docker.Client, error) {
 			return nil, errors.New("docker client creation error")
 		}
 		handler := NewHandler(errorFactory, dummyStrategyFactory)
@@ -131,7 +132,7 @@ func TestDeploymentHandler(t *testing.T) {
 		rr := httptest.NewRecorder()
 
 		// return a strategy that fails when deploying.
-		strategyFactoryWithError := func(dc docker.DockerClient) strategies.Strategy {
+		strategyFactoryWithError := func(_ docker.Client) strategies.Strategy {
 			return fakeStrategy{deployErr: errors.New("deployment failure")}
 		}
 		handler := NewHandler(dummyFactory, strategyFactoryWithError)
