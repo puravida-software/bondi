@@ -18,12 +18,36 @@ import (
 	"github.com/docker/go-connections/nat"
 )
 
+type DockerClient interface {
+	GetContainer(ctx context.Context, imageName string) (*types.Container, error)
+	PullImage(ctx context.Context, imageName string, tag string) error
+	RemoveContainerAndImage(ctx context.Context, cont *types.Container) error
+	RunImage(ctx context.Context, opts RunImageOptions) (string, error)
+	StopContainer(ctx context.Context, containerID string) error
+}
+
 type Client struct {
 	apiClient    *client.Client
 	registryAuth *string
 }
 
-func NewDockerClient(client *client.Client, registryUser *string, registryPass *string) (*Client, error) {
+func NewDockerClient(registryUser *string, registryPass *string) (DockerClient, error) {
+	// Set up the Docker client
+	apiClient, err := client.NewClientWithOpts(client.FromEnv)
+	if err != nil {
+		return nil, fmt.Errorf("error creating Docker client: %w", err)
+	}
+	defer apiClient.Close()
+
+	dockerClient, err := NewDockerClientWithClient(apiClient, registryUser, registryPass)
+	if err != nil {
+		return nil, fmt.Errorf("error creating Docker wrapper: %w", err)
+	}
+
+	return dockerClient, nil
+}
+
+func NewDockerClientWithClient(client *client.Client, registryUser *string, registryPass *string) (*Client, error) {
 	if registryUser == nil || registryPass == nil {
 		return &Client{apiClient: client, registryAuth: nil}, nil
 	}

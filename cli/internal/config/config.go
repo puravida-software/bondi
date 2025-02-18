@@ -50,10 +50,14 @@ func ReadConfig() (*BondiConfig, error) {
 	// Convert env vars to a map
 	envMap := envToMap()
 
+	return parseConfig(fileBytes, envMap)
+}
+
+func parseConfig(fileBytes []byte, envMap map[string]string) (*BondiConfig, error) {
 	// Execute the template with env vars
 	var b bytes.Buffer
 	t := template.Must(template.New("config").Parse(string(fileBytes)))
-	err = t.Execute(&b, envMap)
+	err := t.Execute(&b, envMap)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute template: %w", err)
 	}
@@ -78,4 +82,39 @@ func envToMap() map[string]string {
 	}
 
 	return envMap
+}
+
+func SampleConfig(projectName string) BondiConfig {
+	return BondiConfig{
+		UserService: UserService{
+			ImageName:    projectName,
+			Port:         8080, //nolint:mnd // this is a sample config, hardcoding is fine
+			RegistryUser: &[]string{"optional"}[0],
+			RegistryPass: &[]string{"optional"}[0],
+			EnvVars: map[string]string{
+				"ENV": "prod",
+			},
+			Servers: []Server{
+				{
+					IPAddress: "55.55.55.55",
+					SSH: &ServerSSH{
+						User:           "root",
+						PrivateKeyPath: "private_key_path",
+						PrivateKeyPass: "pass",
+					},
+				},
+				{
+					IPAddress: "55.55.55.56",
+					SSH: &ServerSSH{
+						User:           "root",
+						PrivateKeyPath: "private_key_path",
+						PrivateKeyPass: "pass",
+					},
+				},
+			},
+		},
+		BondiServer: BondiServer{
+			Version: "0.0.0",
+		},
+	}
 }

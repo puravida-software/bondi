@@ -6,19 +6,37 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/docker/docker/client"
 	"github.com/puravida-software/bondi/server/deployment"
+	"github.com/puravida-software/bondi/server/deployment/strategies"
+	"github.com/puravida-software/bondi/server/docker"
+	"github.com/puravida-software/bondi/server/health"
 )
 
-func healthCheckHandler(w http.ResponseWriter, _ *http.Request) {
-	w.WriteHeader(http.StatusOK)
+func NewDockerClient(registryUser *string, registryPass *string) (docker.DockerClient, error) {
+	// Set up the Docker client
+	apiClient, err := client.NewClientWithOpts(client.FromEnv)
+	if err != nil {
+		return nil, fmt.Errorf("error creating Docker client: %w", err)
+	}
+	defer apiClient.Close()
+
+	dockerClient, err := docker.NewDockerClient(registryUser, registryPass)
+	if err != nil {
+		return nil, fmt.Errorf("error creating Docker wrapper: %w", err)
+	}
+
+	return dockerClient, nil
 }
 
-// TODO: add a readiness probe
+func NewSimpleDeployment(dockerClient docker.DockerClient) strategies.Strategy {
+	return strategies.NewSimpleDeployment(dockerClient)
+}
 
 func main() {
 	// Set up the /deploy and /health endpoints
-	http.HandleFunc("/deploy", deployment.Handler)
-	http.HandleFunc("/health", healthCheckHandler)
+	http.HandleFunc("/deploy", deployment.NewHandler(NewDockerClient, NewSimpleDeployment))
+	http.HandleFunc("/health", health.NewHandler())
 
 	// Create a server with explicit timeouts
 	server := &http.Server{
