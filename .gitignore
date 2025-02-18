@@ -23,3 +23,5 @@ go.work.sum
 
 */bondi.yaml
 */.env
+
+profile.cov

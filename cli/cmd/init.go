@@ -38,7 +38,7 @@ the necessary configuration files for the service.`,
 		parts := strings.Split(folderPath, "/")
 		folder := parts[len(parts)-1]
 
-		sampleConfig := sampleConfig(folder)
+		sampleConfig := config.SampleConfig(folder)
 
 		bytes, err := yaml.Marshal(sampleConfig)
 		if err != nil {
@@ -53,39 +53,4 @@ the necessary configuration files for the service.`,
 
 		fmt.Println("Bondi initialised successfully!")
 	},
-}
-
-func sampleConfig(projectName string) config.BondiConfig {
-	return config.BondiConfig{
-		UserService: config.UserService{
-			ImageName:    projectName,
-			Port:         8080, //nolint:mnd // this is a sample config, hardcoding is fine
-			RegistryUser: &[]string{"optional"}[0],
-			RegistryPass: &[]string{"optional"}[0],
-			EnvVars: map[string]string{
-				"ENV": "prod",
-			},
-			Servers: []config.Server{
-				{
-					IPAddress: "55.55.55.55",
-					SSH: &config.ServerSSH{
-						User:           "root",
-						PrivateKeyPath: "private_key_path",
-						PrivateKeyPass: "pass",
-					},
-				},
-				{
-					IPAddress: "55.55.55.56",
-					SSH: &config.ServerSSH{
-						User:           "root",
-						PrivateKeyPath: "private_key_path",
-						PrivateKeyPass: "pass",
-					},
-				},
-			},
-		},
-		BondiServer: config.BondiServer{
-			Version: "0.0.0",
-		},
-	}
 }

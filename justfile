@@ -19,3 +19,10 @@ server:
 
 lint:
 	golangci-lint run cli/... server/...
+
+build:
+	go build -v ./cli/... ./server/...
+
+test:
+    go test -v -coverpkg=./cli/...,./server/... -coverprofile=profile.cov ./cli/... ./server/...
+    go tool cover -func profile.cov | tee /dev/stderr | awk 'END{if($3+0 < 15.0) {exit 1}}'

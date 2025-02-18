@@ -1,0 +1,38 @@
+name: pr
+
+on:
+  pull_request:
+    branches:
+      - main
+
+# Cancel any previous runs of this workflow for the same PR.
+concurrency:
+  group: ${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pr:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: extractions/setup-just@v2
+        with:
+          version: "1.37.0"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.24.0
+
+      - name: Init workspace
+        run: go work init ./cli ./server
+
+      - name: Build
+        run: just build
+
+      - name: Test
+        run: just test

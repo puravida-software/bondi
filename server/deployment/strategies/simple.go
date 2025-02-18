@@ -10,10 +10,10 @@ import (
 )
 
 type SimpleDeployment struct {
-	dockerClient *docker.Client
+	dockerClient docker.Client
 }
 
-func NewSimpleDeployment(dockerClient *docker.Client) *SimpleDeployment {
+func NewSimpleDeployment(dockerClient docker.Client) *SimpleDeployment {
 	return &SimpleDeployment{dockerClient: dockerClient}
 }
 
