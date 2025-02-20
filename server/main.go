@@ -7,10 +7,10 @@ import (
 	"time"
 
 	"github.com/docker/docker/client"
-	"github.com/puravida-software/bondi/server/deployment"
-	"github.com/puravida-software/bondi/server/deployment/strategies"
-	"github.com/puravida-software/bondi/server/docker"
-	"github.com/puravida-software/bondi/server/health"
+	"github.com/puravida-software/bondi/server/internal/deployment"
+	"github.com/puravida-software/bondi/server/internal/deployment/strategies"
+	"github.com/puravida-software/bondi/server/internal/docker"
+	"github.com/puravida-software/bondi/server/internal/health"
 )
 
 func NewDockerClient(registryUser *string, registryPass *string) (docker.Client, error) {

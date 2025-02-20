@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/puravida-software/bondi/server/deployment/models"
-	"github.com/puravida-software/bondi/server/docker"
+	"github.com/puravida-software/bondi/server/internal/deployment/models"
+	"github.com/puravida-software/bondi/server/internal/docker"
 )
 
 type SimpleDeployment struct {
