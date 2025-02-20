@@ -7,22 +7,27 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"strconv"
 	"strings"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/client"
-	"github.com/docker/go-connections/nat"
 )
 
 type Client interface {
+	CreateNetwork(ctx context.Context, networkName string) error
 	GetContainer(ctx context.Context, imageName string) (*types.Container, error)
 	PullImage(ctx context.Context, imageName string, tag string) error
 	RemoveContainerAndImage(ctx context.Context, cont *types.Container) error
-	RunImage(ctx context.Context, opts RunImageOptions) (string, error)
+	RunImageWithOpts(
+		ctx context.Context,
+		conf *container.Config,
+		hostConf *container.HostConfig,
+		networkingConf *network.NetworkingConfig,
+	) (string, error)
 	StopContainer(ctx context.Context, containerID string) error
 }
 
@@ -63,6 +68,13 @@ func NewDockerClientWithClient(client *client.Client, registryUser *string, regi
 	registryAuth := base64.StdEncoding.EncodeToString(jsonBytes)
 
 	return &LiveClient{apiClient: client, registryAuth: &registryAuth}, nil
+}
+
+func (c *LiveClient) CreateNetwork(ctx context.Context, networkName string) error {
+	_, err := c.apiClient.NetworkCreate(ctx, networkName, network.CreateOptions{
+		Driver: "bridge",
+	})
+	return err
 }
 
 func (c *LiveClient) GetContainer(ctx context.Context, imageName string) (*types.Container, error) {
@@ -143,29 +155,8 @@ type RunImageOptions struct {
 	EnvVars   map[string]string
 }
 
-func (c *LiveClient) RunImage(ctx context.Context, opts RunImageOptions) (string, error) {
-	newImage := fmt.Sprintf("%s:%s", opts.ImageName, opts.Tag)
-
-	env := []string{}
-	for k, v := range opts.EnvVars {
-		env = append(env, fmt.Sprintf("%s=%s", k, v))
-	}
-
-	conf := container.Config{
-		Image: newImage,
-		Env:   env,
-	}
-	log.Printf("conf: %v", conf)
-	// TODO: allow configuration of port, for blue-green deployments for example
-	hostConf := container.HostConfig{
-		// NetworkMode: "host",
-		PortBindings: map[nat.Port][]nat.PortBinding{
-			nat.Port(fmt.Sprintf("%d/tcp", opts.Port)): {{HostIP: "0.0.0.0", HostPort: strconv.Itoa(opts.Port)}},
-			// TODO: how do we handle ssl?
-			nat.Port("443/tcp"): {{HostIP: "0.0.0.0", HostPort: "443"}},
-		},
-	}
-	newContainer, err := c.apiClient.ContainerCreate(ctx, &conf, &hostConf, nil, nil, "")
+func (c *LiveClient) RunImageWithOpts(ctx context.Context, conf *container.Config, hostConf *container.HostConfig, networkingConf *network.NetworkingConfig) (string, error) {
+	newContainer, err := c.apiClient.ContainerCreate(ctx, conf, hostConf, networkingConf, nil, "")
 	if err != nil {
 		return "", fmt.Errorf("failed to create container: %w", err)
 	}
