@@ -5,7 +5,7 @@ import (
 	"github.com/docker/go-connections/nat"
 )
 
-const _defaultTraefikImage = "traefik:v3.3.0"
+const defaultTraefikImage = "traefik:v3.3.0"
 
 type Config struct {
 	NetworkName  string
@@ -23,12 +23,12 @@ type DockerConfig struct {
 func GetDockerConfig(config Config) *DockerConfig {
 	var image string
 	if config.TraefikImage == "" {
-		image = _defaultTraefikImage
+		image = defaultTraefikImage
 	} else {
 		image = config.TraefikImage
 	}
 
-	// Define Traefik’s container configuration.
+	// Define Traefik's container configuration.
 	containerConfig := &container.Config{
 		Image: image,
 		// Pass CLI args to enable the Docker provider, define entrypoints, redirection, and TLS config.
@@ -36,13 +36,13 @@ func GetDockerConfig(config Config) *DockerConfig {
 			"--providers.docker",
 			"--providers.docker.exposedbydefault=false",
 			"--entrypoints.web.address=:80",
-			"--entrypoints.web.http.redirections.entryPoint.to=websecure",
-			"--entrypoints.web.http.redirections.entryPoint.scheme=https",
-			"--entrypoints.websecure.address=:443",
-			"--certificatesResolvers.bondi_resolver.acme.email=" + config.ACMEEmail,
-			// TODO: what to do with this?
-			"--certificatesResolvers.bondi_resolver.acme.storage=/acme/acme.json",
-			"--certificatesResolvers.bondi_resolver.acme.tlsChallenge=true",
+			// "--entrypoints.web.http.redirections.entryPoint.to=websecure",
+			// "--entrypoints.web.http.redirections.entryPoint.scheme=https",
+			// "--entrypoints.websecure.address=:443",
+			// "--certificatesResolvers.bondi_resolver.acme.email=" + config.ACMEEmail,
+			// // TODO: what to do with this?
+			// "--certificatesResolvers.bondi_resolver.acme.storage=/acme/acme.json",
+			// "--certificatesResolvers.bondi_resolver.acme.tlsChallenge=true",
 		},
 		ExposedPorts: nat.PortSet{
 			"80/tcp":  {},
@@ -63,7 +63,8 @@ func GetDockerConfig(config Config) *DockerConfig {
 		// Mount the Traefik configuration file and ACME storage file if needed.
 		// Update the host paths accordingly.
 		Binds: []string{
-			"/path/to/acme.json:/acme/acme.json", // Must be a file with proper permissions.
+			"/var/run/docker.sock:/var/run/docker.sock", // Mount Docker socket to allow Traefik to discover containers
+			// "/path/to/acme.json:/acme/acme.json", // Must be a file with proper permissions.
 		},
 	}
 

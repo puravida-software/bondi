@@ -6,18 +6,19 @@ import (
 	"log"
 	"log/slog"
 	"strconv"
+	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/go-connections/nat"
 	"github.com/puravida-software/bondi/server/internal/deployment/models"
 	"github.com/puravida-software/bondi/server/internal/docker"
-	"github.com/puravida-software/bondi/server/traefik"
+	"github.com/puravida-software/bondi/server/internal/docker/traefik"
 )
 
 const _defaultNetworkName = "bondi-network"
 
-var _defaultNetworkingConfig = &network.NetworkingConfig{
+var defaultNetworkingConfig = &network.NetworkingConfig{
 	EndpointsConfig: map[string]*network.EndpointSettings{
 		_defaultNetworkName: {},
 	},
@@ -39,6 +40,16 @@ func (s *SimpleDeployment) Deploy(ctx context.Context, input *models.DeployInput
 		err := s.dockerClient.CreateNetwork(ctx, _defaultNetworkName)
 		if err != nil {
 			return fmt.Errorf("error creating network: %w", err)
+		}
+
+		traefikContainerID, err := s.runTraefik(ctx, input)
+		if err != nil {
+			return fmt.Errorf("error running Traefik: %w", err)
+		}
+
+		err = waitForTraefik(ctx, s.dockerClient, traefikContainerID)
+		if err != nil {
+			return fmt.Errorf("error waiting for Traefik to start: %w", err)
 		}
 	} else {
 		slog.Info("Skipping network creation, Traefik is not enabled...")
@@ -73,7 +84,7 @@ func (s *SimpleDeployment) Deploy(ctx context.Context, input *models.DeployInput
 		ctx,
 		conf,
 		hostConf,
-		_defaultNetworkingConfig,
+		defaultNetworkingConfig,
 	)
 	if err != nil {
 		return fmt.Errorf("error running image: %w", err)
@@ -89,40 +100,74 @@ func (s *SimpleDeployment) Deploy(ctx context.Context, input *models.DeployInput
 		slog.Info("Removed old image", "image_id", currentContainer.ImageID)
 	}
 
-	// Run Traefik
-	// TODO: place next to network creation
-	if shouldRunTraefik {
-		traefikConfig := traefik.Config{
-			NetworkName:  _defaultNetworkName,
-			DomainName:   *input.TraefikDomainName,
-			TraefikImage: *input.TraefikImage,
-			ACMEEmail:    *input.TraefikACMEEmail,
-		}
-		dockerConfig := traefik.GetDockerConfig(traefikConfig)
+	return nil
+}
 
-		_, err = s.dockerClient.RunImageWithOpts(
-			ctx,
-			dockerConfig.ContainerConfig,
-			dockerConfig.HostConfig,
-			_defaultNetworkingConfig,
-		)
+func (s *SimpleDeployment) runTraefik(ctx context.Context, input *models.DeployInput) (string, error) {
+	traefikConfig := traefik.Config{
+		NetworkName:  _defaultNetworkName,
+		DomainName:   *input.TraefikDomainName,
+		TraefikImage: *input.TraefikImage,
+		ACMEEmail:    *input.TraefikACMEEmail,
+	}
+	dockerConfig := traefik.GetDockerConfig(traefikConfig)
+
+	containerID, err := s.dockerClient.RunImageWithOpts(
+		ctx,
+		dockerConfig.ContainerConfig,
+		dockerConfig.HostConfig,
+		defaultNetworkingConfig,
+	)
+	if err != nil {
+		return "", err
+	}
+	return containerID, nil
+}
+
+func waitForTraefik(ctx context.Context, dockerClient docker.Client, traefikContainerID string) error {
+	// TODO: configure timeouts
+	// TODO: try using the /ping endpoint instead
+	// Maximum number of retries
+	maxRetries := 30 // 30 seconds timeout
+
+	lastState := ""
+	for i := 0; i < maxRetries; i++ {
+		container, err := dockerClient.GetContainer(ctx, traefikContainerID)
 		if err != nil {
-			return fmt.Errorf("error running Traefik: %w", err)
+			return fmt.Errorf("error inspecting Traefik container: %w", err)
+		}
+
+		slog.Info("Traefik container state", "state", container.State)
+		slog.Info("Traefik container status", "status", container.Status)
+		if container.State == "running" {
+			slog.Info("Traefik is running", "container_id", traefikContainerID)
+			return nil
+		}
+		lastState = container.State
+
+		// Wait for 1 second before next check
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+			continue
 		}
 	}
 
-	return nil
+	return fmt.Errorf("timeout waiting for Traefik to start, last state: %s", lastState)
 }
 
 func ServiceConfig(input *models.DeployInput) (*container.Config, *container.HostConfig) {
 	newImage := fmt.Sprintf("%s:%s", input.ImageName, input.Tag)
 
+	// TODO: enable TLS
 	labels := map[string]string{
-		"traefik.enable":                              "true",
-		"traefik.http.routers.bondi.rule":             "Host(`your.domain.com`)",
-		"traefik.http.routers.bondi.entrypoints":      "websecure",
-		"traefik.http.routers.bondi.tls":              "true",
-		"traefik.http.routers.bondi.tls.certresolver": "bondi_resolver",
+		"traefik.enable":                  "true",
+		"traefik.http.routers.bondi.rule": fmt.Sprintf("Host(`%s`)", *input.TraefikDomainName),
+		// "traefik.http.routers.bondi.entrypoints":      "websecure",
+		"traefik.http.routers.bondi.entrypoints": "web",
+		// "traefik.http.routers.bondi.tls":              "true",
+		// "traefik.http.routers.bondi.tls.certresolver": "bondi_resolver",
 	}
 
 	env := []string{}
