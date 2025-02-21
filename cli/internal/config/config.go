@@ -15,6 +15,13 @@ const ConfigFileName = "bondi.yaml"
 type BondiConfig struct {
 	UserService UserService `yaml:"service"`
 	BondiServer BondiServer `yaml:"bondi_server"`
+	Traefik     Traefik     `yaml:"traefik"`
+}
+
+type Traefik struct {
+	DomainName string `yaml:"domain_name"`
+	Image      string `yaml:"image"`
+	ACMEEmail  string `yaml:"acme_email"`
 }
 
 type Server struct {

@@ -3,7 +3,7 @@ package strategies
 import (
 	"context"
 
-	"github.com/puravida-software/bondi/server/deployment/models"
+	"github.com/puravida-software/bondi/server/internal/deployment/models"
 )
 
 type Strategy interface {

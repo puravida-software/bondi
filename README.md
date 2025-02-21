@@ -43,9 +43,9 @@ Make sure you are inside the project directory, then run:
 
 Edit the `bondi.yaml` file to configure the project.
 
-> Make sure the necessary environment variables exported in your shell.
+> Make sure the necessary environment variables are exported in your shell.
 
-4. Setup the bondi-server
+4. Setup the bondi-server in your server
 
 ```bondi setup```
 
@@ -53,9 +53,16 @@ Edit the `bondi.yaml` file to configure the project.
 
 ```bondi deploy 0.0.1```
 
+## Deployment Strategies
+
+Bondi supports two deployment strategies:
+
+- **Simple**: Pull the new image, stop the old container, and run the new container.
+- **Blue-green (TODO)**: Run the new image in a new container, then change Traefik's routing to point to the new container, then stop the old container.
+
 ## Roadmap
 
-- [ ] Add Traefik for TLS
+- [x] Add Traefik for TLS
 - [ ] Increase coverage to a decent level
 - [ ] Add blue-green deployments
 - [ ] Add a UI/TUI for the server

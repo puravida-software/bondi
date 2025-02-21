@@ -12,9 +12,11 @@ import (
 	"testing"
 
 	"github.com/docker/docker/api/types"
-	"github.com/puravida-software/bondi/server/deployment/models"
-	"github.com/puravida-software/bondi/server/deployment/strategies"
-	"github.com/puravida-software/bondi/server/docker"
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/network"
+	"github.com/puravida-software/bondi/server/internal/deployment/models"
+	"github.com/puravida-software/bondi/server/internal/deployment/strategies"
+	"github.com/puravida-software/bondi/server/internal/docker"
 )
 
 // fakeDockerClient is a dummy implementation of the DockerClient interface.
@@ -32,11 +34,20 @@ func (f *fakeDockerClient) RemoveContainerAndImage(_ context.Context, _ *types.C
 	return nil
 }
 
-func (f *fakeDockerClient) RunImage(_ context.Context, _ docker.RunImageOptions) (string, error) {
+func (f *fakeDockerClient) RunImageWithOpts(
+	_ context.Context,
+	_ *container.Config,
+	_ *container.HostConfig,
+	_ *network.NetworkingConfig,
+) (string, error) {
 	return "fake-container-id", nil
 }
 
 func (f *fakeDockerClient) StopContainer(_ context.Context, _ string) error {
+	return nil
+}
+
+func (f *fakeDockerClient) CreateNetwork(_ context.Context, _ string) error {
 	return nil
 }
 
