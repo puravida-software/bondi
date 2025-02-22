@@ -18,9 +18,11 @@ import (
 )
 
 type Client interface {
-	CreateNetwork(ctx context.Context, networkName string) error
-	GetContainer(ctx context.Context, imageName string) (*types.Container, error)
-	PullImage(ctx context.Context, imageName string, tag string) error
+	CreateNetworkIfNotExists(ctx context.Context, networkName string) error
+	GetContainerByImageName(ctx context.Context, imageName string) (*types.Container, error)
+	GetContainerByID(ctx context.Context, containerID string) (*types.Container, error)
+	PullImageWithAuth(ctx context.Context, imageName string, tag string) error
+	PullImageNoAuth(ctx context.Context, imageName string, tag string) error
 	RemoveContainerAndImage(ctx context.Context, cont *types.Container) error
 	RunImageWithOpts(
 		ctx context.Context,
@@ -70,32 +72,52 @@ func NewDockerClientWithClient(client *client.Client, registryUser *string, regi
 	return &LiveClient{apiClient: client, registryAuth: &registryAuth}, nil
 }
 
-func (c *LiveClient) CreateNetwork(ctx context.Context, networkName string) error {
-	_, err := c.apiClient.NetworkCreate(ctx, networkName, network.CreateOptions{
+func (c *LiveClient) CreateNetworkIfNotExists(ctx context.Context, networkName string) error {
+	networks, err := c.apiClient.NetworkList(ctx, network.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to list networks: %w", err)
+	}
+
+	for _, network := range networks {
+		if network.Name == networkName {
+			return nil
+		}
+	}
+	_, err = c.apiClient.NetworkCreate(ctx, networkName, network.CreateOptions{
 		Driver: "bridge",
 	})
 	return err
 }
 
-func (c *LiveClient) GetContainer(ctx context.Context, imageName string) (*types.Container, error) {
+func (c *LiveClient) GetContainerByImageName(ctx context.Context, imageName string) (*types.Container, error) {
 	containers, err := c.apiClient.ContainerList(ctx, container.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list containers: %w", err)
 	}
 
-	var currentContainer *types.Container
 	for _, container := range containers {
 		if strings.Contains(container.Image, imageName) {
-			currentContainer = &container
-			break
+			return &container, nil
 		}
 	}
-	return currentContainer, nil
+	return nil, nil
 }
 
-func (c *LiveClient) PullImage(ctx context.Context, imageName string, tag string) error {
-	newImage := fmt.Sprintf("%s:%s", imageName, tag)
-	log.Printf("Pulling image: %s", newImage)
+func (c *LiveClient) GetContainerByID(ctx context.Context, containerID string) (*types.Container, error) {
+	containers, err := c.apiClient.ContainerList(ctx, container.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list containers: %w", err)
+	}
+
+	for _, container := range containers {
+		if container.ID == containerID {
+			return &container, nil
+		}
+	}
+	return nil, nil
+}
+
+func (c *LiveClient) PullImageWithAuth(ctx context.Context, imageName string, tag string) error {
 
 	pullOpts := image.PullOptions{}
 	if c.registryAuth != nil {
@@ -104,6 +126,17 @@ func (c *LiveClient) PullImage(ctx context.Context, imageName string, tag string
 	} else {
 		log.Printf("No registry auth")
 	}
+
+	return c.pullImage(ctx, imageName, tag, pullOpts)
+}
+
+func (c *LiveClient) PullImageNoAuth(ctx context.Context, imageName string, tag string) error {
+	return c.pullImage(ctx, imageName, tag, image.PullOptions{})
+}
+
+func (c *LiveClient) pullImage(ctx context.Context, imageName string, tag string, pullOpts image.PullOptions) error {
+	newImage := fmt.Sprintf("%s:%s", imageName, tag)
+	log.Printf("Pulling image: %s", newImage)
 
 	response, err := c.apiClient.ImagePull(ctx, newImage, pullOpts)
 	if err != nil {

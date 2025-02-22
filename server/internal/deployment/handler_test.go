@@ -22,11 +22,19 @@ import (
 // fakeDockerClient is a dummy implementation of the DockerClient interface.
 type fakeDockerClient struct{}
 
-func (f *fakeDockerClient) GetContainer(_ context.Context, _ string) (*types.Container, error) {
+func (f *fakeDockerClient) GetContainerByImageName(_ context.Context, _ string) (*types.Container, error) {
 	return nil, nil
 }
 
-func (f *fakeDockerClient) PullImage(_ context.Context, _ string, _ string) error {
+func (f *fakeDockerClient) GetContainerByID(_ context.Context, _ string) (*types.Container, error) {
+	return nil, nil
+}
+
+func (f *fakeDockerClient) PullImageWithAuth(_ context.Context, _ string, _ string) error {
+	return nil
+}
+
+func (f *fakeDockerClient) PullImageNoAuth(_ context.Context, _ string, _ string) error {
 	return nil
 }
 
@@ -47,7 +55,7 @@ func (f *fakeDockerClient) StopContainer(_ context.Context, _ string) error {
 	return nil
 }
 
-func (f *fakeDockerClient) CreateNetwork(_ context.Context, _ string) error {
+func (f *fakeDockerClient) CreateNetworkIfNotExists(_ context.Context, _ string) error {
 	return nil
 }
 

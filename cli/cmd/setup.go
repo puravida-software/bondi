@@ -53,19 +53,19 @@ installs it otherwise, and runs the Bondi server.`,
 			// Check if Bondi server is already running
 			runningVersion, err := remoteDocker.GetRunningVersion()
 			if err != nil {
-				log.Fatalf("Failed to check if Bondi server is running on %s: %v", server.IPAddress, err)
+				log.Fatalf("Failed to check if bondi-server Docker image is running on %s: %v", server.IPAddress, err)
 			}
 
 			if runningVersion != "" && runningVersion == cfg.BondiServer.Version {
-				fmt.Printf("Bondi server is already running on server %s: %s, skipping...\n", server.IPAddress, runningVersion)
+				fmt.Printf("bondi-server Docker image is already running on server %s: %s, skipping...\n", server.IPAddress, runningVersion)
 				continue
 			} else if runningVersion != "" && runningVersion != cfg.BondiServer.Version {
-				fmt.Printf("Bondi server version mismatch on server %s: running %s, want %s, stopping current server...\n", server.IPAddress, runningVersion, cfg.BondiServer.Version)
+				fmt.Printf("bondi-server Docker image version mismatch on server %s: running %s, want %s, stopping current server to run the new version...\n", server.IPAddress, runningVersion, cfg.BondiServer.Version)
 				err := remoteDocker.Stop()
 				if err != nil {
-					log.Fatalf("Failed to stop Bondi server on %s: %v", server.IPAddress, err)
+					log.Fatalf("Failed to stop bondi-server Docker image on %s: %v", server.IPAddress, err)
 				}
-				fmt.Printf("Stopped Bondi server on server %s\n", server.IPAddress)
+				fmt.Printf("Stopped bondi-server Docker image on server %s\n", server.IPAddress)
 			}
 
 			// Run the Bondi server docker image.
@@ -73,7 +73,7 @@ installs it otherwise, and runs the Bondi server.`,
 			runCmd := "docker run -d --name bondi -p 3030:3030 -v /var/run/docker.sock:/var/run/docker.sock --rm mlopez1506/bondi-server:" + cfg.BondiServer.Version
 			runOutput, err := remoteRun.RemoteRun(runCmd)
 			if err != nil {
-				log.Fatalf("Failed to run Bondi server docker image on server %s: %v. Output: %s", server.IPAddress, err, runOutput)
+				log.Fatalf("Failed to run bondi-server docker image on server %s: %v. Output: %s", server.IPAddress, err, runOutput)
 			}
 			fmt.Printf("bondi-server docker image started on server %s: %s\n", server.IPAddress, runOutput)
 		}

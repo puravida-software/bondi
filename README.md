@@ -67,3 +67,5 @@ Bondi supports two deployment strategies:
 - [ ] Add blue-green deployments
 - [ ] Add a UI/TUI for the server
 - [ ] Add CD pipeline that creates a new release with executables (multiple OSes)
+- [ ] Improve CI pipeline
+    - https://github.com/uber-go/nilaway

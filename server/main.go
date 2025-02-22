@@ -13,6 +13,7 @@ import (
 	"github.com/puravida-software/bondi/server/internal/health"
 )
 
+// TODO: change to struct as opposed to factory functions
 func NewDockerClient(registryUser *string, registryPass *string) (docker.Client, error) {
 	// Set up the Docker client
 	apiClient, err := client.NewClientWithOpts(client.FromEnv)
@@ -34,9 +35,9 @@ func NewSimpleDeployment(dockerClient docker.Client) strategies.Strategy {
 }
 
 func main() {
-	// Set up the /deploy and /health endpoints
-	http.HandleFunc("/deploy", deployment.NewHandler(NewDockerClient, NewSimpleDeployment))
-	http.HandleFunc("/health", health.NewHandler())
+	// Set up the /api/v1 endpoints
+	http.HandleFunc("/api/v1/deploy", deployment.NewHandler(NewDockerClient, NewSimpleDeployment))
+	http.HandleFunc("/api/v1/health", health.NewHandler())
 
 	// Create a server with explicit timeouts
 	server := &http.Server{

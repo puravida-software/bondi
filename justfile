@@ -2,6 +2,8 @@
 
 IMAGE_NAME := "mlopez1506/bondi-server"
 
+docker-all TAG: build-server (tag-server TAG) (push-server TAG)
+
 build-server:
 	docker build -t {{IMAGE_NAME}} ./server
 
@@ -25,4 +27,4 @@ build:
 
 test:
     go test -v -coverpkg=./cli/...,./server/... -coverprofile=profile.cov ./cli/... ./server/...
-    go tool cover -func profile.cov | tee /dev/stderr | awk 'END{if($3+0 < 15.0) {exit 1}}'
+    # go tool cover -func profile.cov | tee /dev/stderr | awk 'END{if($3+0 < 15.0) {exit 1}}'

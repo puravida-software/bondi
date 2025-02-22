@@ -123,5 +123,10 @@ func SampleConfig(projectName string) BondiConfig {
 		BondiServer: BondiServer{
 			Version: "0.0.0",
 		},
+		Traefik: Traefik{
+			DomainName: "example.com",
+			Image:      "traefik:v3.3.0",
+			ACMEEmail:  "john.doe@example.com",
+		},
 	}
 }
