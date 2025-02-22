@@ -15,6 +15,13 @@ const ConfigFileName = "bondi.yaml"
 type BondiConfig struct {
 	UserService UserService `yaml:"service"`
 	BondiServer BondiServer `yaml:"bondi_server"`
+	Traefik     Traefik     `yaml:"traefik"`
+}
+
+type Traefik struct {
+	DomainName string `yaml:"domain_name"`
+	Image      string `yaml:"image"`
+	ACMEEmail  string `yaml:"acme_email"`
 }
 
 type Server struct {
@@ -115,6 +122,11 @@ func SampleConfig(projectName string) BondiConfig {
 		},
 		BondiServer: BondiServer{
 			Version: "0.0.0",
+		},
+		Traefik: Traefik{
+			DomainName: "example.com",
+			Image:      "traefik:v3.3.0",
+			ACMEEmail:  "john.doe@example.com",
 		},
 	}
 }

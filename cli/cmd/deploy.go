@@ -33,12 +33,16 @@ to the configured servers.`,
 			log.Fatalf("Error reading configuration: %v\n", err)
 		}
 
+		// TODO: use the same model for the deploy request payload
 		// Create the deploy request payload
 		payload := map[string]interface{}{
-			"image_name": cfg.UserService.ImageName,
-			"tag":        tag,
-			"port":       cfg.UserService.Port,
-			"env_vars":   cfg.UserService.EnvVars,
+			"image_name":          cfg.UserService.ImageName,
+			"tag":                 tag,
+			"port":                cfg.UserService.Port,
+			"env_vars":            cfg.UserService.EnvVars,
+			"traefik_domain_name": cfg.Traefik.DomainName,
+			"traefik_image":       cfg.Traefik.Image,
+			"traefik_acme_email":  cfg.Traefik.ACMEEmail,
 		}
 
 		// Include the registry credentials if they are provided
@@ -56,7 +60,7 @@ to the configured servers.`,
 
 		// Iterate over all servers defined in the configuration, calling the /deploy endpoint on each.
 		for _, server := range cfg.UserService.Servers {
-			url := fmt.Sprintf("http://%s:3030/deploy", server.IPAddress)
+			url := fmt.Sprintf("http://%s:3030/api/v1/deploy", server.IPAddress)
 			fmt.Printf("Deploying to server: %s at %s\n", server.IPAddress, url)
 
 			req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payloadBytes))

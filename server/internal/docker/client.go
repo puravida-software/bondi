@@ -7,22 +7,24 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"strconv"
 	"strings"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/client"
-	"github.com/docker/go-connections/nat"
 )
 
 type Client interface {
-	GetContainer(ctx context.Context, imageName string) (*types.Container, error)
-	PullImage(ctx context.Context, imageName string, tag string) error
+	CreateNetworkIfNotExists(ctx context.Context, networkName string) error
+	GetContainerByImageName(ctx context.Context, imageName string) (*types.Container, error)
+	GetContainerByID(ctx context.Context, containerID string) (*types.Container, error)
+	PullImageWithAuth(ctx context.Context, imageName string, tag string) error
+	PullImageNoAuth(ctx context.Context, imageName string, tag string) error
 	RemoveContainerAndImage(ctx context.Context, cont *types.Container) error
-	RunImage(ctx context.Context, opts RunImageOptions) (string, error)
+	RunImageWithOpts(ctx context.Context, opts RunImageOptions) (string, error)
 	StopContainer(ctx context.Context, containerID string) error
 }
 
@@ -65,26 +67,52 @@ func NewDockerClientWithClient(client *client.Client, registryUser *string, regi
 	return &LiveClient{apiClient: client, registryAuth: &registryAuth}, nil
 }
 
-func (c *LiveClient) GetContainer(ctx context.Context, imageName string) (*types.Container, error) {
+func (c *LiveClient) CreateNetworkIfNotExists(ctx context.Context, networkName string) error {
+	networks, err := c.apiClient.NetworkList(ctx, network.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to list networks: %w", err)
+	}
+
+	for _, network := range networks {
+		if network.Name == networkName {
+			return nil
+		}
+	}
+	_, err = c.apiClient.NetworkCreate(ctx, networkName, network.CreateOptions{
+		Driver: "bridge",
+	})
+	return err
+}
+
+func (c *LiveClient) GetContainerByImageName(ctx context.Context, imageName string) (*types.Container, error) {
 	containers, err := c.apiClient.ContainerList(ctx, container.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list containers: %w", err)
 	}
 
-	var currentContainer *types.Container
 	for _, container := range containers {
 		if strings.Contains(container.Image, imageName) {
-			currentContainer = &container
-			break
+			return &container, nil
 		}
 	}
-	return currentContainer, nil
+	return nil, nil
 }
 
-func (c *LiveClient) PullImage(ctx context.Context, imageName string, tag string) error {
-	newImage := fmt.Sprintf("%s:%s", imageName, tag)
-	log.Printf("Pulling image: %s", newImage)
+func (c *LiveClient) GetContainerByID(ctx context.Context, containerID string) (*types.Container, error) {
+	containers, err := c.apiClient.ContainerList(ctx, container.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list containers: %w", err)
+	}
 
+	for _, container := range containers {
+		if container.ID == containerID {
+			return &container, nil
+		}
+	}
+	return nil, nil
+}
+
+func (c *LiveClient) PullImageWithAuth(ctx context.Context, imageName string, tag string) error {
 	pullOpts := image.PullOptions{}
 	if c.registryAuth != nil {
 		log.Printf("Using registry auth")
@@ -92,6 +120,17 @@ func (c *LiveClient) PullImage(ctx context.Context, imageName string, tag string
 	} else {
 		log.Printf("No registry auth")
 	}
+
+	return c.pullImage(ctx, imageName, tag, pullOpts)
+}
+
+func (c *LiveClient) PullImageNoAuth(ctx context.Context, imageName string, tag string) error {
+	return c.pullImage(ctx, imageName, tag, image.PullOptions{})
+}
+
+func (c *LiveClient) pullImage(ctx context.Context, imageName string, tag string, pullOpts image.PullOptions) error {
+	newImage := fmt.Sprintf("%s:%s", imageName, tag)
+	log.Printf("Pulling image: %s", newImage)
 
 	response, err := c.apiClient.ImagePull(ctx, newImage, pullOpts)
 	if err != nil {
@@ -137,35 +176,14 @@ func (c *LiveClient) RemoveContainerAndImage(ctx context.Context, cont *types.Co
 }
 
 type RunImageOptions struct {
-	ImageName string
-	Tag       string
-	Port      int
-	EnvVars   map[string]string
+	ContainerName  string
+	Config         *container.Config
+	HostConfig     *container.HostConfig
+	NetworkingConf *network.NetworkingConfig
 }
 
-func (c *LiveClient) RunImage(ctx context.Context, opts RunImageOptions) (string, error) {
-	newImage := fmt.Sprintf("%s:%s", opts.ImageName, opts.Tag)
-
-	env := []string{}
-	for k, v := range opts.EnvVars {
-		env = append(env, fmt.Sprintf("%s=%s", k, v))
-	}
-
-	conf := container.Config{
-		Image: newImage,
-		Env:   env,
-	}
-	log.Printf("conf: %v", conf)
-	// TODO: allow configuration of port, for blue-green deployments for example
-	hostConf := container.HostConfig{
-		// NetworkMode: "host",
-		PortBindings: map[nat.Port][]nat.PortBinding{
-			nat.Port(fmt.Sprintf("%d/tcp", opts.Port)): {{HostIP: "0.0.0.0", HostPort: strconv.Itoa(opts.Port)}},
-			// TODO: how do we handle ssl?
-			nat.Port("443/tcp"): {{HostIP: "0.0.0.0", HostPort: "443"}},
-		},
-	}
-	newContainer, err := c.apiClient.ContainerCreate(ctx, &conf, &hostConf, nil, nil, "")
+func (c *LiveClient) RunImageWithOpts(ctx context.Context, opts RunImageOptions) (string, error) {
+	newContainer, err := c.apiClient.ContainerCreate(ctx, opts.Config, opts.HostConfig, opts.NetworkingConf, nil, opts.ContainerName)
 	if err != nil {
 		return "", fmt.Errorf("failed to create container: %w", err)
 	}
