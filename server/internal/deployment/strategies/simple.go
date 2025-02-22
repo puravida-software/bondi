@@ -3,15 +3,12 @@ package strategies
 import (
 	"context"
 	"fmt"
-	"log"
 	"log/slog"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
-	"github.com/docker/go-connections/nat"
 	"github.com/puravida-software/bondi/server/internal/deployment/models"
 	"github.com/puravida-software/bondi/server/internal/docker"
 	"github.com/puravida-software/bondi/server/internal/docker/traefik"
@@ -80,11 +77,11 @@ func (s *SimpleDeployment) Deploy(ctx context.Context, input *models.DeployInput
 	}
 
 	// Start new container
-	conf, hostConf := ServiceConfig(input)
+	conf := ServiceConfig(input)
 	newContainerID, err := s.dockerClient.RunImageWithOpts(
 		ctx,
 		conf,
-		hostConf,
+		nil,
 		defaultNetworkingConfig,
 	)
 	if err != nil {
@@ -202,7 +199,7 @@ func waitForTraefik(ctx context.Context, dockerClient docker.Client, traefikCont
 	return fmt.Errorf("timeout waiting for Traefik to start, last state: %s", lastState)
 }
 
-func ServiceConfig(input *models.DeployInput) (*container.Config, *container.HostConfig) {
+func ServiceConfig(input *models.DeployInput) *container.Config {
 	newImage := fmt.Sprintf("%s:%s", input.ImageName, input.Tag)
 
 	// TODO: enable TLS
@@ -225,12 +222,6 @@ func ServiceConfig(input *models.DeployInput) (*container.Config, *container.Hos
 		Env:    env,
 		Labels: labels,
 	}
-	log.Printf("conf: %v", conf)
-	hostConf := container.HostConfig{
-		PortBindings: map[nat.Port][]nat.PortBinding{
-			nat.Port(fmt.Sprintf("%d/tcp", input.Port)): {{HostIP: "0.0.0.0", HostPort: strconv.Itoa(input.Port)}},
-		},
-	}
 
-	return &conf, &hostConf
+	return &conf
 }

@@ -60,7 +60,7 @@ to the configured servers.`,
 
 		// Iterate over all servers defined in the configuration, calling the /deploy endpoint on each.
 		for _, server := range cfg.UserService.Servers {
-			url := fmt.Sprintf("http://%s:3030/deploy", server.IPAddress)
+			url := fmt.Sprintf("http://%s:3030/api/v1/deploy", server.IPAddress)
 			fmt.Printf("Deploying to server: %s at %s\n", server.IPAddress, url)
 
 			req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payloadBytes))
