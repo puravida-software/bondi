@@ -113,7 +113,6 @@ func (c *LiveClient) GetContainerByID(ctx context.Context, containerID string) (
 }
 
 func (c *LiveClient) PullImageWithAuth(ctx context.Context, imageName string, tag string) error {
-
 	pullOpts := image.PullOptions{}
 	if c.registryAuth != nil {
 		log.Printf("Using registry auth")

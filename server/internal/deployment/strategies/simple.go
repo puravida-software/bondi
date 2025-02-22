@@ -2,6 +2,7 @@ package strategies
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -135,12 +136,12 @@ func (s *SimpleDeployment) runTraefik(ctx context.Context, input *models.DeployI
 	}
 
 	if input.TraefikImage == nil || input.TraefikDomainName == nil || input.TraefikACMEEmail == nil {
-		return "", fmt.Errorf("missing required Traefik configuration")
+		return "", errors.New("missing required Traefik configuration")
 	}
 
 	// Pull the Traefik image
 	imageAndTag := strings.Split(*input.TraefikImage, ":")
-	if len(imageAndTag) != 2 {
+	if len(imageAndTag) != 2 { //nolint:mnd // we just expected an image:tag
 		return "", fmt.Errorf("invalid Traefik image: %s", *input.TraefikImage)
 	}
 

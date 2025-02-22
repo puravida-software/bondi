@@ -54,7 +54,7 @@ installs it otherwise, and runs the Bondi server.`,
 			// Create ACME file on server if it doesn't exist.
 			acmeDir := "/etc/traefik/acme"
 			acmeFile := acmeDir + "/acme.json"
-			if _, err := remoteRun.RemoteRun(fmt.Sprintf("test -f %s", acmeFile)); err != nil {
+			if _, err := remoteRun.RemoteRun("test -f " + acmeFile); err != nil {
 				// Create directory and file, set ownership to root:root, and set permissions to 600
 				acmeFileOutput, err := remoteRun.RemoteRun(fmt.Sprintf(
 					"sudo mkdir -p %s && "+
