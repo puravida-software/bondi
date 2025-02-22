@@ -52,6 +52,7 @@ func GetDockerConfig(config Config) *DockerConfig {
 			"--certificatesResolvers.bondi_resolver.acme.storage=/acme/acme.json",
 			"--certificatesResolvers.bondi_resolver.acme.httpchallenge=true",
 			"--certificatesResolvers.bondi_resolver.acme.httpchallenge.entrypoint=web",
+			// TODO: is this needed?
 			"--certificatesresolvers.bondi_resolver.acme.dnschallenge.resolvers=1.1.1.1:53,8.8.8.8:53",
 		},
 		ExposedPorts: nat.PortSet{
