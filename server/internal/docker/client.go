@@ -24,12 +24,7 @@ type Client interface {
 	PullImageWithAuth(ctx context.Context, imageName string, tag string) error
 	PullImageNoAuth(ctx context.Context, imageName string, tag string) error
 	RemoveContainerAndImage(ctx context.Context, cont *types.Container) error
-	RunImageWithOpts(
-		ctx context.Context,
-		conf *container.Config,
-		hostConf *container.HostConfig,
-		networkingConf *network.NetworkingConfig,
-	) (string, error)
+	RunImageWithOpts(ctx context.Context, opts RunImageOptions) (string, error)
 	StopContainer(ctx context.Context, containerID string) error
 }
 
@@ -182,14 +177,14 @@ func (c *LiveClient) RemoveContainerAndImage(ctx context.Context, cont *types.Co
 }
 
 type RunImageOptions struct {
-	ImageName string
-	Tag       string
-	Port      int
-	EnvVars   map[string]string
+	ContainerName  string
+	Config         *container.Config
+	HostConfig     *container.HostConfig
+	NetworkingConf *network.NetworkingConfig
 }
 
-func (c *LiveClient) RunImageWithOpts(ctx context.Context, conf *container.Config, hostConf *container.HostConfig, networkingConf *network.NetworkingConfig) (string, error) {
-	newContainer, err := c.apiClient.ContainerCreate(ctx, conf, hostConf, networkingConf, nil, "")
+func (c *LiveClient) RunImageWithOpts(ctx context.Context, opts RunImageOptions) (string, error) {
+	newContainer, err := c.apiClient.ContainerCreate(ctx, opts.Config, opts.HostConfig, opts.NetworkingConf, nil, opts.ContainerName)
 	if err != nil {
 		return "", fmt.Errorf("failed to create container: %w", err)
 	}

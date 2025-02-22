@@ -64,6 +64,13 @@ Bondi supports two deployment strategies:
 
 Use cases:
 - [ ] Redeploy Traefik
+    - e.g. config changed, but same Traefik version
+- [ ] Keep X amount of previous Docker images
+- [ ] Remove old bondi-server containers on the server
+
+Solve:
+- [ ] What to do if deploying the same version again?
+- [ ] Should we hardcode the `www` in the domain name?
 
 Misc:
 - [x] Add Traefik for TLS
@@ -73,3 +80,5 @@ Misc:
 - [ ] Add CD pipeline that creates a new release with executables (multiple OSes)
 - [ ] Improve CI pipeline
     - https://github.com/uber-go/nilaway
+- [ ] Optimise SSH remote execution
+    - e.g. create a single SSH connection and re-use it for multiple commands

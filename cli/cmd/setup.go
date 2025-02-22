@@ -50,17 +50,32 @@ installs it otherwise, and runs the Bondi server.`,
 				fmt.Printf("Docker is already installed on server %s: %s\n", server.IPAddress, versionOutput)
 			}
 
+			// TODO: extract this to a function
 			// Create ACME file on server if it doesn't exist.
 			acmeDir := "/etc/traefik/acme"
 			acmeFile := acmeDir + "/acme.json"
 			if _, err := remoteRun.RemoteRun(fmt.Sprintf("test -f %s", acmeFile)); err != nil {
-				acmeFileOutput, err := remoteRun.RemoteRun(fmt.Sprintf("sudo mkdir -p %s && sudo touch %s && sudo chmod 600 %s", acmeDir, acmeFile, acmeFile))
+				// Create directory and file, set ownership to root:root, and set permissions to 600
+				acmeFileOutput, err := remoteRun.RemoteRun(fmt.Sprintf(
+					"sudo mkdir -p %s && "+
+						"sudo touch %s && "+
+						"sudo chown root:root %s && "+
+						"sudo chmod 600 %s",
+					acmeDir, acmeFile, acmeFile, acmeFile))
 				if err != nil {
 					log.Fatalf("Failed to create ACME file on server %s: %v. Output: %s", server.IPAddress, err, acmeFileOutput)
 				}
 				fmt.Printf("ACME file created on server %s: %s\n", server.IPAddress, acmeFileOutput)
 			} else {
-				fmt.Printf("ACME file already exists on server %s: %s\n", server.IPAddress, acmeFile)
+				// If file exists, ensure it has correct permissions
+				acmeFileOutput, err := remoteRun.RemoteRun(fmt.Sprintf(
+					"sudo chown root:root %s && "+
+						"sudo chmod 600 %s",
+					acmeFile, acmeFile))
+				if err != nil {
+					log.Fatalf("Failed to set permissions on ACME file on server %s: %v. Output: %s", server.IPAddress, err, acmeFileOutput)
+				}
+				fmt.Printf("ACME file permissions updated on server %s: %s\n", server.IPAddress, acmeFile)
 			}
 
 			// Check if Bondi server is already running

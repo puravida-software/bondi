@@ -78,11 +78,15 @@ func (s *SimpleDeployment) Deploy(ctx context.Context, input *models.DeployInput
 
 	// Start new container
 	conf := ServiceConfig(input)
+	opts := docker.RunImageOptions{
+		ContainerName:  "bondi-service",
+		Config:         conf,
+		HostConfig:     nil,
+		NetworkingConf: defaultNetworkingConfig,
+	}
 	newContainerID, err := s.dockerClient.RunImageWithOpts(
 		ctx,
-		conf,
-		nil,
-		defaultNetworkingConfig,
+		opts,
 	)
 	if err != nil {
 		return fmt.Errorf("error running image: %w", err)
@@ -153,11 +157,15 @@ func (s *SimpleDeployment) runTraefik(ctx context.Context, input *models.DeployI
 	}
 	dockerConfig := traefik.GetDockerConfig(traefikConfig)
 
+	opts := docker.RunImageOptions{
+		ContainerName:  "bondi-traefik",
+		Config:         dockerConfig.ContainerConfig,
+		HostConfig:     dockerConfig.HostConfig,
+		NetworkingConf: defaultNetworkingConfig,
+	}
 	containerID, err := s.dockerClient.RunImageWithOpts(
 		ctx,
-		dockerConfig.ContainerConfig,
-		dockerConfig.HostConfig,
-		defaultNetworkingConfig,
+		opts,
 	)
 	if err != nil {
 		return "", fmt.Errorf("error running Traefik container: %w", err)
@@ -204,7 +212,7 @@ func ServiceConfig(input *models.DeployInput) *container.Config {
 
 	labels := map[string]string{
 		"traefik.enable":                              "true",
-		"traefik.http.routers.bondi.rule":             fmt.Sprintf("Host(`%s`)", *input.TraefikDomainName),
+		"traefik.http.routers.bondi.rule":             fmt.Sprintf("Host(`%[1]s`) || Host(`www.%[1]s`)", *input.TraefikDomainName),
 		"traefik.http.routers.bondi.entrypoints":      "websecure",
 		"traefik.http.routers.bondi.tls":              "true",
 		"traefik.http.routers.bondi.tls.certresolver": "bondi_resolver",

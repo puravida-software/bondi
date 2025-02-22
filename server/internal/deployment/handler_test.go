@@ -12,8 +12,6 @@ import (
 	"testing"
 
 	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/network"
 	"github.com/puravida-software/bondi/server/internal/deployment/models"
 	"github.com/puravida-software/bondi/server/internal/deployment/strategies"
 	"github.com/puravida-software/bondi/server/internal/docker"
@@ -44,9 +42,7 @@ func (f *fakeDockerClient) RemoveContainerAndImage(_ context.Context, _ *types.C
 
 func (f *fakeDockerClient) RunImageWithOpts(
 	_ context.Context,
-	_ *container.Config,
-	_ *container.HostConfig,
-	_ *network.NetworkingConfig,
+	_ docker.RunImageOptions,
 ) (string, error) {
 	return "fake-container-id", nil
 }
