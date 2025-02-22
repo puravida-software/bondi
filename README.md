@@ -62,6 +62,10 @@ Bondi supports two deployment strategies:
 
 ## Roadmap
 
+Use cases:
+- [ ] Redeploy Traefik
+
+Misc:
 - [x] Add Traefik for TLS
 - [ ] Increase coverage to a decent level
 - [ ] Add blue-green deployments

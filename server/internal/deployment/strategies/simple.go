@@ -202,14 +202,12 @@ func waitForTraefik(ctx context.Context, dockerClient docker.Client, traefikCont
 func ServiceConfig(input *models.DeployInput) *container.Config {
 	newImage := fmt.Sprintf("%s:%s", input.ImageName, input.Tag)
 
-	// TODO: enable TLS
 	labels := map[string]string{
-		"traefik.enable":                  "true",
-		"traefik.http.routers.bondi.rule": fmt.Sprintf("Host(`%s`)", *input.TraefikDomainName),
-		// "traefik.http.routers.bondi.entrypoints":      "websecure",
-		"traefik.http.routers.bondi.entrypoints": "web",
-		// "traefik.http.routers.bondi.tls":              "true",
-		// "traefik.http.routers.bondi.tls.certresolver": "bondi_resolver",
+		"traefik.enable":                              "true",
+		"traefik.http.routers.bondi.rule":             fmt.Sprintf("Host(`%s`)", *input.TraefikDomainName),
+		"traefik.http.routers.bondi.entrypoints":      "websecure",
+		"traefik.http.routers.bondi.tls":              "true",
+		"traefik.http.routers.bondi.tls.certresolver": "bondi_resolver",
 	}
 
 	env := []string{}

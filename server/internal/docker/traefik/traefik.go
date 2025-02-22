@@ -36,13 +36,12 @@ func GetDockerConfig(config Config) *DockerConfig {
 			"--providers.docker",
 			"--providers.docker.exposedbydefault=false",
 			"--entrypoints.web.address=:80",
-			// "--entrypoints.web.http.redirections.entryPoint.to=websecure",
-			// "--entrypoints.web.http.redirections.entryPoint.scheme=https",
-			// "--entrypoints.websecure.address=:443",
-			// "--certificatesResolvers.bondi_resolver.acme.email=" + config.ACMEEmail,
-			// // TODO: what to do with this?
-			// "--certificatesResolvers.bondi_resolver.acme.storage=/acme/acme.json",
-			// "--certificatesResolvers.bondi_resolver.acme.tlsChallenge=true",
+			"--entrypoints.web.http.redirections.entryPoint.to=websecure",
+			"--entrypoints.web.http.redirections.entryPoint.scheme=https",
+			"--entrypoints.websecure.address=:443",
+			"--certificatesResolvers.bondi_resolver.acme.email=" + config.ACMEEmail,
+			"--certificatesResolvers.bondi_resolver.acme.storage=/acme/acme.json",
+			"--certificatesResolvers.bondi_resolver.acme.tlsChallenge=true",
 		},
 		ExposedPorts: nat.PortSet{
 			"80/tcp":  {},
@@ -64,7 +63,7 @@ func GetDockerConfig(config Config) *DockerConfig {
 		// Update the host paths accordingly.
 		Binds: []string{
 			"/var/run/docker.sock:/var/run/docker.sock", // Mount Docker socket to allow Traefik to discover containers
-			// "/path/to/acme.json:/acme/acme.json", // Must be a file with proper permissions.
+			"/acme/acme.json:/acme/acme.json",           // Must be a file with proper permissions.
 		},
 	}
 
