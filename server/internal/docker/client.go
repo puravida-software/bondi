@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"strings"
 
 	"github.com/docker/docker/api/types"
@@ -85,7 +84,7 @@ func (c *LiveClient) CreateNetworkIfNotExists(ctx context.Context, networkName s
 }
 
 func (c *LiveClient) GetContainerByImageName(ctx context.Context, imageName string) (*types.Container, error) {
-	containers, err := c.apiClient.ContainerList(ctx, container.ListOptions{})
+	containers, err := c.apiClient.ContainerList(ctx, container.ListOptions{All: true})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list containers: %w", err)
 	}
@@ -115,10 +114,7 @@ func (c *LiveClient) GetContainerByID(ctx context.Context, containerID string) (
 func (c *LiveClient) PullImageWithAuth(ctx context.Context, imageName string, tag string) error {
 	pullOpts := image.PullOptions{}
 	if c.registryAuth != nil {
-		log.Printf("Using registry auth")
 		pullOpts.RegistryAuth = *c.registryAuth
-	} else {
-		log.Printf("No registry auth")
 	}
 
 	return c.pullImage(ctx, imageName, tag, pullOpts)
@@ -130,7 +126,6 @@ func (c *LiveClient) PullImageNoAuth(ctx context.Context, imageName string, tag 
 
 func (c *LiveClient) pullImage(ctx context.Context, imageName string, tag string, pullOpts image.PullOptions) error {
 	newImage := fmt.Sprintf("%s:%s", imageName, tag)
-	log.Printf("Pulling image: %s", newImage)
 
 	response, err := c.apiClient.ImagePull(ctx, newImage, pullOpts)
 	if err != nil {
@@ -147,7 +142,6 @@ func (c *LiveClient) pullImage(ctx context.Context, imageName string, tag string
 			}
 			return fmt.Errorf("failed to decode image pull response: %w", err)
 		}
-		fmt.Println(j)
 	}
 
 	return nil

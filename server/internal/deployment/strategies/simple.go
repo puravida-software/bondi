@@ -16,7 +16,11 @@ import (
 	"github.com/puravida-software/bondi/server/internal/docker/traefik"
 )
 
-const _defaultNetworkName = "bondi-network"
+const (
+	_defaultNetworkName = "bondi-network"
+	_serviceName        = "bondi-service"
+	_traefikName        = "bondi-traefik"
+)
 
 var defaultNetworkingConfig = &network.NetworkingConfig{
 	EndpointsConfig: map[string]*network.EndpointSettings{
@@ -62,26 +66,38 @@ func (s *SimpleDeployment) Deploy(ctx context.Context, input *models.DeployInput
 	}
 	if currentContainer == nil {
 		slog.Info("Container not found for image, assuming a fresh deployment...", "image_name", input.ImageName)
+	} else {
+		slog.Info("Container found for image", "container_id", currentContainer.ID)
+	}
+
+	// Stop current container
+	if currentContainer != nil {
+		slog.Info("Stopping current container", "container_id", currentContainer.ID)
+		err = s.dockerClient.StopContainer(ctx, currentContainer.ID)
+		if err != nil {
+			return fmt.Errorf("error stopping container: %w", err)
+		}
+
+		slog.Info("Removing old image", "image_id", currentContainer.ImageID)
+		err = s.dockerClient.RemoveContainerAndImage(ctx, currentContainer)
+		if err != nil {
+			return fmt.Errorf("error removing image: %w", err)
+		}
+	} else {
+		slog.Info("No container found for image, assuming a fresh deployment...", "image_name", input.ImageName)
 	}
 
 	// Pull the new image
+	slog.Info("Pulling new image", "image_name", input.ImageName, "tag", input.Tag)
 	err = s.dockerClient.PullImageWithAuth(ctx, input.ImageName, input.Tag)
 	if err != nil {
 		return fmt.Errorf("error pulling image: %w", err)
 	}
 
-	// Stop current container
-	if currentContainer != nil {
-		err = s.dockerClient.StopContainer(ctx, currentContainer.ID)
-		if err != nil {
-			return fmt.Errorf("error stopping container: %w", err)
-		}
-	}
-
 	// Start new container
 	conf := ServiceConfig(input)
 	opts := docker.RunImageOptions{
-		ContainerName:  "bondi-service",
+		ContainerName:  _serviceName,
 		Config:         conf,
 		HostConfig:     nil,
 		NetworkingConf: defaultNetworkingConfig,
@@ -91,18 +107,9 @@ func (s *SimpleDeployment) Deploy(ctx context.Context, input *models.DeployInput
 		opts,
 	)
 	if err != nil {
-		return fmt.Errorf("error running image: %w", err)
+		return fmt.Errorf("error running image %s: %w", input.ImageName, err)
 	}
 	slog.Info("Started new container", "container_id", newContainerID)
-
-	// Remove old image
-	if currentContainer != nil {
-		err = s.dockerClient.RemoveContainerAndImage(ctx, currentContainer)
-		if err != nil {
-			return fmt.Errorf("error removing image: %w", err)
-		}
-		slog.Info("Removed old image", "image_id", currentContainer.ImageID)
-	}
 
 	return nil
 }
@@ -160,7 +167,7 @@ func (s *SimpleDeployment) runTraefik(ctx context.Context, input *models.DeployI
 	dockerConfig := traefik.GetDockerConfig(traefikConfig)
 
 	opts := docker.RunImageOptions{
-		ContainerName:  "bondi-traefik",
+		ContainerName:  _traefikName,
 		Config:         dockerConfig.ContainerConfig,
 		HostConfig:     dockerConfig.HostConfig,
 		NetworkingConf: defaultNetworkingConfig,
@@ -213,12 +220,11 @@ func ServiceConfig(input *models.DeployInput) *container.Config {
 	newImage := fmt.Sprintf("%s:%s", input.ImageName, input.Tag)
 
 	labels := map[string]string{
-		"traefik.enable":                                       "true",
-		"traefik.http.routers.bondi.rule":                      fmt.Sprintf("Host(`%[1]s`) || Host(`www.%[1]s`)", *input.TraefikDomainName),
-		"traefik.http.routers.bondi.entrypoints":               "websecure",
-		"traefik.http.routers.bondi.tls":                       "true",
-		"traefik.http.routers.bondi.tls.certresolver":          "bondi_resolver",
-		"traefik.http.services.bondi.loadbalancer.server.port": fmt.Sprintf("%d", input.Port),
+		"traefik.enable":                              "true",
+		"traefik.http.routers.bondi.rule":             fmt.Sprintf("Host(`%[1]s`) || Host(`www.%[1]s`)", *input.TraefikDomainName),
+		"traefik.http.routers.bondi.entrypoints":      "websecure",
+		"traefik.http.routers.bondi.tls":              "true",
+		"traefik.http.routers.bondi.tls.certresolver": "bondi_resolver",
 	}
 
 	env := []string{}
