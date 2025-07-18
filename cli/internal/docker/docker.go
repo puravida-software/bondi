@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/puravida-software/bondi/cli/internal/config"
@@ -24,6 +25,26 @@ func (d *RemoteDocker) GetDockerVersion() (string, error) {
 	}
 
 	return versionOutput, nil
+}
+
+func (d *RemoteDocker) Ps() (string, error) {
+	psCmd := "docker ps"
+	psOutput, err := d.remoteRun.RemoteRun(psCmd)
+	if err != nil {
+		return "", err
+	}
+
+	return psOutput, nil
+}
+
+func (d *RemoteDocker) Logs(containerName string) (string, error) {
+	logsCmd := fmt.Sprintf("docker logs %s", containerName)
+	logsOutput, err := d.remoteRun.RemoteRun(logsCmd)
+	if err != nil {
+		return "", err
+	}
+
+	return logsOutput, nil
 }
 
 func (d *RemoteDocker) GetRunningVersion() (string, error) {
