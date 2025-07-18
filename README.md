@@ -53,6 +53,17 @@ Edit the `bondi.yaml` file to configure the project.
 
 ```bondi deploy 0.0.1```
 
+6. Check the status of the deployed service
+
+```bondi status```
+
+## Available Commands
+
+- `bondi init` - Initialize a new Bondi project
+- `bondi setup` - Set up the bondi-server on configured servers
+- `bondi deploy <tag>` - Deploy a service with the specified tag
+- `bondi status` - Get the status of the deployed service on all servers
+
 ## Deployment Strategies
 
 Bondi supports two deployment strategies:

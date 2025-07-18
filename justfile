@@ -2,7 +2,7 @@
 
 IMAGE_NAME := "mlopez1506/bondi-server"
 
-docker-all TAG: build-server (tag-server TAG) (push-server TAG) (update-bondi-version TAG) run-setup run-deploy
+docker-all TAG: build-server (tag-server TAG) (push-server TAG) (update-bondi-version TAG) run-setup run-deploy run-status
 
 build-server:
 	docker build -t {{IMAGE_NAME}} ./server
@@ -29,6 +29,9 @@ test:
     go test -v -coverpkg=./cli/...,./server/... -coverprofile=profile.cov ./cli/... ./server/...
     # go tool cover -func profile.cov | tee /dev/stderr | awk 'END{if($3+0 < 15.0) {exit 1}}'
 
+test-single test='':
+	go test -count=1 -v ./cli/... ./server/... -run {{test}}
+
 update-bondi-version TAG:
     sed -i "s/version: .*/version: {{TAG}}/g" bondi.yaml
 
@@ -37,3 +40,6 @@ run-setup:
 
 run-deploy VERSION='0.0.0':
     go run ./cli/main.go deploy {{VERSION}}
+
+run-status:
+    go run ./cli/main.go status

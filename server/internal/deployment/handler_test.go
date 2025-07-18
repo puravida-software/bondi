@@ -24,6 +24,10 @@ func (f *fakeDockerClient) GetContainerByImageName(_ context.Context, _ string) 
 	return nil, nil
 }
 
+func (f *fakeDockerClient) GetContainerByName(_ context.Context, _ string) (*types.Container, error) {
+	return nil, nil
+}
+
 func (f *fakeDockerClient) GetContainerByID(_ context.Context, _ string) (*types.Container, error) {
 	return nil, nil
 }
@@ -62,6 +66,10 @@ type fakeStrategy struct {
 
 func (f fakeStrategy) Deploy(_ context.Context, _ *models.DeployInput) error {
 	return f.deployErr
+}
+
+func (f *fakeDockerClient) InspectContainer(_ context.Context, _ string) (*types.ContainerJSON, error) {
+	return nil, nil
 }
 
 //nolint:gocyclo,funlen // This is a test file, and we can tolerate a few cyclomatic complexities.
