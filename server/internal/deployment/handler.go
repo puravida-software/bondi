@@ -17,6 +17,7 @@ type (
 	StrategyFactory func(dockerClient docker.Client) strategies.Strategy
 )
 
+// TODO: evaluate naming and design decision for factories.
 func NewHandler(factory ClientFactory, strategyFactory StrategyFactory) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST method

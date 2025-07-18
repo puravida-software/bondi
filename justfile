@@ -30,10 +30,10 @@ test:
     # go tool cover -func profile.cov | tee /dev/stderr | awk 'END{if($3+0 < 15.0) {exit 1}}'
 
 update-bondi-version TAG:
-    sed -i "s/version: .*/version: {{TAG}}/g" cli/bondi.yaml
+    sed -i "s/version: .*/version: {{TAG}}/g" bondi.yaml
 
 run-setup:
-    cd cli && env $(cat .env | xargs) go run ./main.go setup
+    go run ./cli/main.go setup
 
-run-deploy VERSION='0.0.6':
-    cd cli && env $(cat .env | xargs) go run ./main.go deploy {{VERSION}}
+run-deploy VERSION='0.0.0':
+    go run ./cli/main.go deploy {{VERSION}}
