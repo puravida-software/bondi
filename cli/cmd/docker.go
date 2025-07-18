@@ -39,7 +39,7 @@ var dockerPsCmd = &cobra.Command{
 			if err != nil {
 				log.Fatal(err)
 			}
-
+			output += fmt.Sprintf("[docker ps] Server: %s\n", server.IPAddress)
 			output += psOutput
 		}
 		fmt.Print(output)
@@ -74,7 +74,7 @@ var dockerLogsCmd = &cobra.Command{
 				log.Fatal(err)
 			}
 
-			// TODO: format the output to be more readable taking into account the server IP address
+			output += fmt.Sprintf("[docker logs] Server: %s\n", server.IPAddress)
 			output += logsOutput
 		}
 		fmt.Print(output)
