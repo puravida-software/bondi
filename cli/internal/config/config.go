@@ -30,9 +30,9 @@ type Server struct {
 }
 
 type ServerSSH struct {
-	User           string `yaml:"user"`
-	PrivateKeyPath string `yaml:"private_key_path"`
-	PrivateKeyPass string `yaml:"private_key_pass"`
+	User               string `yaml:"user"`
+	PrivateKeyContents string `yaml:"private_key_contents"`
+	PrivateKeyPass     string `yaml:"private_key_pass"`
 }
 
 type UserService struct {
@@ -105,17 +105,17 @@ func SampleConfig(projectName string) BondiConfig {
 				{
 					IPAddress: "55.55.55.55",
 					SSH: &ServerSSH{
-						User:           "root",
-						PrivateKeyPath: "private_key_path",
-						PrivateKeyPass: "pass",
+						User:               "root",
+						PrivateKeyContents: "-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----",
+						PrivateKeyPass:     "pass",
 					},
 				},
 				{
 					IPAddress: "55.55.55.56",
 					SSH: &ServerSSH{
-						User:           "root",
-						PrivateKeyPath: "private_key_path",
-						PrivateKeyPass: "pass",
+						User:               "root",
+						PrivateKeyContents: "-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----",
+						PrivateKeyPass:     "pass",
 					},
 				},
 			},

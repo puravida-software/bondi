@@ -73,6 +73,10 @@ Bondi supports two deployment strategies:
 
 ## Roadmap
 
+Docs:
+- [ ] Add docs for the CLI
+- [ ] Add docs for the server
+
 Use cases:
 - [ ] Subcommands for Docker, e.g. `bondi docker logs`, `bondi docker exec`, `bondi docker ps`
 - [ ] Redeploy Traefik
