@@ -63,6 +63,8 @@ Edit the `bondi.yaml` file to configure the project.
 - `bondi setup` - Set up the bondi-server on configured servers
 - `bondi deploy <tag>` - Deploy a service with the specified tag
 - `bondi status` - Get the status of the deployed service on all servers
+- `bondi docker ps` - Show all containers on all servers
+- `bondi docker logs <container-name>` - Show logs of a container
 
 ## Deployment Strategies
 
