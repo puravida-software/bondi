@@ -19,12 +19,14 @@ import (
 type Client interface {
 	CreateNetworkIfNotExists(ctx context.Context, networkName string) error
 	GetContainerByImageName(ctx context.Context, imageName string) (*types.Container, error)
+	GetContainerByName(ctx context.Context, containerName string) (*types.Container, error)
 	GetContainerByID(ctx context.Context, containerID string) (*types.Container, error)
 	PullImageWithAuth(ctx context.Context, imageName string, tag string) error
 	PullImageNoAuth(ctx context.Context, imageName string, tag string) error
 	RemoveContainerAndImage(ctx context.Context, cont *types.Container) error
 	RunImageWithOpts(ctx context.Context, opts RunImageOptions) (string, error)
 	StopContainer(ctx context.Context, containerID string) error
+	InspectContainer(ctx context.Context, containerID string) (*types.ContainerJSON, error)
 }
 
 type LiveClient struct {
@@ -92,6 +94,22 @@ func (c *LiveClient) GetContainerByImageName(ctx context.Context, imageName stri
 	for _, container := range containers {
 		if strings.Contains(container.Image, imageName) {
 			return &container, nil
+		}
+	}
+	return nil, nil
+}
+
+func (c *LiveClient) GetContainerByName(ctx context.Context, containerName string) (*types.Container, error) {
+	containers, err := c.apiClient.ContainerList(ctx, container.ListOptions{All: true})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list containers: %w", err)
+	}
+
+	for _, container := range containers {
+		for _, name := range container.Names {
+			if strings.TrimPrefix(name, "/") == containerName {
+				return &container, nil
+			}
 		}
 	}
 	return nil, nil
@@ -200,4 +218,12 @@ func (c *LiveClient) StopContainer(ctx context.Context, containerID string) erro
 	}
 
 	return nil
+}
+
+func (c *LiveClient) InspectContainer(ctx context.Context, containerID string) (*types.ContainerJSON, error) {
+	containerJSON, err := c.apiClient.ContainerInspect(ctx, containerID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to inspect container: %w", err)
+	}
+	return &containerJSON, nil
 }
