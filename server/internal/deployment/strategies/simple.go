@@ -10,6 +10,7 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/network"
+	"github.com/docker/go-connections/nat"
 	"github.com/puravida-software/bondi/server/internal/deployment/models"
 	"github.com/puravida-software/bondi/server/internal/docker"
 	"github.com/puravida-software/bondi/server/internal/docker/traefik"
@@ -108,7 +109,7 @@ func (s *SimpleDeployment) Deploy(ctx context.Context, input *models.DeployInput
 
 func (s *SimpleDeployment) runTraefik(ctx context.Context, input *models.DeployInput) (string, error) {
 	// TODO: refactor the handling of running images and rerunning them
-	// Check if Traefik is already running
+	// Check if Traefik is already running by image name
 	currentTraefik, err := s.dockerClient.GetContainerByImageName(ctx, "traefik")
 	if err != nil {
 		return "", fmt.Errorf("error getting Traefik container: %w", err)
@@ -212,11 +213,12 @@ func ServiceConfig(input *models.DeployInput) *container.Config {
 	newImage := fmt.Sprintf("%s:%s", input.ImageName, input.Tag)
 
 	labels := map[string]string{
-		"traefik.enable":                              "true",
-		"traefik.http.routers.bondi.rule":             fmt.Sprintf("Host(`%[1]s`) || Host(`www.%[1]s`)", *input.TraefikDomainName),
-		"traefik.http.routers.bondi.entrypoints":      "websecure",
-		"traefik.http.routers.bondi.tls":              "true",
-		"traefik.http.routers.bondi.tls.certresolver": "bondi_resolver",
+		"traefik.enable":                                       "true",
+		"traefik.http.routers.bondi.rule":                      fmt.Sprintf("Host(`%[1]s`) || Host(`www.%[1]s`)", *input.TraefikDomainName),
+		"traefik.http.routers.bondi.entrypoints":               "websecure",
+		"traefik.http.routers.bondi.tls":                       "true",
+		"traefik.http.routers.bondi.tls.certresolver":          "bondi_resolver",
+		"traefik.http.services.bondi.loadbalancer.server.port": fmt.Sprintf("%d", input.Port),
 	}
 
 	env := []string{}
@@ -224,10 +226,16 @@ func ServiceConfig(input *models.DeployInput) *container.Config {
 		env = append(env, fmt.Sprintf("%s=%s", k, v))
 	}
 
+	// Create exposed ports configuration
+	exposedPorts := nat.PortSet{
+		nat.Port(fmt.Sprintf("%d/tcp", input.Port)): {},
+	}
+
 	conf := container.Config{
-		Image:  newImage,
-		Env:    env,
-		Labels: labels,
+		Image:        newImage,
+		Env:          env,
+		Labels:       labels,
+		ExposedPorts: exposedPorts,
 	}
 
 	return &conf
