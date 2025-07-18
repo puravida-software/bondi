@@ -2,7 +2,7 @@
 
 IMAGE_NAME := "mlopez1506/bondi-server"
 
-docker-all TAG: build-server (tag-server TAG) (push-server TAG) (update-bondi-version TAG) run-setup run-deploy
+docker-all TAG: build-server (tag-server TAG) (push-server TAG) (update-bondi-version TAG) run-setup run-deploy run-status
 
 build-server:
 	docker build -t {{IMAGE_NAME}} ./server
@@ -40,3 +40,6 @@ run-setup:
 
 run-deploy VERSION='0.0.0':
     go run ./cli/main.go deploy {{VERSION}}
+
+run-status:
+    go run ./cli/main.go status
