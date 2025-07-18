@@ -12,7 +12,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// ContainerStatus represents the response from the status endpoint
+// ContainerStatus represents the response from the status endpoint.
 type ContainerStatus struct {
 	ImageName    string    `json:"image_name"`
 	Tag          string    `json:"tag"`
@@ -27,7 +27,7 @@ var statusCmd = &cobra.Command{
 	Short: "Get the status of the bondi_service container",
 	Long: `The status command retrieves information about the bondi_service container
 from all configured servers, including image name, tag, creation time, restart count, and status.`,
-	Run: func(_ *cobra.Command, args []string) {
+	Run: func(_ *cobra.Command, _ []string) {
 		statusPerServer := make(map[string]ContainerStatus)
 
 		cfg, err := config.ReadConfig()
@@ -76,7 +76,7 @@ from all configured servers, including image name, tag, creation time, restart c
 		// Print the status of all servers in JSON format
 		jsonOutput, err := json.MarshalIndent(statusPerServer, "", "    ")
 		if err != nil {
-			log.Printf("Error marshaling status to JSON: %v\n", err)
+			log.Printf("Error marshalling status to JSON: %v\n", err)
 			return
 		}
 		fmt.Println(string(jsonOutput))

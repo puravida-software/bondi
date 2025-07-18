@@ -30,7 +30,10 @@ func TestStatusCommand(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(status)
+		if err := json.NewEncoder(w).Encode(status); err != nil {
+			http.Error(w, "Error encoding response: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}))
 	defer server.Close()
 
@@ -49,7 +52,6 @@ func TestStatusCommand(t *testing.T) {
 }
 
 func TestContainerStatusJSON(t *testing.T) {
-	// Test JSON marshaling/unmarshaling of ContainerStatus
 	original := ContainerStatus{
 		ImageName:    "test-image",
 		Tag:          "v1.0.0",
