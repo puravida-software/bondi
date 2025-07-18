@@ -29,4 +29,5 @@ func init() {
 	rootCmd.AddCommand(setupCmd)
 	rootCmd.AddCommand(deployCmd)
 	rootCmd.AddCommand(statusCmd)
+	rootCmd.AddCommand(dockerCmd)
 }
