@@ -11,14 +11,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// dockerCmd represents the docker command
 var dockerCmd = &cobra.Command{
 	Use:   "docker",
 	Short: "Docker container management commands",
 	Long:  `Docker command provides subcommands to manage Docker containers including listing running containers and viewing logs.`,
 }
 
-// dockerPsCmd represents the docker ps command
 var dockerPsCmd = &cobra.Command{
 	Use:   "ps",
 	Short: "List all running containers",
@@ -39,14 +37,13 @@ var dockerPsCmd = &cobra.Command{
 			if err != nil {
 				log.Fatal(err)
 			}
-			output += fmt.Sprintf("[docker ps] Server: %s\n", server.IPAddress)
+			output += "[docker ps] Server: " + server.IPAddress + "\n"
 			output += psOutput
 		}
 		fmt.Print(output)
 	},
 }
 
-// dockerLogsCmd represents the docker logs command
 var dockerLogsCmd = &cobra.Command{
 	Use:   "logs [container-name]",
 	Short: "Show logs of a container",
@@ -74,7 +71,7 @@ var dockerLogsCmd = &cobra.Command{
 				log.Fatal(err)
 			}
 
-			output += fmt.Sprintf("[docker logs] Server: %s\n", server.IPAddress)
+			output += "[docker logs] Server: " + server.IPAddress + "\n"
 			output += logsOutput
 		}
 		fmt.Print(output)
@@ -82,7 +79,6 @@ var dockerLogsCmd = &cobra.Command{
 }
 
 func init() {
-	// Add subcommands to docker command
 	dockerCmd.AddCommand(dockerPsCmd)
 	dockerCmd.AddCommand(dockerLogsCmd)
 }

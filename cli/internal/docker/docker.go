@@ -1,7 +1,6 @@
 package docker
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/puravida-software/bondi/cli/internal/config"
@@ -38,7 +37,7 @@ func (d *RemoteDocker) Ps() (string, error) {
 }
 
 func (d *RemoteDocker) Logs(containerName string) (string, error) {
-	logsCmd := fmt.Sprintf("docker logs %s", containerName)
+	logsCmd := "docker logs " + containerName
 	logsOutput, err := d.remoteRun.RemoteRun(logsCmd)
 	if err != nil {
 		return "", err
