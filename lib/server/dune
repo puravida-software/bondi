@@ -1,0 +1,3 @@
+(library
+ (name bondi_server)
+ (public_name bondi.server))

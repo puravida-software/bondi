@@ -1,0 +1,3 @@
+(library
+ (name bondi_client)
+ (public_name bondi.client))

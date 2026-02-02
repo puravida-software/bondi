@@ -31,7 +31,7 @@ The CLI:
 
 1. Install the CLI
 
-```go install github.com/puravida-software/bondi/cli```
+TODO
 
 2. Initialise the project
 
@@ -62,9 +62,6 @@ Edit the `bondi.yaml` file to configure the project.
 - `bondi init` - Initialize a new Bondi project
 - `bondi setup` - Set up the bondi-server on configured servers
 - `bondi deploy <tag>` - Deploy a service with the specified tag
-- `bondi status` - Get the status of the deployed service on all servers
-- `bondi docker ps` - Show all containers on all servers
-- `bondi docker logs <container-name>` - Show logs of a container
 
 ## Deployment Strategies
 
@@ -80,7 +77,8 @@ Docs:
 - [ ] Add docs for the server
 
 Use cases:
-- [x] Subcommands for Docker, e.g. `bondi docker logs`, `bondi docker ps`
+- [ ] `bondi status` - Show all containers on all servers
+- [ ] Subcommands for Docker, e.g. `bondi docker logs`, `bondi docker ps`
 - [ ] Redeploy Traefik
     - e.g. config changed, but same Traefik version
 - [ ] Keep X amount of previous Docker images
