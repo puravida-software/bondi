@@ -1,3 +1,6 @@
+(include_subdirs qualified)
+
 (library
  (name bondi_server)
- (public_name bondi.server))
+ (public_name bondi.server)
+ (libraries eio cohttp-eio yojson uri))

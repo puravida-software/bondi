@@ -19,7 +19,7 @@
  (name bondi)
  (synopsis "A short synopsis")
  (description "A longer description")
- (depends ocaml)
+ (depends ocaml eio cohttp-eio yojson uri)
  (tags
   ("add topics" "to describe" your project)))
 
