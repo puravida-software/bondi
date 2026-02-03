@@ -34,6 +34,7 @@
   yojson
   lwt
   uri
+  base64
   ppx_yojson_conv
   ppx_deriving)
  (tags
