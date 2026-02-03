@@ -1,4 +1,4 @@
-hurl-tests: run-status run-health
+hurl-tests: run-status run-health run-deploy
 
 run-status:
     hurl \
@@ -11,3 +11,9 @@ run-health:
     --error-format=long \
     --variable host=${HURL_HOST} \
     hurl_tests/health.hurl
+
+run-deploy:
+    hurl \
+    --error-format=long \
+    --variable host=${HURL_HOST} \
+    hurl_tests/deploy.hurl

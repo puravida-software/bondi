@@ -98,7 +98,7 @@ installs it otherwise, and runs the Bondi server.`,
 
 			// Run the Bondi server docker image.
 			// Adjust the docker run parameters as needed for port mappings, environment variables, etc.
-			runCmd := "docker run -d --name bondi -p 3030:3030 -v /var/run/docker.sock:/var/run/docker.sock --rm mlopez1506/bondi-server:" + cfg.BondiServer.Version
+			runCmd := "docker run -d --name bondi -p 3030:3030 -v /var/run/docker.sock:/var/run/docker.sock --group-add $(stat -c %g /var/run/docker.sock) --rm mlopez1506/bondi-server:" + cfg.BondiServer.Version
 			runOutput, err := remoteRun.RemoteRun(runCmd)
 			if err != nil {
 				log.Fatalf("Failed to run bondi-server docker image on server %s: %v. Output: %s", server.IPAddress, err, runOutput)

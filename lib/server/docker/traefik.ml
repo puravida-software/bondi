@@ -12,7 +12,7 @@ type docker_config = {
   host_config : Client.host_config;
 }
 
-let docker_labels : Client.labels =
+let docker_labels : (string * string) list =
   [
     ("traefik.http.middlewares.acme-http.redirectscheme.permanent", "false");
     ( "traefik.http.routers.acme-http.rule",
@@ -37,9 +37,6 @@ let docker_cmd ~acme_email =
     "--certificatesResolvers.bondi_resolver.acme.httpchallenge.entrypoint=web";
     "--certificatesresolvers.bondi_resolver.acme.dnschallenge.resolvers=1.1.1.1:53,8.8.8.8:53";
   ]
-
-let docker_exposed_ports : Client.exposed_ports =
-  [ ("80/tcp", []); ("443/tcp", []) ]
 
 let docker_port_bindings : Client.port_bindings =
   [
@@ -66,7 +63,6 @@ let get_docker_config (config : config) : docker_config =
       env = None;
       cmd = Some (docker_cmd ~acme_email:config.acme_email);
       entrypoint = None;
-      exposed_ports = Some docker_exposed_ports;
       hostname = None;
       working_dir = None;
       labels = Some docker_labels;

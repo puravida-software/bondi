@@ -14,7 +14,12 @@ let registry_auth (input : Simple.deploy_input) =
 
 let decode_input body =
   try Ok (Simple.deploy_input_of_yojson (Yojson.Safe.from_string body)) with
-  | Yojson.Json_error msg -> Error msg
+  | Yojson.Json_error msg -> Error ("invalid JSON: " ^ msg)
+  | Of_yojson_error (exn, yojson) ->
+      Error
+        (Printf.sprintf "invalid deploy payload: %s (json: %s)"
+           (Printexc.to_string exn)
+           (Yojson.Safe.to_string yojson))
   | exn -> Error (Printexc.to_string exn)
 
 let run_deploy ~clock ~net input =

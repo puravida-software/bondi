@@ -1,4 +1,5 @@
 open Ppx_yojson_conv_lib.Yojson_conv
+open Json_helpers
 
 let ( let* ) = Result.bind
 let default_network_name = "bondi-network"
@@ -9,12 +10,12 @@ type deploy_input = {
   image_name : string;
   tag : string;
   port : int;
-  registry_user : string option; [@yojson.option]
-  registry_pass : string option; [@yojson.option]
-  env_vars : (string * string) list;
-  traefik_domain_name : string option; [@yojson.option]
-  traefik_image : string option; [@yojson.option]
-  traefik_acme_email : string option; [@yojson.option]
+  registry_user : string option;
+  registry_pass : string option;
+  env_vars : string_map option;
+  traefik_domain_name : string option;
+  traefik_image : string option;
+  traefik_acme_email : string option;
 }
 [@@deriving yojson]
 
@@ -39,7 +40,7 @@ let service_config (input : deploy_input) :
   | None -> Error "missing traefik_domain_name for service labels"
   | Some domain_name ->
       let new_image = Printf.sprintf "%s:%s" input.image_name input.tag in
-      let labels : Docker.Client.labels =
+      let labels : string_map =
         [
           ("traefik.enable", "true");
           ( "traefik.http.routers.bondi.rule",
@@ -50,21 +51,13 @@ let service_config (input : deploy_input) :
           ("traefik.http.routers.bondi.tls.certresolver", "bondi_resolver");
         ]
       in
-      let env =
-        match input.env_vars with
-        | [] -> None
-        | env_vars -> Some (env_vars_to_list env_vars)
-      in
-      let exposed_ports : Docker.Client.exposed_ports =
-        [ (Printf.sprintf "%d/tcp" input.port, []) ]
-      in
+      let env = Option.map env_vars_to_list input.env_vars in
       let config : Docker.Client.container_config =
         {
           image = Some new_image;
           env;
           cmd = None;
           entrypoint = None;
-          exposed_ports = Some exposed_ports;
           hostname = None;
           working_dir = None;
           labels = Some labels;
@@ -155,6 +148,14 @@ let wait_for_traefik ~clock ~client ~net ~container_id : (unit, string) result =
       in
       match state with
       | Ok "running" -> Ok ()
+      | Ok "created" ->
+          Docker.Client.start_container client ~net ~container_id;
+          Eio.Time.sleep clock 1.0;
+          loop (attempt + 1) "created"
+      | Ok "exited" ->
+          Docker.Client.start_container client ~net ~container_id;
+          Eio.Time.sleep clock 1.0;
+          loop (attempt + 1) "exited"
       | Ok status ->
           Eio.Time.sleep clock 1.0;
           loop (attempt + 1) status

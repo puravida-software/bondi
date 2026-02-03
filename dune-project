@@ -20,6 +20,8 @@
  (synopsis "A short synopsis")
  (description "A longer description")
  (depends
+  (lwt_ppx
+   (>= 5.9.3))
   (alcotest
    (and
     (>= 1.9.1)

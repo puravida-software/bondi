@@ -1,6 +1,7 @@
 exception Docker_error of string
 
 open Ppx_yojson_conv_lib.Yojson_conv
+open Json_helpers
 
 type t = {
   socket_path : string;
@@ -34,17 +35,24 @@ type restart_policy = {
 }
 [@@deriving yojson]
 
-type empty_object = (string * string) list [@@deriving yojson]
-type exposed_ports = (string * empty_object) list [@@deriving yojson]
-type labels = (string * string) list [@@deriving yojson]
-
 type port_binding = {
   host_ip : string option; [@key "HostIp"] [@yojson.option]
   host_port : string option; [@key "HostPort"] [@yojson.option]
 }
 [@@deriving yojson]
 
-type port_bindings = (string * port_binding list) list [@@deriving yojson]
+type port_bindings = (string * port_binding list) list
+
+let yojson_of_port_bindings bindings =
+  assoc_of_list
+    (fun values -> `List (List.map yojson_of_port_binding values))
+    bindings
+
+let port_bindings_of_yojson json =
+  let open Yojson.Safe.Util in
+  list_of_assoc ~field:"PortBindings"
+    (fun value -> value |> to_list |> List.map port_binding_of_yojson)
+    json
 
 type endpoint_config = {
   aliases : string list option; [@key "Aliases"] [@yojson.option]
@@ -52,17 +60,22 @@ type endpoint_config = {
 }
 [@@deriving yojson]
 
-type endpoints_config = (string * endpoint_config) list [@@deriving yojson]
+type endpoints_config = (string * endpoint_config) list
+
+let yojson_of_endpoints_config configs =
+  assoc_of_list yojson_of_endpoint_config configs
+
+let endpoints_config_of_yojson json =
+  list_of_assoc ~field:"EndpointsConfig" endpoint_config_of_yojson json
 
 type container_config = {
   image : string option; [@key "Image"] [@yojson.option]
   env : string list option; [@key "Env"] [@yojson.option]
   cmd : string list option; [@key "Cmd"] [@yojson.option]
   entrypoint : string list option; [@key "Entrypoint"] [@yojson.option]
-  exposed_ports : exposed_ports option; [@key "ExposedPorts"] [@yojson.option]
   hostname : string option; [@key "Hostname"] [@yojson.option]
   working_dir : string option; [@key "WorkingDir"] [@yojson.option]
-  labels : labels option; [@key "Labels"] [@yojson.option]
+  labels : string_map option; [@key "Labels"] [@yojson.option]
 }
 [@@deriving yojson]
 
@@ -92,10 +105,9 @@ type create_container_request = {
   env : string list option; [@key "Env"] [@yojson.option]
   cmd : string list option; [@key "Cmd"] [@yojson.option]
   entrypoint : string list option; [@key "Entrypoint"] [@yojson.option]
-  exposed_ports : exposed_ports option; [@key "ExposedPorts"] [@yojson.option]
   hostname : string option; [@key "Hostname"] [@yojson.option]
   working_dir : string option; [@key "WorkingDir"] [@yojson.option]
-  labels : labels option; [@key "Labels"] [@yojson.option]
+  labels : string_map option; [@key "Labels"] [@yojson.option]
   host_config : host_config option; [@key "HostConfig"] [@yojson.option]
   networking_config : networking_config option;
       [@key "NetworkingConfig"] [@yojson.option]
@@ -125,6 +137,16 @@ let ensure_success : resp:Cohttp.Response.t -> body_str:string -> unit =
   let status = Cohttp.Response.status resp in
   let code = Cohttp.Code.code_of_status status in
   if code < 200 || code >= 300 then
+    let msg = Printf.sprintf "docker http %d: %s" code (String.trim body_str) in
+    raise (Docker_error msg)
+
+let ensure_success_or_allowed :
+    allowed:int list -> resp:Cohttp.Response.t -> body_str:string -> unit =
+ fun ~allowed ~resp ~body_str ->
+  let status = Cohttp.Response.status resp in
+  let code = Cohttp.Code.code_of_status status in
+  if (code >= 200 && code < 300) || List.mem code allowed then ()
+  else
     let msg = Printf.sprintf "docker http %d: %s" code (String.trim body_str) in
     raise (Docker_error msg)
 
@@ -158,6 +180,35 @@ let call :
       let body_str = read_body_string body in
       ensure_success ~resp:response ~body_str;
       body_str)
+
+let call_allow_status :
+    allowed:int list ->
+    ?headers:Cohttp.Header.t ->
+    ?body:Cohttp_eio.Body.t ->
+    t ->
+    net:_ Eio.Net.t ->
+    Cohttp.Code.meth ->
+    string ->
+    (string * string list) list ->
+    string =
+ fun ~allowed ?(headers = Cohttp.Header.init ()) ?body t ~net meth path query ->
+  with_client ~net (fun ~sw client ->
+      let uri = uri_for t path query in
+      let response, body =
+        Cohttp_eio.Client.call client ~sw ~headers ?body meth uri
+      in
+      let body_str = read_body_string body in
+      ensure_success_or_allowed ~allowed ~resp:response ~body_str;
+      body_str)
+
+let start_container : t -> net:_ Eio.Net.t -> container_id:string -> unit =
+ fun t ~net ~container_id ->
+  let _ =
+    call_allow_status ~allowed:[ 304 ] t ~net `POST
+      ("/containers/" ^ container_id ^ "/start")
+      []
+  in
+  ()
 
 let call_json :
     ?headers:Cohttp.Header.t ->
@@ -300,7 +351,6 @@ let run_image_with_opts : t -> net:_ Eio.Net.t -> run_image_options -> string =
         env = opts.config.env;
         cmd = opts.config.cmd;
         entrypoint = opts.config.entrypoint;
-        exposed_ports = opts.config.exposed_ports;
         hostname = opts.config.hostname;
         working_dir = opts.config.working_dir;
         labels = opts.config.labels;
@@ -315,7 +365,9 @@ let run_image_with_opts : t -> net:_ Eio.Net.t -> run_image_options -> string =
   in
   let json = call_json ~headers ~body t ~net `POST "/containers/create" query in
   let open Yojson.Safe.Util in
-  json |> member "Id" |> to_string
+  let container_id = json |> member "Id" |> to_string in
+  let _ = start_container t ~net ~container_id in
+  container_id
 
 let stop_container : t -> net:_ Eio.Net.t -> container_id:string -> unit =
  fun t ~net ~container_id ->

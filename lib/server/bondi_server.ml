@@ -10,4 +10,4 @@ let run () =
   let* config = Server_config.load () in
   Ok
     ( Lwt_eio.with_event_loop ~clock @@ fun _token ->
-      Lwt_eio.run_eio @@ fun () -> Server.start ~clock ~client ~net config )
+      Lwt_eio.run_lwt @@ fun () -> Server.start ~clock ~client ~net config )
