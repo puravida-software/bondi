@@ -3,4 +3,15 @@
 (library
  (name bondi_server)
  (public_name bondi.server)
- (libraries eio cohttp-eio yojson uri))
+ (libraries
+  eio
+  eio_main
+  lwt_eio
+  cohttp-eio
+  yojson
+  uri
+  dream
+  ppx_deriving.show
+  ppx_yojson_conv)
+ (preprocess
+  (pps ppx_deriving.show ppx_yojson_conv)))

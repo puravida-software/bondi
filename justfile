@@ -1,5 +1,7 @@
 # https://cheatography.com/linux-china/cheat-sheets/justfile/
 
+import "hurl_tests/hurl.just"
+
 IMAGE_NAME := "mlopez1506/bondi-server"
 
 docker-all TAG: build-server (tag-server TAG) (push-server TAG) (update-bondi-version TAG) cli-setup cli-deploy cli-status

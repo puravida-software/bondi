@@ -13,9 +13,14 @@ depends: [
   "dune" {>= "3.20"}
   "ocaml"
   "eio"
+  "eio_main"
+  "lwt_eio"
   "cohttp-eio"
   "yojson"
+  "lwt"
   "uri"
+  "ppx_yojson_conv"
+  "ppx_deriving"
   "odoc" {with-doc}
 ]
 build: [

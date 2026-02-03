@@ -19,7 +19,17 @@
  (name bondi)
  (synopsis "A short synopsis")
  (description "A longer description")
- (depends ocaml eio cohttp-eio yojson uri)
+ (depends
+  ocaml
+  eio
+  eio_main
+  lwt_eio
+  cohttp-eio
+  yojson
+  lwt
+  uri
+  ppx_yojson_conv
+  ppx_deriving)
  (tags
   ("add topics" "to describe" your project)))
 
