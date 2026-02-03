@@ -20,6 +20,12 @@
  (synopsis "A short synopsis")
  (description "A longer description")
  (depends
+  (alcotest
+   (and
+    (>= 1.9.1)
+    :with-test))
+  (dream
+   (>= 1.0.0~alpha8))
   ocaml
   eio
   eio_main
@@ -32,5 +38,3 @@
   ppx_deriving)
  (tags
   ("add topics" "to describe" your project)))
-
-; See the complete stanza docs at https://dune.readthedocs.io/en/stable/reference/dune-project/index.html
