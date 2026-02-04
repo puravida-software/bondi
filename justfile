@@ -41,6 +41,9 @@ update-bondi-version TAG:
 server:
     opam exec -- dune exec bondi-server
 
+cli-init:
+    opam exec -- dune exec bondi-client -- init
+
 cli-setup:
     opam exec -- dune exec bondi-client -- setup
 
