@@ -34,6 +34,7 @@
   eio_main
   lwt_eio
   cohttp-eio
+  mustache
   yaml
   yojson
   lwt

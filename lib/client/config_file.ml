@@ -95,45 +95,12 @@ let env_map () =
   in
   List.filter_map parse_entry entries
 
-let env_value env key = List.assoc_opt key env
-
 let apply_env_template contents =
   let env = env_map () in
-  let length = String.length contents in
-  let buffer = Buffer.create length in
-  let rec find_closing idx =
-    if idx + 1 >= length then None
-    else if contents.[idx] = '}' && contents.[idx + 1] = '}' then Some idx
-    else find_closing (idx + 1)
+  let data =
+    `O (List.map (fun (key, value) -> (key, `String value)) env)
   in
-  let rec loop idx =
-    if idx >= length then ()
-    else if idx + 1 < length && contents.[idx] = '{' && contents.[idx + 1] = '{'
-    then (
-      match find_closing (idx + 2) with
-      | None -> Buffer.add_substring buffer contents idx (length - idx)
-      | Some close_idx ->
-          let token =
-            String.sub contents (idx + 2) (close_idx - (idx + 2)) |> String.trim
-          in
-          let key =
-            if String.length token > 0 && token.[0] = '.' then
-              String.sub token 1 (String.length token - 1) |> String.trim
-            else token
-          in
-          let value =
-            match env_value env key with
-            | Some value -> value
-            | None -> "<no value>"
-          in
-          Buffer.add_string buffer value;
-          loop (close_idx + 2))
-    else (
-      Buffer.add_char buffer contents.[idx];
-      loop (idx + 1))
-  in
-  loop 0;
-  Buffer.contents buffer
+  Mustache.(render (of_string contents) data)
 
 let rec yojson_of_yaml = function
   | `O assoc ->
