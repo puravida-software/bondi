@@ -28,15 +28,18 @@
     :with-test))
   (dream
    (>= 1.0.0~alpha8))
+  cohttp
   ocaml
   eio
   eio_main
   lwt_eio
   cohttp-eio
+  yaml
   yojson
   lwt
   uri
   base64
+  cmdliner
   ppx_yojson_conv
   ppx_deriving)
  (tags

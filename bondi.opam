@@ -14,15 +14,18 @@ depends: [
   "lwt_ppx" {>= "5.9.3"}
   "alcotest" {>= "1.9.1" & with-test}
   "dream" {>= "1.0.0~alpha8"}
+  "cohttp"
   "ocaml"
   "eio"
   "eio_main"
   "lwt_eio"
   "cohttp-eio"
+  "yaml"
   "yojson"
   "lwt"
   "uri"
   "base64"
+  "cmdliner"
   "ppx_yojson_conv"
   "ppx_deriving"
   "odoc" {with-doc}

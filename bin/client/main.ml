@@ -1,1 +1,3 @@
-let () = Bondi_client.run ()
+open Bondi_client
+
+let () = Cli.run ()

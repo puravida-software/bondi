@@ -2,4 +2,17 @@
 
 (library
  (name bondi_client)
- (public_name bondi.client))
+ (public_name bondi.client)
+ (libraries
+  cmdliner
+  cohttp
+  cohttp-eio
+  eio
+  eio_main
+  uri
+  unix
+  yaml
+  yojson
+  ppx_yojson_conv)
+ (preprocess
+  (pps ppx_yojson_conv)))

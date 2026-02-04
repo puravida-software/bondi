@@ -42,10 +42,10 @@ server:
     opam exec -- dune exec bondi-server
 
 cli-setup:
-    go run ./cli/main.go setup
+    opam exec -- dune exec bondi-client -- setup
 
 cli-deploy VERSION='0.0.0':
-    go run ./cli/main.go deploy {{ VERSION }}
+    opam exec -- dune exec bondi-client -- deploy {{ VERSION }}
 
 cli-status:
-    go run ./cli/main.go status
+    opam exec -- dune exec bondi-client -- status

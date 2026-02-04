@@ -62,13 +62,14 @@ Edit the `bondi.yaml` file to configure the project.
 - `bondi init` - Initialize a new Bondi project
 - `bondi setup` - Set up the bondi-server on configured servers
 - `bondi deploy <tag>` - Deploy a service with the specified tag
+- `bondi status` - Get the status of the deployed service on all servers
 
 ## Deployment Strategies
 
-Bondi supports two deployment strategies:
+Bondi will eventually support two deployment strategies:
 
 - **Simple**: Pull the new image, stop the old container, and run the new container.
-- **Blue-green (TODO)**: Run the new image in a new container, then change Traefik's routing to point to the new container, then stop the old container.
+- **Blue-green (TODO)**: Run the new image in a new container, make it's health check passes, change Traefik's routing to point to the new container, then stop the old container.
 
 ## Roadmap
 
