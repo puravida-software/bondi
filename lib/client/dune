@@ -5,6 +5,7 @@
  (public_name bondi.client)
  (libraries
   cmdliner
+  base64
   cohttp
   cohttp-eio
   eio
