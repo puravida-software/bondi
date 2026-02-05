@@ -1,0 +1,18 @@
+(include_subdirs qualified)
+
+(library
+ (name bondi_server)
+ (public_name bondi.server)
+ (libraries
+  eio
+  eio_main
+  lwt_eio
+  cohttp-eio
+  base64
+  yojson
+  uri
+  dream
+  ppx_deriving.show
+  ppx_yojson_conv)
+ (preprocess
+  (pps lwt_ppx ppx_deriving.show ppx_yojson_conv)))

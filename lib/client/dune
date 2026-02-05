@@ -1,0 +1,20 @@
+(include_subdirs qualified)
+
+(library
+ (name bondi_client)
+ (public_name bondi.client)
+ (libraries
+  cmdliner
+  base64
+  cohttp
+  cohttp-eio
+  eio
+  eio_main
+  uri
+  unix
+  mustache
+  yaml
+  yojson
+  ppx_yojson_conv)
+ (preprocess
+  (pps ppx_yojson_conv)))

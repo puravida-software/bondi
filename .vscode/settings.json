@@ -1,0 +1,12 @@
+{
+    "terminal.integrated.profiles.linux": {
+        "Opam Switch (bondi)": {
+            "path": "/usr/bin/zsh",
+            "args": [
+                "-c",
+                "eval $(opam env --set-switch --switch=bondi) && exec zsh"
+            ]
+        }
+    },
+    "terminal.integrated.defaultProfile.linux": "Opam Switch (bondi)"
+}

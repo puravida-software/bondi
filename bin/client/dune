@@ -1,0 +1,4 @@
+(executable
+ (public_name bondi-client)
+ (name main)
+ (libraries bondi_client))

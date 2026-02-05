@@ -1,0 +1,4 @@
+(executable
+ (public_name bondi-server)
+ (name main)
+ (libraries bondi_server))
