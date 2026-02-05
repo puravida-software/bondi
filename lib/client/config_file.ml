@@ -97,9 +97,7 @@ let env_map () =
 
 let apply_env_template contents =
   let env = env_map () in
-  let data =
-    `O (List.map (fun (key, value) -> (key, `String value)) env)
-  in
+  let data = `O (List.map (fun (key, value) -> (key, `String value)) env) in
   Mustache.(render (of_string contents) data)
 
 let rec yojson_of_yaml = function
