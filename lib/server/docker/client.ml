@@ -54,6 +54,15 @@ let port_bindings_of_yojson json =
     (fun value -> value |> to_list |> List.map port_binding_of_yojson)
     json
 
+type exposed_ports = string list
+
+let yojson_of_exposed_ports ports =
+  let entries = List.map (fun port -> (port, ())) ports in
+  assoc_of_list (fun () -> `Assoc []) entries
+
+let exposed_ports_of_yojson json =
+  list_of_assoc ~field:"ExposedPorts" (fun _ -> ()) json |> List.map fst
+
 type endpoint_config = {
   aliases : string list option; [@key "Aliases"] [@yojson.option]
   ipv4_address : string option; [@key "IPv4Address"] [@yojson.option]
@@ -76,6 +85,7 @@ type container_config = {
   hostname : string option; [@key "Hostname"] [@yojson.option]
   working_dir : string option; [@key "WorkingDir"] [@yojson.option]
   labels : string_map option; [@key "Labels"] [@yojson.option]
+  exposed_ports : exposed_ports option; [@key "ExposedPorts"] [@yojson.option]
 }
 [@@deriving yojson]
 
@@ -108,6 +118,7 @@ type create_container_request = {
   hostname : string option; [@key "Hostname"] [@yojson.option]
   working_dir : string option; [@key "WorkingDir"] [@yojson.option]
   labels : string_map option; [@key "Labels"] [@yojson.option]
+  exposed_ports : exposed_ports option; [@key "ExposedPorts"] [@yojson.option]
   host_config : host_config option; [@key "HostConfig"] [@yojson.option]
   networking_config : networking_config option;
       [@key "NetworkingConfig"] [@yojson.option]
@@ -357,6 +368,7 @@ let run_image_with_opts : t -> net:_ Eio.Net.t -> run_image_options -> string =
         hostname = opts.config.hostname;
         working_dir = opts.config.working_dir;
         labels = opts.config.labels;
+        exposed_ports = opts.config.exposed_ports;
         host_config = opts.host_config;
         networking_config = opts.networking_conf;
       }

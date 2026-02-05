@@ -35,7 +35,6 @@ let docker_cmd ~acme_email =
     "--certificatesResolvers.bondi_resolver.acme.storage=/acme/acme.json";
     "--certificatesResolvers.bondi_resolver.acme.httpchallenge=true";
     "--certificatesResolvers.bondi_resolver.acme.httpchallenge.entrypoint=web";
-    "--certificatesresolvers.bondi_resolver.acme.dnschallenge.resolvers=1.1.1.1:53,8.8.8.8:53";
   ]
 
 let docker_port_bindings : Client.port_bindings =
@@ -66,6 +65,7 @@ let get_docker_config (config : config) : docker_config =
       hostname = None;
       working_dir = None;
       labels = Some docker_labels;
+      exposed_ports = Some [ "80/tcp"; "443/tcp" ];
     }
   in
   let host_config : Client.host_config =

@@ -48,7 +48,7 @@ cli-setup:
     opam exec -- dune exec bondi-client -- setup
 
 cli-deploy VERSION='0.0.0':
-    opam exec -- dune exec bondi-client -- deploy {{ VERSION }}
+    opam exec -- dune exec bondi-client -- deploy --redeploy-traefik {{ VERSION }}
 
 cli-status:
     opam exec -- dune exec bondi-client -- status

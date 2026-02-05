@@ -10,6 +10,7 @@ type deploy_payload = {
   traefik_acme_email : string;
   registry_user : string option;
   registry_pass : string option;
+  force_traefik_redeploy : bool option;
 }
 [@@deriving yojson]
 
@@ -41,7 +42,7 @@ let post_deploy ~client ip_address payload =
         (Printf.sprintf "Error calling deploy endpoint on server %s: %s"
            ip_address (Printexc.to_string exn))
 
-let run tag =
+let run tag force_traefik_redeploy =
   print_endline "Deployment process initiated...";
   match Config_file.read () with
   | Error message ->
@@ -59,6 +60,7 @@ let run tag =
           traefik_acme_email = config.traefik.acme_email;
           registry_user = config.user_service.registry_user;
           registry_pass = config.user_service.registry_pass;
+          force_traefik_redeploy = Some force_traefik_redeploy;
         }
       in
       Eio_main.run @@ fun env ->
@@ -97,7 +99,11 @@ let tag_arg =
   let doc = "Deployment tag." in
   Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"TAG" ~doc)
 
+let force_traefik_redeploy_arg =
+  let doc = "Force Traefik to be redeployed to pick up config changes." in
+  Cmdliner.Arg.(value & flag & info [ "redeploy-traefik" ] ~doc)
+
 let cmd =
-  let term = Cmdliner.Term.(const run $ tag_arg) in
+  let term = Cmdliner.Term.(const run $ tag_arg $ force_traefik_redeploy_arg) in
   let info = Cmdliner.Cmd.info "deploy" ~doc:"Deploy a tagged release." in
   Cmdliner.Cmd.v info term

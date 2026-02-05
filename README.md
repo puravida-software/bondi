@@ -26,6 +26,8 @@ The CLI:
 - SSH access to the server and `~/.ssh/known_hosts` file configured
 - A Docker image for your service
 - Go installed on your local machine (until we release binaries)
+- DNS `A/AAAA` records pointing your domain to the server IP
+- Firewall/security groups allow inbound `80/tcp` and `443/tcp` for Traefik
 
 ## Usage (WIP)
 
@@ -47,12 +49,11 @@ Edit the `bondi.yaml` file to configure the project.
 
 4. Setup the bondi-orchestrator in your server, this will install and run:
 - Docker
-- Traefik
 - the Bondi orchestrator
 
 ```bondi setup```
 
-5. Deploy your workload
+5. Deploy your workload (this will also start Traefik)
 
 ```bondi deploy 0.0.1```
 
@@ -83,7 +84,7 @@ Docs:
 Use cases:
 - [x] `bondi status` - Show all containers on all servers
 - [x] Subcommands for Docker, e.g. `bondi docker logs`, `bondi docker ps`
-- [ ] Redeploy Traefik
+- [x] Redeploy Traefik
     - e.g. config changed, but same Traefik version
 - [ ] Keep X amount of previous Docker images
 - [ ] Remove old bondi-orchestrator containers on the server
@@ -96,9 +97,7 @@ Misc:
 - [x] Add Traefik for TLS
 - [ ] Increase coverage to a decent level
 - [ ] Add blue-green deployments
-- [ ] Add a UI/TUI for the server
 - [ ] Add CD pipeline that creates a new release with executables (multiple OSes)
-- [ ] Improve CI pipeline
-    - https://github.com/uber-go/nilaway
 - [ ] Optimise SSH remote execution
     - e.g. create a single SSH connection and re-use it for multiple commands
+- [ ] Add a UI/TUI for the server

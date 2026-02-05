@@ -16,6 +16,7 @@ type deploy_input = {
   traefik_domain_name : string option;
   traefik_image : string option;
   traefik_acme_email : string option;
+  force_traefik_redeploy : bool option;
 }
 [@@deriving yojson]
 
@@ -61,11 +62,15 @@ let service_config (input : deploy_input) :
           hostname = None;
           working_dir = None;
           labels = Some labels;
+          exposed_ports = None;
         }
       in
       Ok config
 
 let run_traefik ~client ~net (input : deploy_input) : (string, string) result =
+  let force_redeploy =
+    Option.value ~default:false input.force_traefik_redeploy
+  in
   let current_traefik =
     Docker.Client.get_container_by_image_name client ~net ~image_name:"traefik"
   in
@@ -82,16 +87,21 @@ let run_traefik ~client ~net (input : deploy_input) : (string, string) result =
   let* existing_id =
     match current_traefik with
     | Some container ->
-        let current_version =
-          match parse_image_and_tag container.image with
-          | Ok (_name, tag) -> tag
-          | Error _ -> ""
-        in
-        if current_version = requested_version then Ok (Some container.id)
-        else (
+        if force_redeploy then (
           Docker.Client.stop_container client ~net ~container_id:container.id;
           Docker.Client.remove_container_and_image client ~net ~container;
           Ok None)
+        else
+          let current_version =
+            match parse_image_and_tag container.image with
+            | Ok (_name, tag) -> tag
+            | Error _ -> ""
+          in
+          if current_version = requested_version then Ok (Some container.id)
+          else (
+            Docker.Client.stop_container client ~net ~container_id:container.id;
+            Docker.Client.remove_container_and_image client ~net ~container;
+            Ok None)
     | None -> Ok None
   in
   match existing_id with
