@@ -83,7 +83,7 @@ let run_remote_docker ~user ~host ~key_path cmd =
 let get_running_version ~user ~host ~key_path =
   match
     run_remote_docker ~user ~host ~key_path
-      "ps --filter name=bondi --format '{{.Image}}'"
+      "ps --filter name=^/bondi$ --format '{{.Image}}'"
   with
   | Error _ as err -> err
   | Ok output ->

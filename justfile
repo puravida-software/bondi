@@ -4,7 +4,7 @@ import "hurl_tests/hurl.just"
 
 IMAGE_NAME := "mlopez1506/bondi-server"
 
-docker-all TAG: (build-server TAG) (tag-server TAG) (push-server TAG) (update-bondi-version TAG) cli-setup cli-deploy cli-status
+docker-all TAG VERSION: (build-server TAG) (tag-server TAG) (push-server TAG) (update-bondi-version TAG) cli-setup (cli-deploy VERSION) (cli-status)
 
 build-server TAG:
     docker build --build-arg VERSION={{ TAG }} -t {{ IMAGE_NAME }} .

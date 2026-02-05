@@ -136,7 +136,7 @@ let ensure_success : resp:Cohttp.Response.t -> body_str:string -> unit =
  fun ~resp ~body_str ->
   let status = Cohttp.Response.status resp in
   let code = Cohttp.Code.code_of_status status in
-  if code < 200 || code >= 300 then
+  if code < 200 || (code >= 300 && code <> 304) then
     let msg = Printf.sprintf "docker http %d: %s" code (String.trim body_str) in
     raise (Docker_error msg)
 
@@ -319,7 +319,10 @@ let pull_image :
     | None -> Cohttp.Header.init ()
     | Some auth -> Cohttp.Header.init_with "X-Registry-Auth" auth
   in
-  let _ = call ~headers t ~net `POST "/images/create" query in
+  let _ =
+    call_allow_status ~allowed:[ 304 ] ~headers t ~net `POST "/images/create"
+      query
+  in
   ()
 
 let pull_image_with_auth :
