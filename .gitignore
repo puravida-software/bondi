@@ -1,6 +1,7 @@
 # Custom files
 **/bondi.yaml
 **/*.env
+legacy/
 
 # Ocaml standard
 *.annot
