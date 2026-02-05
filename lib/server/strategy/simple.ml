@@ -3,7 +3,7 @@ open Json_helpers
 
 let ( let* ) = Result.bind
 let default_network_name = "bondi-network"
-let service_name = "bondi-service"
+let service_name = "bondi-workload"
 let traefik_name = "bondi-traefik"
 
 type deploy_input = {

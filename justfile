@@ -16,7 +16,7 @@ push-server TAG:
     docker push {{ IMAGE_NAME }}:{{ TAG }}
 
 server-docker:
-    docker run --group-add $(stat -c %g /var/run/docker.sock) --name bondi-server -p 3030:3030 -v /var/run/docker.sock:/var/run/docker.sock --rm {{ IMAGE_NAME }}
+    docker run --group-add $(stat -c %g /var/run/docker.sock) --name bondi-orchestrator -p 3030:3030 -v /var/run/docker.sock:/var/run/docker.sock --rm {{ IMAGE_NAME }}
 
 lint-doc:
     opam exec -- dune build @doc

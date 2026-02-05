@@ -19,7 +19,7 @@ let load_status ~client ~net =
   Lwt_eio.run_eio @@ fun () ->
   match
     Docker.Client.get_container_by_name client ~net
-      ~container_name:"bondi-service"
+      ~container_name:"bondi-workload"
   with
   | None -> Error (`Not_found "Container not found")
   | Some container -> (

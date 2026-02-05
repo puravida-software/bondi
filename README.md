@@ -17,7 +17,7 @@ The server:
 
 The CLI:
 - installs Docker on the server if it's not already installed
-- pulls and runs the bondi-server Docker image
+- pulls and runs the bondi-orchestrator Docker image
 - triggers deployments of your service's Docker image to the server
 
 ## Prerequisites
@@ -33,36 +33,39 @@ The CLI:
 
 TODO
 
-2. Initialise the project
+2. Initialise the project config file
 
 Make sure you are inside the project directory, then run:
 
 ```bondi init```
 
-3. Configure the project
+3. Configure the project config file as needed:
 
 Edit the `bondi.yaml` file to configure the project.
 
 > Make sure the necessary environment variables are exported in your shell.
 
-4. Setup the bondi-server in your server
+4. Setup the bondi-orchestrator in your server, this will install and run:
+- Docker
+- Traefik
+- the Bondi orchestrator
 
 ```bondi setup```
 
-5. Deploy the project
+5. Deploy your workload
 
 ```bondi deploy 0.0.1```
 
-6. Check the status of the deployed service
+6. Check the status of the deployed workload
 
 ```bondi status```
 
 ## Available Commands
 
 - `bondi init` - Initialize a new Bondi project
-- `bondi setup` - Set up the bondi-server on configured servers
-- `bondi deploy <tag>` - Deploy a service with the specified tag
-- `bondi status` - Get the status of the deployed service on all servers
+- `bondi setup` - Set up the bondi-orchestrator on configured servers
+- `bondi deploy <tag>` - Deploy your workload with the specified tag
+- `bondi status` - Get the status of the deployed workload on all servers
 
 ## Deployment Strategies
 
@@ -78,12 +81,12 @@ Docs:
 - [ ] Add docs for the server
 
 Use cases:
-- [ ] `bondi status` - Show all containers on all servers
-- [ ] Subcommands for Docker, e.g. `bondi docker logs`, `bondi docker ps`
+- [x] `bondi status` - Show all containers on all servers
+- [x] Subcommands for Docker, e.g. `bondi docker logs`, `bondi docker ps`
 - [ ] Redeploy Traefik
     - e.g. config changed, but same Traefik version
 - [ ] Keep X amount of previous Docker images
-- [ ] Remove old bondi-server containers on the server
+- [ ] Remove old bondi-orchestrator containers on the server
 
 Solve:
 - [ ] What to do if deploying the same version again?

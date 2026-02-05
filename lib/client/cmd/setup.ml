@@ -83,7 +83,7 @@ let run_remote_docker ~user ~host ~key_path cmd =
 let get_running_version ~user ~host ~key_path =
   match
     run_remote_docker ~user ~host ~key_path
-      "ps --filter name=^/bondi$ --format '{{.Image}}'"
+      "ps --filter name=^/bondi-orchestrator$ --format '{{.Image}}'"
   with
   | Error _ as err -> err
   | Ok output ->
@@ -177,27 +177,31 @@ let setup_server config server =
             if running <> "" && running = config.bondi_server.version then (
               print_endline
                 (Printf.sprintf
-                   "bondi-server Docker image is already running on server %s: \
-                    %s, skipping..."
+                   "bondi-orchestrator container is already running on server \
+                    %s: %s, skipping..."
                    ip_address running);
               Ok `Skip)
             else if running <> "" then (
               print_endline
                 (Printf.sprintf
-                   "bondi-server Docker image version mismatch on server %s: \
-                    running %s, want %s, stopping current server to run the \
-                    new version..."
+                   "bondi-orchestrator container version mismatch on server \
+                    %s: running %s, want %s, stopping current server to run \
+                    the new version..."
                    ip_address running config.bondi_server.version);
-              let* _ = run_remote_docker ~user ~host ~key_path "stop bondi" in
+              let* _ =
+                run_remote_docker ~user ~host ~key_path
+                  "stop bondi-orchestrator"
+              in
               print_endline
-                (Printf.sprintf "Stopped bondi-server Docker image on server %s"
+                (Printf.sprintf
+                   "Stopped bondi-orchestrator container on server %s"
                    ip_address);
               Ok `Run)
             else Ok `Run
           in
           let run_server () =
             let run_cmd =
-              "docker run -d --name bondi -p 3030:3030 -v \
+              "docker run -d --name bondi-orchestrator -p 3030:3030 -v \
                /var/run/docker.sock:/var/run/docker.sock --group-add $(stat -c \
                %g /var/run/docker.sock) --rm mlopez1506/bondi-server:"
               ^ config.bondi_server.version
@@ -205,8 +209,8 @@ let setup_server config server =
             let* output = remote_run ~user ~host ~key_path run_cmd in
             print_endline
               (Printf.sprintf
-                 "bondi-server docker image started on server %s: %s" ip_address
-                 (String.trim output));
+                 "bondi-orchestrator container started on server %s: %s"
+                 ip_address (String.trim output));
             Ok ()
           in
           match ensure_docker () with
