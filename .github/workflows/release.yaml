@@ -1,0 +1,46 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release-cli:
+    name: build-${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux-x86_64
+          - os: macos-14
+            platform: macos-arm64
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: extractions/setup-just@v3
+        with:
+          just-version: '1.46.0'
+      - uses: ./.github/actions/ocaml-deps
+
+      - name: Build CLI
+        run: |
+          opam exec -- dune build @install
+          opam exec -- dune install --prefix "$PWD/_build/install"
+
+      - name: Package artifact
+        run: |
+          dist_dir="$PWD/dist"
+          mkdir -p "$dist_dir"
+          install -m 755 "_build/install/default/bin/bondi-client" "$dist_dir/bondi"
+          tar -czf "bondi-${{ matrix.platform }}.tar.gz" -C "$dist_dir" bondi
+
+      - name: Publish release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: bondi-${{ matrix.platform }}.tar.gz

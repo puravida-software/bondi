@@ -18,14 +18,13 @@ The server:
 The CLI:
 - installs Docker on the server if it's not already installed
 - pulls and runs the bondi-orchestrator Docker image
-- triggers deployments of your service's Docker image to the server
+- triggers deployments of your service/workload's Docker image to the server
 
 ## Prerequisites
 
 - A server with a public IP address
 - SSH access to the server and `~/.ssh/known_hosts` file configured
-- A Docker image for your service
-- Go installed on your local machine (until we release binaries)
+- A Docker image for your service/workload
 - DNS `A/AAAA` records pointing your domain to the server IP
 - Firewall/security groups allow inbound `80/tcp` and `443/tcp` for Traefik
 
