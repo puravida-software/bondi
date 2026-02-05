@@ -52,3 +52,9 @@ cli-deploy VERSION='0.0.0':
 
 cli-status:
     opam exec -- dune exec bondi-client -- status
+
+cli-ps:
+    opam exec -- dune exec bondi-client -- docker ps
+
+cli-logs CONTAINER_NAME:
+    opam exec -- dune exec bondi-client -- docker logs {{ CONTAINER_NAME }}
