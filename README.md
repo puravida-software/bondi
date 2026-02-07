@@ -30,9 +30,13 @@ The CLI:
 
 ## Usage (WIP)
 
-1. Install the CLI
+1. Install the CLI (Homebrew)
 
-TODO
+```bash
+brew tap puravida-software/homebrew-bondi
+brew install bondi
+brew upgrade bondi
+```
 
 2. Initialise the project config file
 
