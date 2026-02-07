@@ -58,3 +58,11 @@ cli-ps:
 
 cli-logs CONTAINER_NAME:
     opam exec -- dune exec bondi-client -- docker logs {{ CONTAINER_NAME }}
+
+# Versioning
+
+version:
+	cz version -p
+
+next-version:
+	cz bump --dry-run | grep tag | sed 's/tag to create: v\(.*\)/\1/'

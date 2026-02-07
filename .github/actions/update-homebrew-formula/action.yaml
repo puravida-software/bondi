@@ -1,0 +1,71 @@
+name: update-homebrew-formula
+description: Update Homebrew formula with new version and checksums
+
+inputs:
+  version:
+    description: 'Version to update in the formula'
+    required: true
+  artifacts-path:
+    description: 'Path to directory containing the release artifacts'
+    required: true
+  formula-path:
+    description: 'Path to the homebrew formula file'
+    required: true
+  dry-run:
+    description: 'Whether to show diff instead of updating in place'
+    required: false
+    default: 'false'
+  original-formula-path:
+    description: 'Path to original formula file (for dry-run diff comparison)'
+    required: false
+    default: ''
+
+runs:
+  using: "composite"
+  steps:
+    - name: Calculate checksums
+      shell: bash
+      run: |
+        export LINUX_SHA
+        export MAC_SHA
+        LINUX_SHA="$(sha256sum "${{ inputs.artifacts-path }}/bondi-linux-x86_64"*".tar.gz" | awk '{print $1}')"
+        MAC_SHA="$(sha256sum "${{ inputs.artifacts-path }}/bondi-macos-arm64"*".tar.gz" | awk '{print $1}')"
+        echo "LINUX_SHA=$LINUX_SHA" >> $GITHUB_ENV
+        echo "MAC_SHA=$MAC_SHA" >> $GITHUB_ENV
+
+    - name: Update formula
+      shell: bash
+      run: |
+        python - <<'PY'
+        import os
+        import re
+
+        formula_path = "${{ inputs.formula-path }}"
+        version = "${{ inputs.version }}"
+        linux_sha = os.environ["LINUX_SHA"]
+        mac_sha = os.environ["MAC_SHA"]
+
+        with open(formula_path, "r", encoding="utf-8") as f:
+          data = f.read()
+
+        data = re.sub(r'version\s+"[^"]+"', f'version "{version}"', data)
+        data = re.sub(
+          r'(url\s+"[^"]*bondi-linux-x86_64\.tar\.gz"\s*\n\s*sha256\s+")([^"]+)(")',
+          lambda m: m.group(1) + linux_sha + m.group(3),
+          data,
+        )
+        data = re.sub(
+          r'(url\s+"[^"]*bondi-macos-arm64\.tar\.gz"\s*\n\s*sha256\s+")([^"]+)(")',
+          lambda m: m.group(1) + mac_sha + m.group(3),
+          data,
+        )
+
+        with open(formula_path, "w", encoding="utf-8") as f:
+          f.write(data)
+        PY
+
+    - name: Show formula diff
+      if: inputs.dry-run == 'true' && inputs.original-formula-path != ''
+      shell: bash
+      run: |
+        diff -u "${{ inputs.original-formula-path }}" "${{ inputs.formula-path }}" || true
