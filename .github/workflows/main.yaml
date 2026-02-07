@@ -10,9 +10,8 @@ concurrency:
   group: main
 
 jobs:
-  unit-tests:
+  main:
     runs-on: ubuntu-latest
-    if: contains(github.event.pull_request.labels.*.name, 'ready')
 
     steps:
       - uses: actions/checkout@v6
@@ -27,16 +26,15 @@ jobs:
       - name: Test
         run: just test
 
+      - name: Set release tag
+        run: |
+          NEXT_VERSION=$(just next-version)
+          echo "RELEASE_VERSION=${NEXT_VERSION}" >> $GITHUB_ENV
+          echo "RELEASE_TAG=v${NEXT_VERSION}" >> $GITHUB_ENV
 
-    - name: Set release tag
-      run: |
-        NEXT_VERSION=$(just next-version)
-        echo "RELEASE_VERSION=${NEXT_VERSION}" >> $GITHUB_ENV
-        echo "RELEASE_TAG=v${NEXT_VERSION}" >> $GITHUB_ENV
-
-    - name: Create GH release
-      uses: softprops/action-gh-release@v1
-      with:
-        generate_release_notes: true
-        token: ${{ secrets.PAT_GITHUB }}
-        tag_name: ${{ env.RELEASE_TAG }}
+      - name: Create GH release
+        uses: softprops/action-gh-release@v1
+        with:
+          generate_release_notes: true
+          token: ${{ secrets.PAT_GITHUB }}
+          tag_name: ${{ env.RELEASE_TAG }}
