@@ -5,12 +5,12 @@ runs:
   using: "composite"
 
   steps:
-      - uses: ocaml/setup-ocaml@v3
-        with:
-          ocaml-compiler: 5.3.0
-          dune-cache: true
-          cache-prefix: v1
+    - uses: ocaml/setup-ocaml@v3
+      with:
+        ocaml-compiler: 5.3.0
+        dune-cache: true
+        cache-prefix: v1
 
-      - name: Install dependencies
-        run: opam install -y --deps-only -t . -j 4
-        shell: bash
+    - name: Install dependencies
+      run: opam install -y --deps-only -t . -j 4
+      shell: bash
