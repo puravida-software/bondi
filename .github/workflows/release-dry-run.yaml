@@ -1,81 +1,88 @@
 name: release-dry-run
 
 on:
-    pull_request:
-        types:
-            - opened
-            - synchronize
-            - reopened
-            - labeled
-        branches:
-            - main
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - labeled
+    branches:
+      - main
 
 jobs:
-    build-cli:
-        name: build-${{ matrix.platform }}
-        runs-on: ${{ matrix.os }}
-        strategy:
-            fail-fast: false
-            matrix:
-                include:
-                    - os: ubuntu-22.04
-                      platform: linux-x86_64
-                    - os: macos-14
-                      platform: macos-arm64
-        steps:
-            - uses: actions/checkout@v6
-            - uses: extractions/setup-just@v3
-              with:
-                  just-version: "1.46.0"
-            - uses: ./.github/actions/ocaml-deps
+  build-cli:
+    name: build-${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux-x86_64
+          - os: macos-14
+            platform: macos-arm64
+    steps:
+      - uses: actions/checkout@v6
+      - uses: extractions/setup-just@v3
+        with:
+          just-version: "1.46.0"
+      - uses: ./.github/actions/ocaml-deps
 
-            - name: Build CLI
-              run: |
-                  opam exec -- dune build @install
-                  opam exec -- dune install --prefix "$PWD/_build/install"
+      - name: Build CLI
+        run: |
+          opam exec -- dune build @install
+          opam exec -- dune install --prefix "$PWD/_build/install"
 
-            - name: Package artifact
-              run: |
-                  dist_dir="$PWD/dist"
-                  mkdir -p "$dist_dir"
-                  install -m 755 "_build/install/default/bin/bondi-client" "$dist_dir/bondi"
-                  tar -czf "bondi-${{ matrix.platform }}.tar.gz" -C "$dist_dir" bondi
+      - name: Package artifact
+        run: |
+          dist_dir="$PWD/dist"
+          mkdir -p "$dist_dir"
+          install -m 755 "_build/install/default/bin/bondi-client" "$dist_dir/bondi"
+          tar -czf "bondi-${{ matrix.platform }}.tar.gz" -C "$dist_dir" bondi
 
-            - name: Upload artifact
-              uses: actions/upload-artifact@v4
-              with:
-                  name: bondi-${{ matrix.platform }}
-                  path: bondi-${{ matrix.platform }}.tar.gz
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bondi-${{ matrix.platform }}
+          path: bondi-${{ matrix.platform }}.tar.gz
 
-    update-homebrew-tap-dry-run:
-        name: update-homebrew-tap-dry-run
-        runs-on: ubuntu-22.04
-        needs: build-cli
-        steps:
-            - uses: actions/checkout@v6
-            - uses: extractions/setup-just@v3
-              with:
-                  just-version: "1.46.0"
+  update-homebrew-tap-dry-run:
+    name: update-homebrew-tap-dry-run
+    runs-on: ubuntu-22.04
+    needs: build-cli
+    steps:
+      - uses: actions/checkout@v6
+      - uses: extractions/setup-just@v3
+        with:
+          just-version: "1.46.0"
 
-            - name: Download build artifacts
-              uses: actions/download-artifact@v4
-              with:
-                  path: ${{ runner.temp }}/release
-                  merge-multiple: true
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/release
+          merge-multiple: true
 
-            - name: Prepare formula copy
-              run: |
-                  mkdir -p "$RUNNER_TEMP/tap/Formula"
-                  cp "packaging/homebrew/bondi.rb" "$RUNNER_TEMP/tap/Formula/bondi.rb"
+      - name: Prepare formula copy
+        run: |
+          mkdir -p "$RUNNER_TEMP/tap/Formula"
+          cp "packaging/homebrew/bondi.rb" "$RUNNER_TEMP/tap/Formula/bondi.rb"
 
-            - name: Set version
-              run: echo "VERSION=$(just next-version)" >> $GITHUB_ENV
+      - uses: Homebrew/actions/setup-homebrew@master
+      - name: Install Commitizen
+        run: |
+          brew install commitizen
 
-            - name: Update formula (dry run)
-              uses: ./.github/actions/update-homebrew-formula
-              with:
-                  version: ${{ env.VERSION }}
-                  artifacts-path: ${{ runner.temp }}/release
-                  formula-path: ${{ runner.temp }}/tap/Formula/bondi.rb
-                  dry-run: "true"
-                  original-formula-path: packaging/homebrew/bondi.rb
+      - name: Set version
+        run: |
+          set -euo pipefail
+          echo "VERSION=$(just next-version)" >> $GITHUB_ENV
+
+      - name: Update formula (dry run)
+        uses: ./.github/actions/update-homebrew-formula
+        with:
+          version: ${{ env.VERSION }}
+          artifacts-path: ${{ runner.temp }}/release
+          formula-path: ${{ runner.temp }}/tap/Formula/bondi.rb
+          dry-run: "true"
+          original-formula-path: packaging/homebrew/bondi.rb
