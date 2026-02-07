@@ -36,12 +36,21 @@ runs:
     - name: Update formula
       shell: bash
       run: |
+        version="${{ inputs.version }}"
+        if [ -z "${version}" ]; then
+          echo "::error::version input is empty; formula cannot be updated."
+          exit 1
+        fi
         python - <<'PY'
         import os
         import re
+        import sys
 
         formula_path = "${{ inputs.formula-path }}"
-        version = "${{ inputs.version }}"
+        version = "${{ inputs.version }}".strip()
+        if not version:
+          print("::error::version must not be empty", file=sys.stderr)
+          sys.exit(1)
         linux_sha = os.environ["LINUX_SHA"]
         mac_sha = os.environ["MAC_SHA"]
 

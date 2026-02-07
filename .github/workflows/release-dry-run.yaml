@@ -76,7 +76,12 @@ jobs:
       - name: Set version
         run: |
           set -euo pipefail
-          echo "VERSION=$(just next-version)" >> $GITHUB_ENV
+          VERSION=$(just next-version)
+          if [ -z "$VERSION" ]; then
+            echo "::error::just next-version returned empty; cannot update formula."
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
 
       - name: Update formula (dry run)
         uses: ./.github/actions/update-homebrew-formula
