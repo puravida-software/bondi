@@ -57,6 +57,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           path: main
+          fetch-depth: 0
 
       - name: Checkout tap repository
         uses: actions/checkout@v6
