@@ -48,7 +48,7 @@ runs:
         with open(formula_path, "r", encoding="utf-8") as f:
           data = f.read()
 
-        data = re.sub(r'version\s+"[^"]+"', f'version "{version}"', data)
+        data = re.sub(r'version\s+"[^"]*"', f'version "{version}"', data)
         data = re.sub(
           r'(url\s+"[^"]*bondi-linux-x86_64\.tar\.gz"\s*\n\s*sha256\s+")([^"]+)(")',
           lambda m: m.group(1) + linux_sha + m.group(3),
