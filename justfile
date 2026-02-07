@@ -62,7 +62,7 @@ cli-logs CONTAINER_NAME:
 # Versioning
 
 version:
-	cz version -p
+	cz version --project
 
 next-version:
-	cz bump --dry-run | grep tag | sed 's/tag to create: v\(.*\)/\1/'
+	cz bump --dry-run --get-next

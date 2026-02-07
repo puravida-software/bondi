@@ -57,6 +57,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           path: main
+          fetch-depth: 0
 
       - name: Checkout tap repository
         uses: actions/checkout@v6
@@ -76,7 +77,13 @@ jobs:
             -D "$RUNNER_TEMP/release"
 
       - name: Set version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not derive version from tag (GITHUB_REF_NAME=$GITHUB_REF_NAME)"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
 
       - name: Update formula
         uses: ./main/.github/actions/update-homebrew-formula

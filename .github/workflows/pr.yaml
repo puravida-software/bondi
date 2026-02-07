@@ -22,6 +22,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-tags: true
       - uses: extractions/setup-just@v3
         with:
           just-version: '1.46.0'
