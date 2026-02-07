@@ -51,12 +51,12 @@ runs:
         data = re.sub(r'version\s+"[^"]+"', f'version "{version}"', data)
         data = re.sub(
           r'(url\s+"[^"]*bondi-linux-x86_64\.tar\.gz"\s*\n\s*sha256\s+")([^"]+)(")',
-          rf"\1{linux_sha}\3",
+          lambda m: m.group(1) + linux_sha + m.group(3),
           data,
         )
         data = re.sub(
           r'(url\s+"[^"]*bondi-macos-arm64\.tar\.gz"\s*\n\s*sha256\s+")([^"]+)(")',
-          rf"\1{mac_sha}\3",
+          lambda m: m.group(1) + mac_sha + m.group(3),
           data,
         )
 
