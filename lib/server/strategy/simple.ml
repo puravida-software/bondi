@@ -10,9 +10,16 @@ let traefik_name = "bondi-traefik"
 (* Types                                                                     *)
 (* ------------------------------------------------------------------------- *)
 
+type cron_job = {
+  name : string;
+  image : string;
+  schedule : string;
+  env_vars : string_map option;
+}
+[@@deriving yojson]
+
 type deploy_input = {
-  image_name : string;
-  tag : string;
+  image : string; (* Full image string including tag *)
   port : int;
   registry_user : string option;
   registry_pass : string option;
@@ -21,6 +28,7 @@ type deploy_input = {
   traefik_image : string option;
   traefik_acme_email : string option;
   force_traefik_redeploy : bool option;
+  cron_jobs : cron_job list option; [@default None]
 }
 [@@deriving yojson]
 
@@ -69,7 +77,11 @@ let service_config (input : deploy_input) :
   match input.traefik_domain_name with
   | None -> Error "missing traefik_domain_name for service labels"
   | Some domain_name ->
-      let new_image = Printf.sprintf "%s:%s" input.image_name input.tag in
+      let new_image =
+        match parse_image_and_tag input.image with
+        | Ok (name, tag) -> if tag = "" then name ^ ":latest" else input.image
+        | Error _ -> input.image
+      in
       let labels : string_map =
         [
           ("traefik.enable", "true");
@@ -100,6 +112,11 @@ let service_config (input : deploy_input) :
 (* Phase 1: Gather context (read-only)                                       *)
 (* ------------------------------------------------------------------------- *)
 
+let image_name_for_lookup image =
+  match parse_image_and_tag image with
+  | Ok (name, _) -> name
+  | Error _ -> image
+
 let gather_context ~client ~net (input : deploy_input) :
     (deploy_context, string) result =
   try
@@ -109,7 +126,7 @@ let gather_context ~client ~net (input : deploy_input) :
     in
     let current_workload =
       Docker.Client.get_container_by_image_name client ~net
-        ~image_name:input.image_name
+        ~image_name:(image_name_for_lookup input.image)
     in
     Ok { current_traefik; current_workload }
   with
@@ -141,7 +158,6 @@ let should_redeploy_traefik (input : deploy_input)
 
 let plan (input : deploy_input) (context : deploy_context) :
     (action list, string) result =
-  let* service_cfg = service_config input in
   let actions = ref [] in
   (* Traefik path *)
   let* () =
@@ -192,27 +208,36 @@ let plan (input : deploy_input) (context : deploy_context) :
       else Ok ())
     else Ok ()
   in
-  (* Workload path *)
-  (match context.current_workload with
+  (* Workload path - only when we have a service (traefik_domain_name) *)
+  (match input.traefik_domain_name with
   | None -> ()
-  | Some container -> actions := StopAndRemoveContainer container :: !actions);
-  (* Always: pull and run workload *)
-  actions :=
-    PullImage
-      {
-        image = input.image_name;
-        tag = input.tag;
-        with_auth = Option.is_some input.registry_user;
-      }
-    :: !actions;
-  actions :=
-    RunWorkload
-      {
-        container_name = service_name;
-        config = service_cfg;
-        networking_conf = default_networking_config;
-      }
-    :: !actions;
+  | Some _ -> (
+      match service_config input with
+      | Error _ -> ()
+      | Ok service_cfg ->
+          (match context.current_workload with
+          | None -> ()
+          | Some container ->
+              actions := StopAndRemoveContainer container :: !actions);
+          (match parse_image_and_tag input.image with
+          | Ok (image_name, image_tag) ->
+              actions :=
+                PullImage
+                  {
+                    image = image_name;
+                    tag = (if image_tag = "" then "latest" else image_tag);
+                    with_auth = Option.is_some input.registry_user;
+                  }
+                :: !actions
+          | Error _ -> ());
+          actions :=
+            RunWorkload
+              {
+                container_name = service_name;
+                config = service_cfg;
+                networking_conf = default_networking_config;
+              }
+            :: !actions));
   Ok (List.rev !actions)
 
 (* ------------------------------------------------------------------------- *)

@@ -174,7 +174,16 @@ let setup_server config server =
           in
           let ensure_server_version () =
             let* running = get_running_version ~user ~host ~key_path in
-            if running <> "" && running = config.bondi_server.version then (
+            let has_cron_jobs =
+              match config.cron_jobs with
+              | Some jobs when jobs <> [] -> true
+              | _ -> false
+            in
+            if
+              running <> ""
+              && running = config.bondi_server.version
+              && not has_cron_jobs
+            then (
               print_endline
                 (Printf.sprintf
                    "bondi-orchestrator container is already running on server \
@@ -182,12 +191,16 @@ let setup_server config server =
                    ip_address running);
               Ok `Skip)
             else if running <> "" then (
+              let reason =
+                if running <> config.bondi_server.version then
+                  Printf.sprintf "version mismatch: running %s, want %s" running
+                    config.bondi_server.version
+                else "adding cron job support"
+              in
               print_endline
                 (Printf.sprintf
-                   "bondi-orchestrator container version mismatch on server \
-                    %s: running %s, want %s, stopping current server to run \
-                    the new version..."
-                   ip_address running config.bondi_server.version);
+                   "bondi-orchestrator on server %s: %s, stopping to restart..."
+                   ip_address reason);
               let* _ =
                 run_remote_docker ~user ~host ~key_path
                   "stop bondi-orchestrator"
@@ -200,11 +213,17 @@ let setup_server config server =
             else Ok `Run
           in
           let run_server () =
+            let volume_mounts =
+              match config.cron_jobs with
+              | Some jobs when jobs <> [] ->
+                  " -v /var/spool/cron/crontabs:/var/spool/cron/crontabs"
+              | _ -> ""
+            in
             let run_cmd =
               "docker run -d --name bondi-orchestrator -p 3030:3030 -v \
-               /var/run/docker.sock:/var/run/docker.sock --group-add $(stat -c \
-               %g /var/run/docker.sock) --rm mlopez1506/bondi-server:"
-              ^ config.bondi_server.version
+               /var/run/docker.sock:/var/run/docker.sock" ^ volume_mounts
+              ^ " --group-add $(stat -c %g /var/run/docker.sock) --rm \
+                 mlopez1506/bondi-server:" ^ config.bondi_server.version
             in
             let* output = remote_run ~user ~host ~key_path run_cmd in
             print_endline
@@ -230,10 +249,14 @@ let run () =
       prerr_endline ("Error reading configuration: " ^ message);
       exit 1
   | Ok config ->
+      let servers = Config_file.servers config in
+      if servers = [] then (
+        prerr_endline
+          "Error: no servers configured. Add servers to bondi.yaml or \
+           configure a service with servers.";
+        exit 1);
       print_endline "Setting up the servers...";
-      let results =
-        List.map (setup_server config) config.user_service.servers
-      in
+      let results = List.map (setup_server config) servers in
       if
         List.exists
           (function

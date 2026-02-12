@@ -10,6 +10,7 @@ let start ~clock ~client ~net (config : Server_config.t) : unit Lwt.t =
                  Status.route ~client ~net;
                  Health.route;
                  Deploy.route ~clock ~net;
+                 Run.route ~client ~net;
                ];
            ];
        ]

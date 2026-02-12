@@ -1,16 +1,25 @@
 open Ppx_yojson_conv_lib.Yojson_conv
 
+(* Cron job for deploy payload - excludes server (server filters which jobs to send per target) *)
+type deploy_cron_job = {
+  name : string;
+  image : string;
+  schedule : string;
+  env_vars : Config_file.string_map option;
+}
+[@@deriving yojson]
+
 type deploy_payload = {
-  image_name : string;
-  tag : string;
+  image : string; (* Full image string including tag *)
   port : int;
   env_vars : Config_file.string_map;
-  traefik_domain_name : string;
-  traefik_image : string;
-  traefik_acme_email : string;
+  traefik_domain_name : string option;
+  traefik_image : string option;
+  traefik_acme_email : string option;
   registry_user : string option;
   registry_pass : string option;
   force_traefik_redeploy : bool option;
+  cron_jobs : deploy_cron_job list option;
 }
 [@@deriving yojson]
 
@@ -42,27 +51,41 @@ let post_deploy ~client ip_address payload =
         (Printf.sprintf "Error calling deploy endpoint on server %s: %s"
            ip_address (Printexc.to_string exn))
 
-let run tag force_traefik_redeploy =
+let cron_job_to_deploy (j : Config_file.cron_job) : deploy_cron_job =
+  {
+    name = j.name;
+    image = j.image;
+    schedule = j.schedule;
+    env_vars = j.env_vars;
+  }
+
+let cron_jobs_for_server ip_address
+    (cron_jobs : Config_file.cron_job list option) : deploy_cron_job list option
+    =
+  match cron_jobs with
+  | None -> None
+  | Some jobs ->
+      let filtered =
+        List.filter
+          (fun (j : Config_file.cron_job) -> j.server.ip_address = ip_address)
+          jobs
+      in
+      if filtered = [] then None
+      else Some (List.map cron_job_to_deploy filtered)
+
+let run force_traefik_redeploy =
   print_endline "Deployment process initiated...";
   match Config_file.read () with
   | Error message ->
       prerr_endline ("Error reading configuration: " ^ message);
       exit 1
   | Ok config -> (
-      let payload =
-        {
-          image_name = config.user_service.image_name;
-          tag;
-          port = config.user_service.port;
-          env_vars = config.user_service.env_vars;
-          traefik_domain_name = config.traefik.domain_name;
-          traefik_image = config.traefik.image;
-          traefik_acme_email = config.traefik.acme_email;
-          registry_user = config.user_service.registry_user;
-          registry_pass = config.user_service.registry_pass;
-          force_traefik_redeploy = Some force_traefik_redeploy;
-        }
-      in
+      let servers = Config_file.servers config in
+      if servers = [] then (
+        prerr_endline
+          "Error: no servers configured. Add servers to bondi.yaml under \
+           service or each cron job.";
+        exit 1);
       Eio_main.run @@ fun env ->
       let net = Eio.Stdenv.net env in
       let client = Cohttp_eio.Client.make ~https:None net in
@@ -70,12 +93,51 @@ let run tag force_traefik_redeploy =
         List.map
           (fun server ->
             let ip_address = server.Config_file.ip_address in
+            let base_payload =
+              match config.user_service with
+              | Some service ->
+                  {
+                    image = service.image;
+                    port = service.port;
+                    env_vars = service.env_vars;
+                    traefik_domain_name =
+                      Option.map
+                        (fun (tr : Config_file.traefik) -> tr.domain_name)
+                        config.traefik;
+                    traefik_image =
+                      Option.map
+                        (fun (tr : Config_file.traefik) -> tr.image)
+                        config.traefik;
+                    traefik_acme_email =
+                      Option.map
+                        (fun (tr : Config_file.traefik) -> tr.acme_email)
+                        config.traefik;
+                    registry_user = service.registry_user;
+                    registry_pass = service.registry_pass;
+                    force_traefik_redeploy = Some force_traefik_redeploy;
+                    cron_jobs = cron_jobs_for_server ip_address config.cron_jobs;
+                  }
+              | None ->
+                  (* TODO: what's this? *)
+                  {
+                    image = "cron-only:latest";
+                    port = 0;
+                    env_vars = [];
+                    traefik_domain_name = None;
+                    traefik_image = None;
+                    traefik_acme_email = None;
+                    registry_user = None;
+                    registry_pass = None;
+                    force_traefik_redeploy = Some force_traefik_redeploy;
+                    cron_jobs = cron_jobs_for_server ip_address config.cron_jobs;
+                  }
+            in
             print_endline
               (Printf.sprintf
                  "Deploying to server: %s at http://%s:3030/api/v1/deploy"
                  ip_address ip_address);
-            post_deploy ~client ip_address payload)
-          config.user_service.servers
+            post_deploy ~client ip_address base_payload)
+          servers
       in
       match
         List.find_opt
@@ -93,17 +155,16 @@ let run tag force_traefik_redeploy =
               print_endline
                 (Printf.sprintf "Deployment initiated on server %s"
                    server.Config_file.ip_address))
-            config.user_service.servers)
-
-let tag_arg =
-  let doc = "Deployment tag." in
-  Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"TAG" ~doc)
+            servers)
 
 let force_traefik_redeploy_arg =
   let doc = "Force Traefik to be redeployed to pick up config changes." in
   Cmdliner.Arg.(value & flag & info [ "redeploy-traefik" ] ~doc)
 
 let cmd =
-  let term = Cmdliner.Term.(const run $ tag_arg $ force_traefik_redeploy_arg) in
-  let info = Cmdliner.Cmd.info "deploy" ~doc:"Deploy a tagged release." in
+  let term = Cmdliner.Term.(const run $ force_traefik_redeploy_arg) in
+  let info =
+    Cmdliner.Cmd.info "deploy"
+      ~doc:"Deploy using the image versions in bondi.yaml."
+  in
   Cmdliner.Cmd.v info term

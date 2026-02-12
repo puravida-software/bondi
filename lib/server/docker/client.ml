@@ -345,11 +345,16 @@ let pull_image_no_auth :
     t -> net:_ Eio.Net.t -> image:string -> tag:string -> unit =
  fun t ~net ~image ~tag -> pull_image t ~net ~image ~tag ~registry_auth:None
 
+let remove_container : t -> net:_ Eio.Net.t -> container_id:string -> unit =
+ fun t ~net ~container_id ->
+  let query = [ query_param "force" "true"; query_param "v" "true" ] in
+  let _ = call t ~net `DELETE ("/containers/" ^ container_id) query in
+  ()
+
 let remove_container_and_image :
     t -> net:_ Eio.Net.t -> container:container -> unit =
  fun t ~net ~container ->
-  let query = [ query_param "force" "true"; query_param "v" "true" ] in
-  let _ = call t ~net `DELETE ("/containers/" ^ container.id) query in
+  remove_container t ~net ~container_id:container.id;
   let image_query =
     [ query_param "force" "true"; query_param "noprune" "false" ]
   in
@@ -397,3 +402,14 @@ let inspect_container :
     call_json t ~net `GET ("/containers/" ^ container_id ^ "/json") []
   in
   inspect_response_of_yojson json
+
+type wait_response = { status_code : int [@key "StatusCode"] }
+[@@deriving yojson]
+
+let wait_container : t -> net:_ Eio.Net.t -> container_id:string -> int =
+ fun t ~net ~container_id ->
+  let json =
+    call_json t ~net `POST ("/containers/" ^ container_id ^ "/wait") []
+  in
+  let resp = wait_response_of_yojson json in
+  resp.status_code

@@ -1,7 +1,7 @@
 let sample_config_yaml project_name =
   Printf.sprintf
     {|service:
-  image_name: %s
+  image: %s:latest
   port: 8080
   registry_user: "{{REGISTRY_USER}}"
   registry_pass: "{{REGISTRY_PASS}}"
@@ -26,6 +26,19 @@ traefik:
   domain_name: example.com
   image: traefik:v3.3.0
   acme_email: john.doe@example.com
+
+# Optional: cron jobs (one server per job; add more jobs for more servers)
+# cron_jobs:
+#   - name: daily-job
+#     image: ghcr.io/org/image:latest
+#     schedule: "0 0 * * *"
+#     env_vars: {}
+#     server:
+#       ip_address: "55.55.55.55"
+#       ssh:
+#         user: root
+#         private_key_contents: "{{SSH_PRIVATE_KEY_CONTENTS}}"
+#         private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
 |}
     project_name
 

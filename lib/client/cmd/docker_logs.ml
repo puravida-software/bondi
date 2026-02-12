@@ -25,7 +25,7 @@ let run container_name =
                   (Printf.sprintf "[docker logs] Server: %s\n%s"
                      server.Config_file.ip_address output)
             | Error err -> Error err)
-          config.user_service.servers
+          (Config_file.servers config)
       in
       match
         List.find_opt
