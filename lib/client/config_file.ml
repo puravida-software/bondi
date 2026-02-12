@@ -74,6 +74,8 @@ type cron_job = {
   image : string;
   schedule : string;
   env_vars : string_map option;
+  registry_user : string option; [@default None]
+  registry_pass : string option; [@default None]
   server : server;
 }
 [@@deriving yojson]

@@ -6,6 +6,8 @@ type deploy_cron_job = {
   image : string;
   schedule : string;
   env_vars : Config_file.string_map option;
+  registry_user : string option;
+  registry_pass : string option;
 }
 [@@deriving yojson]
 
@@ -57,6 +59,8 @@ let cron_job_to_deploy (j : Config_file.cron_job) : deploy_cron_job =
     image = j.image;
     schedule = j.schedule;
     env_vars = j.env_vars;
+    registry_user = j.registry_user;
+    registry_pass = j.registry_pass;
   }
 
 let cron_jobs_for_server ip_address
