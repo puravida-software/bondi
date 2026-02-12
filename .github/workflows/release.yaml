@@ -8,6 +8,9 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release
+
 jobs:
   release:
     name: build-${{ matrix.platform }}
@@ -23,6 +26,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - uses: extractions/setup-just@v3
         with:
           just-version: "1.46.0"
