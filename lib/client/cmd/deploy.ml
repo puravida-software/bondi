@@ -53,20 +53,26 @@ let post_deploy ~client ip_address payload =
            ip_address (Printexc.to_string exn))
 
 let cron_job_to_deploy (j : Config_file.cron_job) : deploy_cron_job =
-  { name = j.name; image = j.image; schedule = j.schedule; env_vars = j.env_vars }
+  {
+    name = j.name;
+    image = j.image;
+    schedule = j.schedule;
+    env_vars = j.env_vars;
+  }
 
-let cron_jobs_for_server ip_address (cron_jobs : Config_file.cron_job list option)
-    : deploy_cron_job list option =
+let cron_jobs_for_server ip_address
+    (cron_jobs : Config_file.cron_job list option) : deploy_cron_job list option
+    =
   match cron_jobs with
   | None -> None
   | Some jobs ->
       let filtered =
         List.filter
-          (fun (j : Config_file.cron_job) ->
-            j.server.ip_address = ip_address)
+          (fun (j : Config_file.cron_job) -> j.server.ip_address = ip_address)
           jobs
       in
-      if filtered = [] then None else Some (List.map cron_job_to_deploy filtered)
+      if filtered = [] then None
+      else Some (List.map cron_job_to_deploy filtered)
 
 let run tag force_traefik_redeploy =
   print_endline "Deployment process initiated...";
@@ -101,7 +107,8 @@ let run tag force_traefik_redeploy =
                         (fun (tr : Config_file.traefik) -> tr.domain_name)
                         config.traefik;
                     traefik_image =
-                      Option.map (fun (tr : Config_file.traefik) -> tr.image)
+                      Option.map
+                        (fun (tr : Config_file.traefik) -> tr.image)
                         config.traefik;
                     traefik_acme_email =
                       Option.map

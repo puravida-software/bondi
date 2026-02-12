@@ -158,7 +158,9 @@ let test_plan_cron_only_skips_workload () =
       let has_workload =
         List.exists
           (function
-            | Simple.PullImage _ | Simple.RunWorkload _ -> true
+            | Simple.PullImage _
+            | Simple.RunWorkload _ ->
+                true
             | _ -> false)
           actions
       in

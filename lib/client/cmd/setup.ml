@@ -179,8 +179,10 @@ let setup_server config server =
               | Some jobs when jobs <> [] -> true
               | _ -> false
             in
-            if running <> "" && running = config.bondi_server.version
-            && not has_cron_jobs
+            if
+              running <> ""
+              && running = config.bondi_server.version
+              && not has_cron_jobs
             then (
               print_endline
                 (Printf.sprintf
@@ -219,11 +221,9 @@ let setup_server config server =
             in
             let run_cmd =
               "docker run -d --name bondi-orchestrator -p 3030:3030 -v \
-               /var/run/docker.sock:/var/run/docker.sock"
-              ^ volume_mounts
+               /var/run/docker.sock:/var/run/docker.sock" ^ volume_mounts
               ^ " --group-add $(stat -c %g /var/run/docker.sock) --rm \
-                 mlopez1506/bondi-server:"
-              ^ config.bondi_server.version
+                 mlopez1506/bondi-server:" ^ config.bondi_server.version
             in
             let* output = remote_run ~user ~host ~key_path run_cmd in
             print_endline
@@ -256,8 +256,7 @@ let run () =
            configure a service with servers.";
         exit 1);
       print_endline "Setting up the servers...";
-      let results = List.map (setup_server config) servers
-      in
+      let results = List.map (setup_server config) servers in
       if
         List.exists
           (function

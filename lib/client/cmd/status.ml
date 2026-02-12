@@ -66,7 +66,8 @@ let run () =
             | Error message ->
                 prerr_endline message;
                 acc)
-          [] (Config_file.servers config)
+          []
+          (Config_file.servers config)
         |> List.rev
       in
       let json =
