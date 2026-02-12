@@ -104,14 +104,16 @@ let gather_context ~client ~net (input : deploy_input) :
     (deploy_context, string) result =
   try
     let current_traefik =
-      Docker.Client.get_container_by_image_name client ~net ~image_name:"traefik"
+      Docker.Client.get_container_by_image_name client ~net
+        ~image_name:"traefik"
     in
     let current_workload =
       Docker.Client.get_container_by_image_name client ~net
         ~image_name:input.image_name
     in
     Ok { current_traefik; current_workload }
-  with exn -> Error (Printexc.to_string exn)
+  with
+  | exn -> Error (Printexc.to_string exn)
 
 (* ------------------------------------------------------------------------- *)
 (* Phase 2: Plan (pure)                                                     *)
@@ -134,8 +136,7 @@ let should_redeploy_traefik (input : deploy_input)
     | Some requested_image, Ok (_name, current_tag) -> (
         match parse_image_and_tag requested_image with
         | Error _ -> false
-        | Ok (_requested_name, requested_tag) ->
-            current_tag <> requested_tag)
+        | Ok (_requested_name, requested_tag) -> current_tag <> requested_tag)
     | _ -> false
 
 let plan (input : deploy_input) (context : deploy_context) :
@@ -145,7 +146,8 @@ let plan (input : deploy_input) (context : deploy_context) :
   (* Traefik path *)
   let* () =
     if should_run_traefik input then (
-      actions := CreateNetwork { network_name = default_network_name } :: !actions;
+      actions :=
+        CreateNetwork { network_name = default_network_name } :: !actions;
       let need_traefik_deploy =
         match context.current_traefik with
         | None -> true
@@ -187,15 +189,13 @@ let plan (input : deploy_input) (context : deploy_context) :
                   :: !actions;
                 Ok ())
         | _ -> Error "missing required traefik configuration"
-      else Ok ()
-    )
-  else Ok ()
+      else Ok ())
+    else Ok ()
   in
   (* Workload path *)
   (match context.current_workload with
   | None -> ()
-  | Some container ->
-      actions := StopAndRemoveContainer container :: !actions);
+  | Some container -> actions := StopAndRemoveContainer container :: !actions);
   (* Always: pull and run workload *)
   actions :=
     PullImage
@@ -253,15 +253,14 @@ let wait_for_traefik ~clock ~client ~net ~container_id : (unit, string) result =
   in
   loop 0 ""
 
-let interpret ~clock ~client ~net (actions : action list) : (unit, string) result
-    =
+let interpret ~clock ~client ~net (actions : action list) :
+    (unit, string) result =
   let rec run = function
     | [] -> Ok ()
     | CreateNetwork { network_name } :: rest ->
         Docker.Client.create_network_if_not_exists client ~net ~network_name;
         run rest
-    | EnsureTraefik
-        { image; traefik_config; domain_name = _; acme_email = _ }
+    | EnsureTraefik { image; traefik_config; domain_name = _; acme_email = _ }
       :: rest ->
         let full_image =
           match traefik_config.container_config.image with

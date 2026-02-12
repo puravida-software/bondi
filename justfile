@@ -35,6 +35,9 @@ build:
 test:
     opam exec -- dune runtest
 
+fmt:
+    opam exec -- dune fmt
+
 update-bondi-version TAG:
     sed -i "s/version: .*/version: {{ TAG }}/g" bondi.yaml
 

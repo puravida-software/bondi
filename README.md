@@ -107,6 +107,7 @@ Misc:
 - [x] Increase coverage to a decent level
 - [ ] Add blue-green deployments
 - [x] Add CD pipeline that creates a new release with executables (multiple OSes)
+- [ ] Add CD pipeline that pushes the Docker image to Github
 - [ ] Improve error messages
     - e.g. bondi: internal error, uncaught exception:
        Mustache.Render_error:
