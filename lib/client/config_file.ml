@@ -54,7 +54,7 @@ type server = { ip_address : string; ssh : server_ssh option }
 [@@deriving yojson]
 
 type user_service = {
-  image_name : string;
+  image : string; (* Full image string including tag, e.g. registry.com/app:v1.2.3 *)
   port : int;
   registry_user : string option;
   registry_pass : string option;

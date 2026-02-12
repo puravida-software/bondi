@@ -58,7 +58,7 @@ Edit the `bondi.yaml` file to configure the project.
 
 5. Deploy your workload (this will also start Traefik)
 
-```bondi deploy 0.0.1```
+```bondi deploy```
 
 6. Check the status of the deployed workload
 
@@ -68,7 +68,7 @@ Edit the `bondi.yaml` file to configure the project.
 
 - `bondi init` - Initialize a new Bondi project
 - `bondi setup` - Set up the bondi-orchestrator on configured servers
-- `bondi deploy <tag>` - Deploy your workload with the specified tag
+- `bondi deploy` - Deploy using the image versions in bondi.yaml
 - `bondi status` - Get the status of the deployed workload on all servers
 
 ## Deployment Strategies

@@ -38,7 +38,7 @@ let test_read_config_success () =
   Unix.putenv "SSH_PRIVATE_KEY_PASS" "ssh-pass";
   let yaml =
     {|service:
-  image_name: registry.example.com/app
+  image: registry.example.com/app:latest
   port: 8080
   registry_user: "{{REGISTRY_USER}}"
   registry_pass: "{{REGISTRY_PASS}}"
@@ -67,8 +67,8 @@ traefik:
           (match config.user_service with
           | None -> fail "expected service"
           | Some service -> (
-              check string "image name" "registry.example.com/app"
-                service.image_name;
+              check string "image" "registry.example.com/app:latest"
+                service.image;
               check int "port" 8080 service.port;
               check (option string) "registry user" (Some "registry-user")
                 service.registry_user;
@@ -108,7 +108,7 @@ let test_read_config_with_cron_jobs () =
   Unix.putenv "SSH_PRIVATE_KEY_PASS" "ssh-pass";
   let yaml =
     {|service:
-  image_name: registry.example.com/app
+  image: registry.example.com/app:latest
   port: 8080
   registry_user: "{{REGISTRY_USER}}"
   registry_pass: "{{REGISTRY_PASS}}"

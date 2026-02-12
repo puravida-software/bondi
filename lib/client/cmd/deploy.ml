@@ -10,8 +10,7 @@ type deploy_cron_job = {
 [@@deriving yojson]
 
 type deploy_payload = {
-  image_name : string;
-  tag : string;
+  image : string; (* Full image string including tag *)
   port : int;
   env_vars : Config_file.string_map;
   traefik_domain_name : string option;
@@ -74,7 +73,7 @@ let cron_jobs_for_server ip_address
       if filtered = [] then None
       else Some (List.map cron_job_to_deploy filtered)
 
-let run tag force_traefik_redeploy =
+let run force_traefik_redeploy =
   print_endline "Deployment process initiated...";
   match Config_file.read () with
   | Error message ->
@@ -98,8 +97,7 @@ let run tag force_traefik_redeploy =
               match config.user_service with
               | Some service ->
                   {
-                    image_name = service.image_name;
-                    tag;
+                    image = service.image;
                     port = service.port;
                     env_vars = service.env_vars;
                     traefik_domain_name =
@@ -120,9 +118,9 @@ let run tag force_traefik_redeploy =
                     cron_jobs = cron_jobs_for_server ip_address config.cron_jobs;
                   }
               | None ->
+                  (* TODO: what's this? *)
                   {
-                    image_name = "cron-only";
-                    tag;
+                    image = "cron-only:latest";
                     port = 0;
                     env_vars = [];
                     traefik_domain_name = None;
@@ -159,15 +157,14 @@ let run tag force_traefik_redeploy =
                    server.Config_file.ip_address))
             servers)
 
-let tag_arg =
-  let doc = "Deployment tag." in
-  Cmdliner.Arg.(required & pos 0 (some string) None & info [] ~docv:"TAG" ~doc)
-
 let force_traefik_redeploy_arg =
   let doc = "Force Traefik to be redeployed to pick up config changes." in
   Cmdliner.Arg.(value & flag & info [ "redeploy-traefik" ] ~doc)
 
 let cmd =
-  let term = Cmdliner.Term.(const run $ tag_arg $ force_traefik_redeploy_arg) in
-  let info = Cmdliner.Cmd.info "deploy" ~doc:"Deploy a tagged release." in
+  let term = Cmdliner.Term.(const run $ force_traefik_redeploy_arg) in
+  let info =
+    Cmdliner.Cmd.info "deploy"
+      ~doc:"Deploy using the image versions in bondi.yaml."
+  in
   Cmdliner.Cmd.v info term

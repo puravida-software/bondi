@@ -46,8 +46,13 @@ let run_deploy ~clock ~net input =
   let client = Docker.Client.create ?registry_auth:(registry_auth input) () in
   let* () = Simple.deploy ~clock ~client ~net input in
   pull_cron_images ~client ~net input.cron_jobs;
+  let tag =
+    match String.split_on_char ':' input.image with
+    | [ _; tag ] -> tag
+    | _ -> "latest"
+  in
   match Crontab.upsert input.cron_jobs with
-  | Ok () -> Ok { status = "Deploy initiated"; tag = input.tag }
+  | Ok () -> Ok { status = "Deploy initiated"; tag }
   | Error msg -> Error ("Deploy succeeded but crontab update failed: " ^ msg)
 
 let route ~clock ~net =

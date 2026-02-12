@@ -1,7 +1,7 @@
 let sample_config_yaml project_name =
   Printf.sprintf
     {|service:
-  image_name: %s
+  image: %s:latest
   port: 8080
   registry_user: "{{REGISTRY_USER}}"
   registry_pass: "{{REGISTRY_PASS}}"

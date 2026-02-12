@@ -19,8 +19,7 @@ type cron_job = {
 [@@deriving yojson]
 
 type deploy_input = {
-  image_name : string;
-  tag : string;
+  image : string; (* Full image string including tag *)
   port : int;
   registry_user : string option;
   registry_pass : string option;
@@ -78,7 +77,12 @@ let service_config (input : deploy_input) :
   match input.traefik_domain_name with
   | None -> Error "missing traefik_domain_name for service labels"
   | Some domain_name ->
-      let new_image = Printf.sprintf "%s:%s" input.image_name input.tag in
+      let new_image =
+        match parse_image_and_tag input.image with
+        | Ok (name, tag) ->
+            if tag = "" then name ^ ":latest" else input.image
+        | Error _ -> input.image
+      in
       let labels : string_map =
         [
           ("traefik.enable", "true");
@@ -109,6 +113,11 @@ let service_config (input : deploy_input) :
 (* Phase 1: Gather context (read-only)                                       *)
 (* ------------------------------------------------------------------------- *)
 
+let image_name_for_lookup image =
+  match parse_image_and_tag image with
+  | Ok (name, _) -> name
+  | Error _ -> image
+
 let gather_context ~client ~net (input : deploy_input) :
     (deploy_context, string) result =
   try
@@ -118,7 +127,7 @@ let gather_context ~client ~net (input : deploy_input) :
     in
     let current_workload =
       Docker.Client.get_container_by_image_name client ~net
-        ~image_name:input.image_name
+        ~image_name:(image_name_for_lookup input.image)
     in
     Ok { current_traefik; current_workload }
   with
@@ -211,14 +220,17 @@ let plan (input : deploy_input) (context : deploy_context) :
           | None -> ()
           | Some container ->
               actions := StopAndRemoveContainer container :: !actions);
-          actions :=
-            PullImage
-              {
-                image = input.image_name;
-                tag = input.tag;
-                with_auth = Option.is_some input.registry_user;
-              }
-            :: !actions;
+          (match parse_image_and_tag input.image with
+          | Ok (image_name, image_tag) ->
+              actions :=
+                PullImage
+                  {
+                    image = image_name;
+                    tag = if image_tag = "" then "latest" else image_tag;
+                    with_auth = Option.is_some input.registry_user;
+                  }
+                :: !actions
+          | Error _ -> ());
           actions :=
             RunWorkload
               {

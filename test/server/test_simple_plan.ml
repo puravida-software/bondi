@@ -14,8 +14,7 @@ let mock_container ~id ~image =
 
 let minimal_input =
   {
-    Simple.image_name = "myapp";
-    tag = "v1";
+    Simple.image = "myapp:v1";
     port = 8080;
     registry_user = None;
     registry_pass = None;

@@ -4,7 +4,7 @@ import "hurl_tests/hurl.just"
 
 IMAGE_NAME := "mlopez1506/bondi-server"
 
-docker-all TAG VERSION: (build-server TAG) (tag-server TAG) (push-server TAG) (update-bondi-version TAG) cli-setup (cli-deploy VERSION) (cli-status)
+docker-all TAG: (build-server TAG) (tag-server TAG) (push-server TAG) (update-bondi-version TAG) cli-setup cli-deploy (cli-status)
 
 build-server TAG:
     docker build --build-arg VERSION={{ TAG }} -t {{ IMAGE_NAME }} .
@@ -50,8 +50,8 @@ cli-init:
 cli-setup:
     opam exec -- dune exec bondi-client -- setup
 
-cli-deploy VERSION='0.0.0':
-    opam exec -- dune exec bondi-client -- deploy --redeploy-traefik {{ VERSION }}
+cli-deploy:
+    opam exec -- dune exec bondi-client -- deploy --redeploy-traefik
 
 cli-status:
     opam exec -- dune exec bondi-client -- status
