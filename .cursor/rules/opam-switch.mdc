@@ -1,0 +1,20 @@
+---
+description: Use project opam switch when running OCaml commands
+alwaysApply: true
+---
+
+# Opam Switch
+
+This project uses a dedicated opam switch: **bondi**.
+
+When running opam or dune commands (e.g. in terminal, builds, tests), ensure the correct switch is active:
+
+```bash
+# Activate the project switch
+eval $(opam env --switch bondi)
+
+# Or set it as default for the current shell
+opam switch set bondi
+```
+
+Before running `just build`, `just test`, or any `dune` / `opam` commands, run the above if the switch might not be active.

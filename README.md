@@ -89,6 +89,12 @@ Use cases:
 - [x] Subcommands for Docker, e.g. `bondi docker logs`, `bondi docker ps`
 - [x] Redeploy Traefik
     - e.g. config changed, but same Traefik version
+- [ ] Allow multiple server workflows to be used
+- [ ] Allow for cron workflows to be used
+    - configure the underlying cron utility
+    - Bondi runs the cron job itself
+    - when the cron job finishes, call a service like healthchecks.io
+- [ ] Add Alloy support for Grafana Cloud
 - [ ] Keep X amount of previous Docker images
 - [ ] Remove old bondi-orchestrator containers on the server
 
@@ -98,9 +104,14 @@ Solve:
 
 Misc:
 - [x] Add Traefik for TLS
-- [ ] Increase coverage to a decent level
+- [x] Increase coverage to a decent level
 - [ ] Add blue-green deployments
-- [ ] Add CD pipeline that creates a new release with executables (multiple OSes)
+- [x] Add CD pipeline that creates a new release with executables (multiple OSes)
+- [ ] Improve error messages
+    - e.g. bondi: internal error, uncaught exception:
+       Mustache.Render_error:
+       Line 4, characters 18-35: the variable 'REGISTRY_USER' is missing.
+       Raised at Mustache.raise_err in file "mustache/lib/mustache.ml", line 349, characters 25-59
 - [ ] Optimise SSH remote execution
     - e.g. create a single SSH connection and re-use it for multiple commands
 - [ ] Add a UI/TUI for the server
