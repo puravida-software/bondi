@@ -79,8 +79,7 @@ let service_config (input : deploy_input) :
   | Some domain_name ->
       let new_image =
         match parse_image_and_tag input.image with
-        | Ok (name, tag) ->
-            if tag = "" then name ^ ":latest" else input.image
+        | Ok (name, tag) -> if tag = "" then name ^ ":latest" else input.image
         | Error _ -> input.image
       in
       let labels : string_map =
@@ -226,7 +225,7 @@ let plan (input : deploy_input) (context : deploy_context) :
                 PullImage
                   {
                     image = image_name;
-                    tag = if image_tag = "" then "latest" else image_tag;
+                    tag = (if image_tag = "" then "latest" else image_tag);
                     with_auth = Option.is_some input.registry_user;
                   }
                 :: !actions
