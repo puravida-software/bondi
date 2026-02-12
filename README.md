@@ -95,6 +95,7 @@ Use cases:
 - [ ] When the cron job finishes, call a service like healthchecks.io
 - [ ] Add Alloy support for Grafana Cloud
 - [ ] Set and update for consistent naming for the different concepts and moving parts in Bondi
+- [ ] Add blue-green deployments for services
 - [ ] Allow multiple server workflows to be used
 - [ ] Keep X amount of previous Docker images
 - [ ] Remove old bondi-orchestrator containers on the server
@@ -106,9 +107,9 @@ Solve:
 Misc:
 - [x] Add Traefik for TLS
 - [x] Increase coverage to a decent level
-- [ ] Add blue-green deployments
 - [x] Add CD pipeline that creates a new release with executables (multiple OSes)
 - [ ] Create a `core` library for shared code between the client and server, there's quite a bit of duplication between the two.
+- [ ] Proper timezone handling for cron jobs
 - [ ] Add CD pipeline that pushes the Docker image to Github
 - [ ] Improve error messages
     - e.g. bondi: internal error, uncaught exception:

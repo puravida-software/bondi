@@ -104,6 +104,184 @@ let get_running_version ~user ~host ~key_path =
         Ok (String.trim version)
       else Ok image
 
+(* ------------------------------------------------------------------------- *)
+(* Types                                                                     *)
+(* ------------------------------------------------------------------------- *)
+
+type setup_context = {
+  docker_status : [ `Installed of string | `NotInstalled of string ];
+  acme_file_exists : bool;
+  running_version : string;
+}
+
+type action = EnsureDocker | EnsureAcmeFile | StopOrchestrator | RunServer
+
+(* ------------------------------------------------------------------------- *)
+(* Phase 1: Gather context (read-only)                                       *)
+(* ------------------------------------------------------------------------- *)
+
+let gather_context ~user ~host ~key_path : (setup_context, string) result =
+  let docker_status =
+    match get_docker_version ~user ~host ~key_path with
+    | Ok version_output ->
+        if contains ~needle:"command not found" version_output then
+          `NotInstalled (String.trim version_output)
+        else `Installed (String.trim version_output)
+    | Error err -> `NotInstalled err
+  in
+  let acme_file = "/etc/traefik/acme/acme.json" in
+  let acme_file_exists =
+    match remote_run ~user ~host ~key_path ("test -f " ^ acme_file) with
+    | Ok _ -> true
+    | Error _ -> false
+  in
+  let* running_version = get_running_version ~user ~host ~key_path in
+  Ok { docker_status; acme_file_exists; running_version }
+
+(* ------------------------------------------------------------------------- *)
+(* Phase 2: Plan (pure)                                                      *)
+(* ------------------------------------------------------------------------- *)
+
+let has_user_services config = Option.is_some config.Config_file.user_service
+
+let should_skip_server config (ctx : setup_context) : bool =
+  let has_cron_jobs =
+    match config.Config_file.cron_jobs with
+    | Some jobs when jobs <> [] -> true
+    | _ -> false
+  in
+  ctx.running_version <> ""
+  && ctx.running_version = config.Config_file.bondi_server.version
+  && not has_cron_jobs
+
+let needs_orchestrator_restart config (ctx : setup_context) : bool =
+  if ctx.running_version = "" then false
+  else
+    let has_cron_jobs =
+      match config.Config_file.cron_jobs with
+      | Some jobs when jobs <> [] -> true
+      | _ -> false
+    in
+    ctx.running_version <> config.Config_file.bondi_server.version
+    || has_cron_jobs
+
+let plan config (ctx : setup_context) : action list =
+  let actions = ref [] in
+  (* Always ensure Docker *)
+  actions := EnsureDocker :: !actions;
+  (* ACME only when we have user services (Traefik will be used) *)
+  if has_user_services config then actions := EnsureAcmeFile :: !actions;
+  (* Server setup - skip entirely if already up-to-date *)
+  if not (should_skip_server config ctx) then (
+    if needs_orchestrator_restart config ctx then
+      actions := StopOrchestrator :: !actions;
+    actions := RunServer :: !actions);
+  List.rev !actions
+
+(* ------------------------------------------------------------------------- *)
+(* Phase 3: Interpreter                                                      *)
+(* ------------------------------------------------------------------------- *)
+
+let interpret ~user ~host ~key_path ~ip_address config (actions : action list) :
+    (unit, string) result =
+  let rec run = function
+    | [] -> Ok ()
+    | EnsureDocker :: rest -> (
+        match
+          match get_docker_version ~user ~host ~key_path with
+          | Ok version_output ->
+              if contains ~needle:"command not found" version_output then
+                Error "docker not installed"
+              else (
+                print_endline
+                  (Printf.sprintf "Docker is already installed on server %s: %s"
+                     ip_address
+                     (String.trim version_output));
+                Ok ())
+          | Error err ->
+              print_endline
+                (Printf.sprintf
+                   "Docker not found on server %s\n\
+                    Error: %s\n\
+                    Installing Docker..."
+                   ip_address err);
+              let install_cmd =
+                "curl -fsSL https://get.docker.com -o get-docker.sh && sudo sh \
+                 get-docker.sh"
+              in
+              let* output = remote_run ~user ~host ~key_path install_cmd in
+              print_endline
+                (Printf.sprintf "Docker installed on server %s: %s" ip_address
+                   (String.trim output));
+              Ok ()
+        with
+        | Error err -> Error err
+        | Ok () -> run rest)
+    | EnsureAcmeFile :: rest ->
+        let acme_dir = "/etc/traefik/acme" in
+        let acme_file = acme_dir ^ "/acme.json" in
+        let* () =
+          match remote_run ~user ~host ~key_path ("test -f " ^ acme_file) with
+          | Ok _ ->
+              let cmd =
+                Printf.sprintf "sudo chown root:root %s && sudo chmod 600 %s"
+                  acme_file acme_file
+              in
+              let* _ = remote_run ~user ~host ~key_path cmd in
+              print_endline
+                (Printf.sprintf "ACME file permissions updated on server %s: %s"
+                   ip_address acme_file);
+              Ok ()
+          | Error _ ->
+              let cmd =
+                Printf.sprintf
+                  "sudo mkdir -p %s && sudo touch %s && sudo chown root:root \
+                   %s && sudo chmod 600 %s"
+                  acme_dir acme_file acme_file acme_file
+              in
+              let* output = remote_run ~user ~host ~key_path cmd in
+              print_endline
+                (Printf.sprintf "ACME file created on server %s: %s" ip_address
+                   (String.trim output));
+              Ok ()
+        in
+        run rest
+    | StopOrchestrator :: rest ->
+        let* _ =
+          run_remote_docker ~user ~host ~key_path "stop bondi-orchestrator"
+        in
+        print_endline
+          (Printf.sprintf "Stopped bondi-orchestrator container on server %s"
+             ip_address);
+        run rest
+    | RunServer :: rest ->
+        let volume_mounts, user_flag =
+          match config.Config_file.cron_jobs with
+          | Some jobs when jobs <> [] ->
+              ( " -v /var/spool/cron/crontabs:/var/spool/cron/crontabs",
+                " --user root" )
+          | _ -> ("", "")
+        in
+        let run_cmd =
+          "docker run -d --name bondi-orchestrator -p 3030:3030 -v \
+           /var/run/docker.sock:/var/run/docker.sock" ^ volume_mounts
+          ^ user_flag
+          ^ " --group-add $(stat -c %g /var/run/docker.sock) --rm \
+             mlopez1506/bondi-server:" ^ config.Config_file.bondi_server.version
+        in
+        let* output = remote_run ~user ~host ~key_path run_cmd in
+        print_endline
+          (Printf.sprintf
+             "bondi-orchestrator container started on server %s: %s" ip_address
+             (String.trim output));
+        run rest
+  in
+  run actions
+
+(* ------------------------------------------------------------------------- *)
+(* Entry point                                                               *)
+(* ------------------------------------------------------------------------- *)
+
 let setup_server config server =
   let open Config_file in
   let { ip_address; ssh } = server in
@@ -116,81 +294,18 @@ let setup_server config server =
       with_temp_key ssh_config.private_key_contents (fun key_path ->
           let user = ssh_config.user in
           let host = ip_address in
-          let ensure_docker () =
-            match get_docker_version ~user ~host ~key_path with
-            | Ok version_output ->
-                if contains ~needle:"command not found" version_output then
-                  Error "docker not installed"
-                else (
-                  print_endline
-                    (Printf.sprintf
-                       "Docker is already installed on server %s: %s" ip_address
-                       (String.trim version_output));
-                  Ok ())
-            | Error err ->
-                print_endline
-                  (Printf.sprintf
-                     "Docker not found on server %s\n\
-                      Error: %s\n\
-                      Installing Docker..."
-                     ip_address err);
-                let install_cmd =
-                  "curl -fsSL https://get.docker.com -o get-docker.sh && sudo \
-                   sh get-docker.sh"
-                in
-                let* output = remote_run ~user ~host ~key_path install_cmd in
-                print_endline
-                  (Printf.sprintf "Docker installed on server %s: %s" ip_address
-                     (String.trim output));
-                Ok ()
-          in
-          let ensure_acme_file () =
-            let acme_dir = "/etc/traefik/acme" in
-            let acme_file = acme_dir ^ "/acme.json" in
-            match remote_run ~user ~host ~key_path ("test -f " ^ acme_file) with
-            | Ok _ ->
-                let cmd =
-                  Printf.sprintf "sudo chown root:root %s && sudo chmod 600 %s"
-                    acme_file acme_file
-                in
-                let* _ = remote_run ~user ~host ~key_path cmd in
-                print_endline
-                  (Printf.sprintf
-                     "ACME file permissions updated on server %s: %s" ip_address
-                     acme_file);
-                Ok ()
-            | Error _ ->
-                let cmd =
-                  Printf.sprintf
-                    "sudo mkdir -p %s && sudo touch %s && sudo chown root:root \
-                     %s && sudo chmod 600 %s"
-                    acme_dir acme_file acme_file acme_file
-                in
-                let* output = remote_run ~user ~host ~key_path cmd in
-                print_endline
-                  (Printf.sprintf "ACME file created on server %s: %s"
-                     ip_address (String.trim output));
-                Ok ()
-          in
-          let ensure_server_version () =
-            let* running = get_running_version ~user ~host ~key_path in
-            let has_cron_jobs =
-              match config.cron_jobs with
-              | Some jobs when jobs <> [] -> true
-              | _ -> false
-            in
-            if
-              running <> ""
-              && running = config.bondi_server.version
-              && not has_cron_jobs
-            then (
+          let* context = gather_context ~user ~host ~key_path in
+          let actions = plan config context in
+          (* Log skip/restart reason when we have a running server *)
+          (match (context.running_version, actions) with
+          | "", _ -> ()
+          | running, actions when not (List.mem RunServer actions) ->
               print_endline
                 (Printf.sprintf
                    "bondi-orchestrator container is already running on server \
                     %s: %s, skipping..."
-                   ip_address running);
-              Ok `Skip)
-            else if running <> "" then (
+                   ip_address running)
+          | running, actions when List.mem StopOrchestrator actions ->
               let reason =
                 if running <> config.bondi_server.version then
                   Printf.sprintf "version mismatch: running %s, want %s" running
@@ -200,48 +315,9 @@ let setup_server config server =
               print_endline
                 (Printf.sprintf
                    "bondi-orchestrator on server %s: %s, stopping to restart..."
-                   ip_address reason);
-              let* _ =
-                run_remote_docker ~user ~host ~key_path
-                  "stop bondi-orchestrator"
-              in
-              print_endline
-                (Printf.sprintf
-                   "Stopped bondi-orchestrator container on server %s"
-                   ip_address);
-              Ok `Run)
-            else Ok `Run
-          in
-          let run_server () =
-            let volume_mounts =
-              match config.cron_jobs with
-              | Some jobs when jobs <> [] ->
-                  " -v /var/spool/cron/crontabs:/var/spool/cron/crontabs"
-              | _ -> ""
-            in
-            let run_cmd =
-              "docker run -d --name bondi-orchestrator -p 3030:3030 -v \
-               /var/run/docker.sock:/var/run/docker.sock" ^ volume_mounts
-              ^ " --group-add $(stat -c %g /var/run/docker.sock) --rm \
-                 mlopez1506/bondi-server:" ^ config.bondi_server.version
-            in
-            let* output = remote_run ~user ~host ~key_path run_cmd in
-            print_endline
-              (Printf.sprintf
-                 "bondi-orchestrator container started on server %s: %s"
-                 ip_address (String.trim output));
-            Ok ()
-          in
-          match ensure_docker () with
-          | Error err -> Error err
-          | Ok () -> (
-              match ensure_acme_file () with
-              | Error err -> Error err
-              | Ok () -> (
-                  match ensure_server_version () with
-                  | Error err -> Error err
-                  | Ok `Skip -> Ok ()
-                  | Ok `Run -> run_server ())))
+                   ip_address reason)
+          | _ -> ());
+          interpret ~user ~host ~key_path ~ip_address config actions)
 
 let run () =
   match Config_file.read () with
