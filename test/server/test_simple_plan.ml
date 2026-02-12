@@ -24,6 +24,7 @@ let minimal_input =
     traefik_image = Some "traefik:v3.3.0";
     traefik_acme_email = Some "admin@example.com";
     force_traefik_redeploy = None;
+    cron_jobs = None;
   }
 
 let input_with_registry =
@@ -141,7 +142,7 @@ let test_plan_with_registry_auth () =
           check bool "PullImage uses auth" true with_auth
       | _ -> Alcotest.fail "expected PullImage with auth")
 
-let test_plan_missing_traefik_domain_fails () =
+let test_plan_cron_only_skips_workload () =
   let input =
     {
       minimal_input with
@@ -152,10 +153,17 @@ let test_plan_missing_traefik_domain_fails () =
   in
   let context = { Simple.current_traefik = None; current_workload = None } in
   match Simple.plan input context with
-  | Ok _ -> Alcotest.fail "plan should fail without traefik_domain_name"
-  | Error msg ->
-      check string "error mentions traefik_domain_name"
-        "missing traefik_domain_name for service labels" msg
+  | Error _ -> Alcotest.fail "plan should succeed for cron-only (no workload)"
+  | Ok actions ->
+      let has_workload =
+        List.exists
+          (function
+            | Simple.PullImage _ | Simple.RunWorkload _ -> true
+            | _ -> false)
+          actions
+      in
+      check bool "no workload actions when traefik_domain_name is None" false
+        has_workload
 
 let () =
   run "Simple.plan"
@@ -183,7 +191,7 @@ let () =
         ] );
       ( "validation",
         [
-          test_case "fails without traefik_domain_name for labels" `Quick
-            test_plan_missing_traefik_domain_fails;
+          test_case "skips workload when traefik_domain_name is None" `Quick
+            test_plan_cron_only_skips_workload;
         ] );
     ]

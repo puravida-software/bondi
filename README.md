@@ -89,12 +89,13 @@ Use cases:
 - [x] Subcommands for Docker, e.g. `bondi docker logs`, `bondi docker ps`
 - [x] Redeploy Traefik
     - e.g. config changed, but same Traefik version
-- [ ] Allow multiple server workflows to be used
-- [ ] Allow for cron workflows to be used
+- [x] Allow for cron workflows to be used
     - configure the underlying cron utility
     - Bondi runs the cron job itself
-    - when the cron job finishes, call a service like healthchecks.io
+- [ ] When the cron job finishes, call a service like healthchecks.io
 - [ ] Add Alloy support for Grafana Cloud
+- [ ] Set and update for consistent naming for the different concepts and moving parts in Bondi
+- [ ] Allow multiple server workflows to be used
 - [ ] Keep X amount of previous Docker images
 - [ ] Remove old bondi-orchestrator containers on the server
 
@@ -107,6 +108,7 @@ Misc:
 - [x] Increase coverage to a decent level
 - [ ] Add blue-green deployments
 - [x] Add CD pipeline that creates a new release with executables (multiple OSes)
+- [ ] Create a `core` library for shared code between the client and server, there's quite a bit of duplication between the two.
 - [ ] Add CD pipeline that pushes the Docker image to Github
 - [ ] Improve error messages
     - e.g. bondi: internal error, uncaught exception:

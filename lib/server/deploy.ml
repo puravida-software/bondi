@@ -22,10 +22,33 @@ let decode_input body =
            (Yojson.Safe.to_string yojson))
   | exn -> Error (Printexc.to_string exn)
 
+let parse_cron_image image =
+  match String.split_on_char ':' image with
+  | [ name; tag ] -> (name, tag)
+  | [ name ] -> (name, "latest")
+  | _ -> (image, "latest")
+
+let pull_cron_images ~client ~net = function
+  | None
+  | Some [] ->
+      ()
+  | Some jobs ->
+      List.iter
+        (fun (c : Simple.cron_job) ->
+          let image_name, tag = parse_cron_image c.image in
+          Docker.Client.pull_image_no_auth client ~net ~image:image_name ~tag)
+        jobs
+
+let ( let* ) = Result.bind
+
 let run_deploy ~clock ~net input =
   Lwt_eio.run_eio @@ fun () ->
   let client = Docker.Client.create ?registry_auth:(registry_auth input) () in
-  Simple.deploy ~clock ~client ~net input
+  let* () = Simple.deploy ~clock ~client ~net input in
+  pull_cron_images ~client ~net input.cron_jobs;
+  match Crontab.upsert input.cron_jobs with
+  | Ok () -> Ok { status = "Deploy initiated"; tag = input.tag }
+  | Error msg -> Error ("Deploy succeeded but crontab update failed: " ^ msg)
 
 let route ~clock ~net =
   Dream.post "/deploy" @@ fun req ->
@@ -37,8 +60,8 @@ let route ~clock ~net =
       Lwt.catch
         (fun () ->
           run_deploy ~clock ~net input >>= function
-          | Ok () ->
-              { status = "Deploy initiated"; tag = input.tag }
+          | Ok response ->
+              response
               |> yojson_of_deploy_response
               |> Yojson.Safe.to_string
               |> Dream.json
