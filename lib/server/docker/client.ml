@@ -126,7 +126,7 @@ type create_container_request = {
 [@@deriving yojson]
 
 let default_socket_path : string = "/var/run/docker.sock"
-let default_api_version : string = "v1.41"
+let default_api_version : string = "v1.53"
 
 let create :
     ?socket_path:string ->
