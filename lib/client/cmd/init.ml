@@ -28,11 +28,14 @@ traefik:
   acme_email: john.doe@example.com
 
 # Optional: cron jobs (one server per job; add more jobs for more servers)
+# For private registries, add registry_user and registry_pass (env template supported)
 # cron_jobs:
 #   - name: daily-job
 #     image: ghcr.io/org/image:latest
 #     schedule: "0 0 * * *"
 #     env_vars: {}
+#     # registry_user: "{{REGISTRY_USER}}"
+#     # registry_pass: "{{REGISTRY_PASS}}"
 #     server:
 #       ip_address: "55.55.55.55"
 #       ssh:

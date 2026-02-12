@@ -28,6 +28,15 @@ let parse_cron_image image =
   | [ name ] -> (name, "latest")
   | _ -> (image, "latest")
 
+let registry_auth_for_cron (c : Simple.cron_job) =
+  match (c.registry_user, c.registry_pass) with
+  | Some user, Some pass ->
+      let json =
+        `Assoc [ ("Username", `String user); ("Password", `String pass) ]
+      in
+      Some (Base64.encode_string (Yojson.Safe.to_string json))
+  | _ -> None
+
 let pull_cron_images ~client ~net = function
   | None
   | Some [] ->
@@ -36,7 +45,9 @@ let pull_cron_images ~client ~net = function
       List.iter
         (fun (c : Simple.cron_job) ->
           let image_name, tag = parse_cron_image c.image in
-          Docker.Client.pull_image_no_auth client ~net ~image:image_name ~tag)
+          let auth = registry_auth_for_cron c in
+          Docker.Client.pull_image client ~net ~image:image_name ~tag
+            ~registry_auth:auth)
         jobs
 
 let ( let* ) = Result.bind

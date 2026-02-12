@@ -135,6 +135,8 @@ cron_jobs:
     schedule: "0 14 * * 3"
     env_vars:
       API_KEY: "{{REGISTRY_USER}}"
+    registry_user: "{{REGISTRY_USER}}"
+    registry_pass: "{{REGISTRY_PASS}}"
     server:
       ip_address: 1.2.3.4
       ssh:
@@ -158,6 +160,10 @@ cron_jobs:
                   check string "cron job image" "ghcr.io/org/my-job:latest"
                     job.image;
                   check string "cron job schedule" "0 14 * * 3" job.schedule;
+                  check (option string) "cron job registry user"
+                    (Some "registry-user") job.registry_user;
+                  check (option string) "cron job registry pass"
+                    (Some "registry-pass") job.registry_pass;
                   match job.env_vars with
                   | None -> fail "expected env_vars"
                   | Some env ->
@@ -206,6 +212,12 @@ cron_jobs:
                   check string "cron job image" "ghcr.io/org/cron:latest"
                     job.image;
                   check string "cron job schedule" "0 * * * *" job.schedule;
+                  check (option string)
+                    "cron job registry user defaults to None" None
+                    job.registry_user;
+                  check (option string)
+                    "cron job registry pass defaults to None" None
+                    job.registry_pass;
                   check string "cron job server ip" "1.2.3.4"
                     job.server.ip_address)))
 
