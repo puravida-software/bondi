@@ -20,7 +20,7 @@ jobs:
         include:
           - os: ubuntu-22.04
             platform: linux-x86_64
-          # Disable for now to save on CI credits
+          # Disable for now to save on CI credits (remember to update the action and formula)
           # - os: macos-14
           #   platform: macos-arm64
     steps:
