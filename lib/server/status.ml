@@ -15,12 +15,9 @@ let parse_image_and_tag image =
   | [ name; tag ] -> Ok (name, tag)
   | _ -> Error ("invalid image format: " ^ image)
 
-let load_status ~client ~net =
+let load_status ~client ~net ~container_name =
   Lwt_eio.run_eio @@ fun () ->
-  match
-    Docker.Client.get_container_by_name client ~net
-      ~container_name:"bondi-workload"
-  with
+  match Docker.Client.get_container_by_name client ~net ~container_name with
   | None -> Error (`Not_found "Container not found")
   | Some container -> (
       let inspect =
@@ -41,18 +38,23 @@ let load_status ~client ~net =
           Ok status)
 
 let route ~client ~net =
-  Dream.get "/status" @@ fun _req ->
+  Dream.get "/status" @@ fun req ->
   let open Lwt.Infix in
-  Lwt.catch
-    (fun () ->
-      load_status ~client ~net >>= function
-      | Ok status ->
-          status
-          |> yojson_of_container_status
-          |> Yojson.Safe.to_string
-          |> Dream.json
-      | Error (`Not_found msg) -> Dream.respond ~status:`Not_Found msg
-      | Error (`Internal msg) ->
-          Dream.respond ~status:`Internal_Server_Error msg)
-    (fun exn ->
-      Dream.respond ~status:`Internal_Server_Error (Printexc.to_string exn))
+  match Dream.query req "service" with
+  | None ->
+      Dream.respond ~status:`Bad_Request
+        "Missing required query parameter: service"
+  | Some container_name ->
+      Lwt.catch
+        (fun () ->
+          load_status ~client ~net ~container_name >>= function
+          | Ok status ->
+              status
+              |> yojson_of_container_status
+              |> Yojson.Safe.to_string
+              |> Dream.json
+          | Error (`Not_found msg) -> Dream.respond ~status:`Not_Found msg
+          | Error (`Internal msg) ->
+              Dream.respond ~status:`Internal_Server_Error msg)
+        (fun exn ->
+          Dream.respond ~status:`Internal_Server_Error (Printexc.to_string exn))

@@ -1,4 +1,4 @@
-GET http://localhost:3030/api/v1/status
+GET {{host}}/api/v1/status?service=grokkr
 
 HTTP 404
 [Asserts]

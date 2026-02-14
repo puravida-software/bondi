@@ -38,7 +38,8 @@ let test_read_config_success () =
   Unix.putenv "SSH_PRIVATE_KEY_PASS" "ssh-pass";
   let yaml =
     {|service:
-  image: registry.example.com/app:latest
+  name: my-app
+  image: registry.example.com/app
   port: 8080
   registry_user: "{{REGISTRY_USER}}"
   registry_pass: "{{REGISTRY_PASS}}"
@@ -67,8 +68,8 @@ traefik:
           (match config.user_service with
           | None -> fail "expected service"
           | Some service -> (
-              check string "image" "registry.example.com/app:latest"
-                service.image;
+              check string "name" "my-app" service.name;
+              check string "image" "registry.example.com/app" service.image;
               check int "port" 8080 service.port;
               check (option string) "registry user" (Some "registry-user")
                 service.registry_user;
@@ -108,7 +109,8 @@ let test_read_config_with_cron_jobs () =
   Unix.putenv "SSH_PRIVATE_KEY_PASS" "ssh-pass";
   let yaml =
     {|service:
-  image: registry.example.com/app:latest
+  name: my-app
+  image: registry.example.com/app
   port: 8080
   registry_user: "{{REGISTRY_USER}}"
   registry_pass: "{{REGISTRY_PASS}}"
@@ -131,7 +133,7 @@ traefik:
 
 cron_jobs:
   - name: my-job
-    image: ghcr.io/org/my-job:latest
+    image: ghcr.io/org/my-job
     schedule: "0 14 * * 3"
     env_vars:
       API_KEY: "{{REGISTRY_USER}}"
@@ -157,8 +159,7 @@ cron_jobs:
               | [] -> fail "expected at least one cron job"
               | job :: _ -> (
                   check string "cron job name" "my-job" job.name;
-                  check string "cron job image" "ghcr.io/org/my-job:latest"
-                    job.image;
+                  check string "cron job image" "ghcr.io/org/my-job" job.image;
                   check string "cron job schedule" "0 14 * * 3" job.schedule;
                   check (option string) "cron job registry user"
                     (Some "registry-user") job.registry_user;
@@ -182,7 +183,7 @@ let test_read_config_cron_only () =
 
 cron_jobs:
   - name: my-cron
-    image: ghcr.io/org/cron:latest
+    image: ghcr.io/org/cron
     schedule: "0 * * * *"
     env_vars: {}
     server:
@@ -209,8 +210,7 @@ cron_jobs:
               | [] -> fail "expected at least one cron job"
               | job :: _ ->
                   check string "cron job name" "my-cron" job.name;
-                  check string "cron job image" "ghcr.io/org/cron:latest"
-                    job.image;
+                  check string "cron job image" "ghcr.io/org/cron" job.image;
                   check string "cron job schedule" "0 * * * *" job.schedule;
                   check (option string)
                     "cron job registry user defaults to None" None

@@ -52,9 +52,10 @@ let generate_bondi_entries cron_jobs =
     let payload = run_payload_of_cron_job c in
     let json_str = yojson_of_run_payload payload |> Yojson.Safe.to_string in
     let escaped = escape_for_shell json_str in
+    (* Use full path to curl: cron runs with minimal PATH and may not find curl *)
     Printf.sprintf
-      "%s curl -s -X POST http://localhost:3030/api/v1/run -H \"Content-Type: \
-       application/json\" -d '%s'"
+      "%s /usr/bin/curl -s -X POST http://localhost:3030/api/v1/run -H \
+       \"Content-Type: application/json\" -d '%s'"
       c.schedule escaped
   in
   (bondi_begin_marker :: List.map entry cron_jobs) @ [ bondi_end_marker ]

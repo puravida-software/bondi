@@ -14,7 +14,8 @@ let mock_container ~id ~image =
 
 let minimal_input =
   {
-    Simple.image = "myapp:v1";
+    Simple.service_name = Some "my-service";
+    image = "myapp:v1";
     port = 8080;
     registry_user = None;
     registry_pass = None;
@@ -54,7 +55,7 @@ let test_plan_empty_context_no_traefik () =
   | Error _ -> Alcotest.fail "plan should succeed with valid input"
   | Ok actions ->
       check (list string) "no traefik setup actions"
-        [ "PullImage(myapp:v1,false)"; "RunWorkload(bondi-workload)" ]
+        [ "PullImage(myapp:v1,false)"; "RunWorkload(my-service)" ]
         (List.map action_string actions)
 
 let test_plan_empty_context_with_traefik () =
@@ -67,7 +68,7 @@ let test_plan_empty_context_with_traefik () =
           "CreateNetwork(bondi-network)";
           "EnsureTraefik";
           "PullImage(myapp:v1,false)";
-          "RunWorkload(bondi-workload)";
+          "RunWorkload(my-service)";
         ]
         (List.map action_string actions)
 

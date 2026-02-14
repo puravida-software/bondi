@@ -58,7 +58,13 @@ Edit the `bondi.yaml` file to configure the project.
 
 5. Deploy your workload (this will also start Traefik)
 
-```bondi deploy```
+Single service:
+
+```bondi deploy my-service:v1.2.3```
+
+Multiple targets (service and cron):
+
+```bondi deploy my-service:v1.2.3 backup:v2 cron-job:v3```
 
 6. Check the status of the deployed workload
 
@@ -68,7 +74,7 @@ Edit the `bondi.yaml` file to configure the project.
 
 - `bondi init` - Initialize a new Bondi project
 - `bondi setup` - Set up the bondi-orchestrator on configured servers
-- `bondi deploy` - Deploy using the image versions in bondi.yaml
+- `bondi deploy NAME:TAG [NAME:TAG ...]` - Deploy services and cron jobs by name and tag
 - `bondi status` - Get the status of the deployed workload on all servers
 
 ## Deployment Strategies

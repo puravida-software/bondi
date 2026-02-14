@@ -3,7 +3,6 @@ open Json_helpers
 
 let ( let* ) = Result.bind
 let default_network_name = "bondi-network"
-let service_name = "bondi-workload"
 let traefik_name = "bondi-traefik"
 
 (* ------------------------------------------------------------------------- *)
@@ -21,6 +20,7 @@ type cron_job = {
 [@@deriving yojson]
 
 type deploy_input = {
+  service_name : string option; [@default None]
   image : string; (* Full image string including tag *)
   port : int;
   registry_user : string option;
@@ -114,11 +114,6 @@ let service_config (input : deploy_input) :
 (* Phase 1: Gather context (read-only)                                       *)
 (* ------------------------------------------------------------------------- *)
 
-let image_name_for_lookup image =
-  match parse_image_and_tag image with
-  | Ok (name, _) -> name
-  | Error _ -> image
-
 let gather_context ~client ~net (input : deploy_input) :
     (deploy_context, string) result =
   try
@@ -127,8 +122,10 @@ let gather_context ~client ~net (input : deploy_input) :
         ~image_name:"traefik"
     in
     let current_workload =
-      Docker.Client.get_container_by_image_name client ~net
-        ~image_name:(image_name_for_lookup input.image)
+      match input.service_name with
+      | Some name ->
+          Docker.Client.get_container_by_name client ~net ~container_name:name
+      | None -> None
     in
     Ok { current_traefik; current_workload }
   with
@@ -211,35 +208,39 @@ let plan (input : deploy_input) (context : deploy_context) :
     else Ok ()
   in
   (* Workload path - only when we have a service (traefik_domain_name) *)
-  (match input.traefik_domain_name with
-  | None -> ()
-  | Some _ -> (
-      match service_config input with
-      | Error _ -> ()
-      | Ok service_cfg ->
-          (match context.current_workload with
-          | None -> ()
-          | Some container ->
-              actions := StopAndRemoveContainer container :: !actions);
-          (match parse_image_and_tag input.image with
-          | Ok (image_name, image_tag) ->
-              actions :=
-                PullImage
-                  {
-                    image = image_name;
-                    tag = (if image_tag = "" then "latest" else image_tag);
-                    with_auth = Option.is_some input.registry_user;
-                  }
-                :: !actions
-          | Error _ -> ());
-          actions :=
-            RunWorkload
-              {
-                container_name = service_name;
-                config = service_cfg;
-                networking_conf = default_networking_config;
-              }
-            :: !actions));
+  let* () =
+    match input.traefik_domain_name with
+    | None -> Ok ()
+    | Some _ -> (
+        match (service_config input, input.service_name) with
+        | Error e, _ -> Error e
+        | Ok _, None -> Error "service_name required when deploying a service"
+        | Ok service_cfg, Some name ->
+            (match context.current_workload with
+            | None -> ()
+            | Some container ->
+                actions := StopAndRemoveContainer container :: !actions);
+            (match parse_image_and_tag input.image with
+            | Ok (image_name, image_tag) ->
+                actions :=
+                  PullImage
+                    {
+                      image = image_name;
+                      tag = (if image_tag = "" then "latest" else image_tag);
+                      with_auth = Option.is_some input.registry_user;
+                    }
+                  :: !actions
+            | Error _ -> ());
+            actions :=
+              RunWorkload
+                {
+                  container_name = name;
+                  config = service_cfg;
+                  networking_conf = default_networking_config;
+                }
+              :: !actions;
+            Ok ())
+  in
   Ok (List.rev !actions)
 
 (* ------------------------------------------------------------------------- *)

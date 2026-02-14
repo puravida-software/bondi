@@ -1,6 +1,7 @@
 POST {{host}}/api/v1/deploy
 Content-Type: application/json
 {
+  "service_name": "grokkr",
   "env_vars": {
     "DATABASE_URL": "my_database_url"
   },

@@ -54,8 +54,8 @@ type server = { ip_address : string; ssh : server_ssh option }
 [@@deriving yojson]
 
 type user_service = {
-  image : string;
-      (* Full image string including tag, e.g. registry.com/app:v1.2.3 *)
+  name : string;
+  image : string; (* Base image without tag, e.g. registry.com/app *)
   port : int;
   registry_user : string option;
   registry_pass : string option;
@@ -71,7 +71,7 @@ type traefik = { domain_name : string; image : string; acme_email : string }
 
 type cron_job = {
   name : string;
-  image : string;
+  image : string; (* Base image without tag *)
   schedule : string;
   env_vars : string_map option;
   registry_user : string option; [@default None]
