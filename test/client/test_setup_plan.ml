@@ -16,7 +16,8 @@ let minimal_server =
 
 let minimal_user_service =
   {
-    Config_file.image = "app:v1";
+    Config_file.name = "my-service";
+    Config_file.image = "app";
     Config_file.port = 8080;
     Config_file.registry_user = None;
     Config_file.registry_pass = None;

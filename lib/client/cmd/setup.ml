@@ -142,30 +142,31 @@ let gather_context ~user ~host ~key_path : (setup_context, string) result =
 (* Phase 2: Plan (pure)                                                      *)
 (* ------------------------------------------------------------------------- *)
 
-let has_user_services config = Option.is_some config.Config_file.user_service
+let has_user_services (config : Config_file.t) =
+  Option.is_some config.user_service
 
-let should_skip_server config (ctx : setup_context) : bool =
+let should_skip_server (config : Config_file.t) (ctx : setup_context) : bool =
   let has_cron_jobs =
-    match config.Config_file.cron_jobs with
+    match config.cron_jobs with
     | Some jobs when jobs <> [] -> true
     | _ -> false
   in
   ctx.running_version <> ""
-  && ctx.running_version = config.Config_file.bondi_server.version
+  && ctx.running_version = config.bondi_server.version
   && not has_cron_jobs
 
-let needs_orchestrator_restart config (ctx : setup_context) : bool =
+let needs_orchestrator_restart (config : Config_file.t) (ctx : setup_context) :
+    bool =
   if ctx.running_version = "" then false
   else
     let has_cron_jobs =
-      match config.Config_file.cron_jobs with
+      match config.cron_jobs with
       | Some jobs when jobs <> [] -> true
       | _ -> false
     in
-    ctx.running_version <> config.Config_file.bondi_server.version
-    || has_cron_jobs
+    ctx.running_version <> config.bondi_server.version || has_cron_jobs
 
-let plan config (ctx : setup_context) : action list =
+let plan (config : Config_file.t) (ctx : setup_context) : action list =
   let actions = ref [] in
   (* Always ensure Docker *)
   actions := EnsureDocker :: !actions;
@@ -182,8 +183,8 @@ let plan config (ctx : setup_context) : action list =
 (* Phase 3: Interpreter                                                      *)
 (* ------------------------------------------------------------------------- *)
 
-let interpret ~user ~host ~key_path ~ip_address config (actions : action list) :
-    (unit, string) result =
+let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
+    (actions : action list) : (unit, string) result =
   let rec run = function
     | [] -> Ok ()
     | EnsureDocker :: rest -> (
@@ -256,7 +257,7 @@ let interpret ~user ~host ~key_path ~ip_address config (actions : action list) :
         run rest
     | RunServer :: rest ->
         let volume_mounts, user_flag =
-          match config.Config_file.cron_jobs with
+          match config.cron_jobs with
           | Some jobs when jobs <> [] ->
               ( " -v /var/spool/cron/crontabs:/var/spool/cron/crontabs",
                 " --user root" )
@@ -267,7 +268,7 @@ let interpret ~user ~host ~key_path ~ip_address config (actions : action list) :
            /var/run/docker.sock:/var/run/docker.sock" ^ volume_mounts
           ^ user_flag
           ^ " --group-add $(stat -c %g /var/run/docker.sock) --rm \
-             mlopez1506/bondi-server:" ^ config.Config_file.bondi_server.version
+             mlopez1506/bondi-server:" ^ config.bondi_server.version
         in
         let* output = remote_run ~user ~host ~key_path run_cmd in
         print_endline

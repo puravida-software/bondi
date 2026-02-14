@@ -3,7 +3,8 @@ module Simple = Bondi_server__Strategy__Simple
 
 let minimal_input =
   {
-    Simple.image = "myapp:v1";
+    Simple.service_name = Some "my-service";
+    image = "myapp:v1";
     port = 8080;
     registry_user = None;
     registry_pass = None;

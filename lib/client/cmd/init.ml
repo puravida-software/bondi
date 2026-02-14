@@ -1,7 +1,8 @@
 let sample_config_yaml project_name =
   Printf.sprintf
     {|service:
-  image: %s:latest
+  name: %s
+  image: registry.example.com/your-org/your-project
   port: 8080
   registry_user: "{{REGISTRY_USER}}"
   registry_pass: "{{REGISTRY_PASS}}"
@@ -31,7 +32,7 @@ traefik:
 # For private registries, add registry_user and registry_pass (env template supported)
 # cron_jobs:
 #   - name: daily-job
-#     image: ghcr.io/org/image:latest
+#     image: ghcr.io/org/image
 #     schedule: "0 0 * * *"
 #     env_vars: {}
 #     # registry_user: "{{REGISTRY_USER}}"
