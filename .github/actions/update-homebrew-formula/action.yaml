@@ -62,7 +62,7 @@ runs:
 
         with open(formula_path, "w", encoding="utf-8") as f:
           f.write(data)
-        PY'
+        PY
 
     - name: Show formula diff
       if: inputs.dry-run == 'true' && inputs.original-formula-path != ''
