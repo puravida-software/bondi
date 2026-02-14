@@ -14,12 +14,12 @@ class Bondi < Formula
       end
     end
 
-    on_macos do
-      on_arm do
-        url "https://github.com/puravida-software/bondi/releases/download/v#{version}/bondi-macos-arm64.tar.gz"
-        sha256 "0000000000000000000000000000000000000000000000000000000000000000"
-      end
-    end
+    # on_macos do
+    #   on_arm do
+    #     url "https://github.com/puravida-software/bondi/releases/download/v#{version}/bondi-macos-arm64.tar.gz"
+    #     sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+    #   end
+    # end
 
     def install
       bin.install "bondi"
