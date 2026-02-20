@@ -100,6 +100,12 @@ Use cases:
     - Bondi runs the cron job itself
 - [ ] When the cron job finishes, call a service like healthchecks.io
 - [ ] Add Alloy support for Grafana Cloud
+- [ ] Allow removing a service/cron job
+- [ ] `status` should show the status of all Bondi
+    - service(s)
+    - cron jobs
+    - bondi-orchestrator
+    - Traefik
 - [ ] Set and update for consistent naming for the different concepts and moving parts in Bondi
 - [ ] Add blue-green deployments for services
 - [ ] Allow multiple server workflows to be used

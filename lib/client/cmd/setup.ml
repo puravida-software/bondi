@@ -135,7 +135,14 @@ let gather_context ~user ~host ~key_path : (setup_context, string) result =
     | Ok _ -> true
     | Error _ -> false
   in
-  let* running_version = get_running_version ~user ~host ~key_path in
+  let running_version =
+    match docker_status with
+    | `NotInstalled _ -> ""
+    | `Installed _ -> (
+        match get_running_version ~user ~host ~key_path with
+        | Ok v -> v
+        | Error _ -> "")
+  in
   Ok { docker_status; acme_file_exists; running_version }
 
 (* ------------------------------------------------------------------------- *)
@@ -334,13 +341,18 @@ let run () =
         exit 1);
       print_endline "Setting up the servers...";
       let results = List.map (setup_server config) servers in
-      if
-        List.exists
+      let errors =
+        List.filter_map
           (function
-            | Error _ -> true
-            | Ok () -> false)
+            | Error msg -> Some msg
+            | Ok () -> None)
           results
-      then exit 1
+      in
+      if errors <> [] then (
+        List.iter
+          (fun msg -> prerr_endline ("Error: " ^ msg))
+          errors;
+        exit 1)
 
 let cmd =
   let term = Cmdliner.Term.(const run $ const ()) in
