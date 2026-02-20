@@ -1,5 +1,5 @@
 (include_subdirs qualified)
 
 (tests
- (names test_env test_json_helpers test_simple_plan test_deploy)
+ (names test_env test_simple_plan test_deploy test_crontab)
  (libraries alcotest bondi.server))

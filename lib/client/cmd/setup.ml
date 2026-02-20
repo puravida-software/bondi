@@ -1,19 +1,5 @@
 let ( let* ) = Result.bind
 
-let contains ~needle hay =
-  let len_h = String.length hay in
-  let len_n = String.length needle in
-  let rec loop idx =
-    if idx + len_n > len_h then false
-    else if String.sub hay idx len_n = needle then true
-    else loop (idx + 1)
-  in
-  if len_n = 0 then true else loop 0
-
-let starts_with ~prefix value =
-  let len_prefix = String.length prefix in
-  String.length value >= len_prefix && String.sub value 0 len_prefix = prefix
-
 let read_all ic =
   let buffer = Buffer.create 256 in
   (try
@@ -44,14 +30,9 @@ let run_command cmd =
       Error
         (Printf.sprintf "command stopped (%d): %s" signal (String.trim stderr))
 
-let decode_private_key contents =
-  match Base64.decode contents with
-  | Ok decoded -> decoded
-  | Error _ -> contents
-
 let with_temp_key contents f =
   let path = Filename.temp_file "bondi-key-" ".pem" in
-  let decoded = decode_private_key contents in
+  let decoded = Docker_common.decode_private_key contents in
   let oc = open_out path in
   Fun.protect
     ~finally:(fun () ->
@@ -96,7 +77,7 @@ let get_running_version ~user ~host ~key_path =
       in
       let prefix = "mlopez1506/bondi-server:" in
       if image = "" then Ok ""
-      else if starts_with ~prefix image then
+      else if Bondi_common.String_utils.starts_with ~prefix image then
         let version =
           String.sub image (String.length prefix)
             (String.length image - String.length prefix)
@@ -124,8 +105,10 @@ let gather_context ~user ~host ~key_path : (setup_context, string) result =
   let docker_status =
     match get_docker_version ~user ~host ~key_path with
     | Ok version_output ->
-        if contains ~needle:"command not found" version_output then
-          `NotInstalled (String.trim version_output)
+        if
+          Bondi_common.String_utils.contains ~needle:"command not found"
+            version_output
+        then `NotInstalled (String.trim version_output)
         else `Installed (String.trim version_output)
     | Error err -> `NotInstalled err
   in
@@ -198,8 +181,10 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
         match
           match get_docker_version ~user ~host ~key_path with
           | Ok version_output ->
-              if contains ~needle:"command not found" version_output then
-                Error "docker not installed"
+              if
+                Bondi_common.String_utils.contains ~needle:"command not found"
+                  version_output
+              then Error "docker not installed"
               else (
                 print_endline
                   (Printf.sprintf "Docker is already installed on server %s: %s"
@@ -349,9 +334,7 @@ let run () =
           results
       in
       if errors <> [] then (
-        List.iter
-          (fun msg -> prerr_endline ("Error: " ^ msg))
-          errors;
+        List.iter (fun msg -> prerr_endline ("Error: " ^ msg)) errors;
         exit 1)
 
 let cmd =

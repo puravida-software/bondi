@@ -1,33 +1,33 @@
 open Alcotest
-module Json_helpers = Bondi_server__Json_helpers
+module Json_utils = Bondi_common.Json_utils
 
 let test_string_map_roundtrip_non_empty () =
   let input =
     [ ("key1", "value1"); ("key2", "value2"); ("env", "production") ]
   in
-  let json = Json_helpers.yojson_of_string_map input in
-  let result = Json_helpers.string_map_of_yojson json in
+  let json = Json_utils.yojson_of_string_map input in
+  let result = Json_utils.string_map_of_yojson json in
   check (list (pair string string)) "roundtrip preserves entries" input result
 
 let test_string_map_roundtrip_empty () =
   let input = [] in
-  let json = Json_helpers.yojson_of_string_map input in
-  let result = Json_helpers.string_map_of_yojson json in
+  let json = Json_utils.yojson_of_string_map input in
+  let result = Json_utils.string_map_of_yojson json in
   check
     (list (pair string string))
     "roundtrip preserves empty list" input result
 
 let test_string_map_roundtrip_single_entry () =
   let input = [ ("single_key", "single_value") ] in
-  let json = Json_helpers.yojson_of_string_map input in
-  let result = Json_helpers.string_map_of_yojson json in
+  let json = Json_utils.yojson_of_string_map input in
+  let result = Json_utils.string_map_of_yojson json in
   check
     (list (pair string string))
     "roundtrip preserves single entry" input result
 
 let test_decode_assoc () =
   let json = `Assoc [ ("a", `String "1"); ("b", `String "2") ] in
-  let result = Json_helpers.string_map_of_yojson json in
+  let result = Json_utils.string_map_of_yojson json in
   check
     (list (pair string string))
     "decodes assoc correctly"
@@ -36,13 +36,13 @@ let test_decode_assoc () =
 
 let test_decode_null () =
   let json = `Null in
-  let result = Json_helpers.string_map_of_yojson json in
+  let result = Json_utils.string_map_of_yojson json in
   check (list (pair string string)) "decodes null as empty list" [] result
 
 let test_decode_non_string_value_raises () =
   let json = `Assoc [ ("key", `Int 42) ] in
   try
-    ignore (Json_helpers.string_map_of_yojson json);
+    ignore (Json_utils.string_map_of_yojson json);
     Alcotest.fail "expected exception for non-string value"
   with
   | Ppx_yojson_conv_lib.Yojson_conv.Of_yojson_error _ -> ()
@@ -50,17 +50,17 @@ let test_decode_non_string_value_raises () =
 let test_decode_non_assoc_raises () =
   let json = `List [ `String "a" ] in
   try
-    ignore (Json_helpers.string_map_of_yojson json);
+    ignore (Json_utils.string_map_of_yojson json);
     Alcotest.fail "expected exception for non-object"
   with
   | Ppx_yojson_conv_lib.Yojson_conv.Of_yojson_error _ -> ()
 
 let test_encode_decodes_via_string () =
   let input = [ ("foo", "bar"); ("baz", "qux") ] in
-  let json = Json_helpers.yojson_of_string_map input in
+  let json = Json_utils.yojson_of_string_map input in
   let json_str = Yojson.Safe.to_string json in
   let parsed = Yojson.Safe.from_string json_str in
-  let result = Json_helpers.string_map_of_yojson parsed in
+  let result = Json_utils.string_map_of_yojson parsed in
   check
     (list (pair string string))
     "encode produces parseable JSON" input result
