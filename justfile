@@ -4,6 +4,8 @@ import "hurl_tests/hurl.just"
 
 IMAGE_NAME := "mlopez1506/bondi-server"
 
+default: build test fmt lint
+
 # Assumes bondi.yaml has a service named "bondi"
 docker-all TAG: (build-server TAG) (tag-server TAG) (push-server TAG) (update-bondi-version TAG)
 

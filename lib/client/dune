@@ -4,6 +4,7 @@
  (name bondi_client)
  (public_name bondi.client)
  (libraries
+  bondi.common
   cmdliner
   base64
   cohttp

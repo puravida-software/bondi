@@ -240,20 +240,6 @@ let json_body : Yojson.Safe.t -> Cohttp.Header.t * Cohttp_eio.Body.t =
   let headers = Cohttp.Header.init_with "Content-Type" "application/json" in
   (headers, Cohttp_eio.Body.of_string body_str)
 
-let string_contains : substring:string -> string -> bool =
- fun ~substring str ->
-  let sub_len = String.length substring in
-  let str_len = String.length str in
-  if sub_len = 0 then true
-  else if sub_len > str_len then false
-  else
-    let rec loop idx =
-      if idx + sub_len > str_len then false
-      else if String.sub str idx sub_len = substring then true
-      else loop (idx + 1)
-    in
-    loop 0
-
 let normalize_container_name : string -> string =
  fun name ->
   if String.length name > 0 && name.[0] = '/' then
@@ -279,7 +265,7 @@ let get_container_by_image_name :
   List.find_opt
     (fun c ->
       let image = (c : container).image in
-      string_contains ~substring:image_name image)
+      Bondi_common.String_utils.contains ~needle:image_name image)
     containers
 
 let get_container_by_name :

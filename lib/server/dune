@@ -4,6 +4,7 @@
  (name bondi_server)
  (public_name bondi.server)
  (libraries
+  bondi.common
   eio
   eio_main
   lwt_eio

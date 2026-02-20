@@ -1,0 +1,4 @@
+(library
+ (name bondi_common)
+ (public_name bondi.common)
+ (libraries yojson ppx_yojson_conv_lib))

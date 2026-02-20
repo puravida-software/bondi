@@ -9,12 +9,6 @@ type container_status = {
 }
 [@@deriving yojson, show]
 
-let parse_image_and_tag image =
-  match String.split_on_char ':' image with
-  | [ name ] -> Ok (name, "")
-  | [ name; tag ] -> Ok (name, tag)
-  | _ -> Error ("invalid image format: " ^ image)
-
 let load_status ~client ~net ~container_name =
   Lwt_eio.run_eio @@ fun () ->
   match Docker.Client.get_container_by_name client ~net ~container_name with
@@ -23,7 +17,7 @@ let load_status ~client ~net ~container_name =
       let inspect =
         Docker.Client.inspect_container client ~net ~container_id:container.id
       in
-      match parse_image_and_tag container.image with
+      match Strategy.Simple.parse_image_and_tag container.image with
       | Error msg -> Error (`Internal msg)
       | Ok (image_name, tag) ->
           let status =

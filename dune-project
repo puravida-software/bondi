@@ -20,6 +20,8 @@
  (synopsis "A short synopsis")
  (description "A longer description")
  (depends
+  (ppx_yojson_conv_lib
+   (>= v0.17.0))
   (lwt_ppx
    (>= 5.9.3))
   (alcotest
