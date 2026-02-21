@@ -1,4 +1,4 @@
-let default_traefik_image = "traefik:v3.3.0"
+let default_traefik_image = Bondi_common.Defaults.traefik_image
 
 type config = {
   network_name : string;
