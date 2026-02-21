@@ -93,6 +93,8 @@ let service_config (input : deploy_input) :
           ("traefik.http.routers.bondi.entrypoints", "websecure");
           ("traefik.http.routers.bondi.tls", "true");
           ("traefik.http.routers.bondi.tls.certresolver", "bondi_resolver");
+          ( "traefik.http.services.bondi.loadbalancer.server.port",
+            string_of_int input.port );
         ]
       in
       let env = Option.map env_vars_to_list input.env_vars in

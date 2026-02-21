@@ -25,7 +25,7 @@ bondi_server:
 
 traefik:
   domain_name: example.com
-  image: traefik:v3.3.0
+  image: %s
   acme_email: john.doe@example.com
 
 # Optional: cron jobs (one server per job; add more jobs for more servers)
@@ -44,7 +44,7 @@ traefik:
 #         private_key_contents: "{{SSH_PRIVATE_KEY_CONTENTS}}"
 #         private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
 |}
-    project_name
+    project_name Bondi_common.Defaults.traefik_image
 
 let write_file path contents =
   let oc = open_out path in
