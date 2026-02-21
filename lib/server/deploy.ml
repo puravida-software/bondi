@@ -76,7 +76,7 @@ let plan (input : Simple.deploy_input) : deploy_action list =
     match input.cron_jobs with
     | None
     | Some [] ->
-        [ UpsertCrontab input.cron_jobs ]
+        []
     | Some jobs -> [ PullCronImages jobs; UpsertCrontab (Some jobs) ]
   in
   base @ cron_actions

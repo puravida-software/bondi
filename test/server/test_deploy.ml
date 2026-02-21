@@ -61,8 +61,7 @@ let test_plan_empty_cron_jobs () =
   let actions = Deploy.plan input in
   Alcotest.check
     (Alcotest.list Alcotest.string)
-    "UpsertCrontab with empty list (clears bondi section)"
-    [ "DeployWorkload"; "UpsertCrontab(0)" ]
+    "no cron actions when cron_jobs is empty" [ "DeployWorkload" ]
     (List.map action_string actions)
 
 let test_plan_with_cron_jobs () =
@@ -88,8 +87,7 @@ let test_plan_no_cron_jobs () =
   let actions = Deploy.plan minimal_input in
   Alcotest.check
     (Alcotest.list Alcotest.string)
-    "DeployWorkload + UpsertCrontab(None)"
-    [ "DeployWorkload"; "UpsertCrontab(None)" ]
+    "no cron actions when cron_jobs is None" [ "DeployWorkload" ]
     (List.map action_string actions)
 
 let () =
