@@ -30,7 +30,13 @@ lint-fmt:
 lint-opam:
     opam exec -- opam-dune-lint
 
-lint: lint-doc lint-fmt lint-opam
+lint-dep-bounds:
+    @awk '/^depends:/,/^\]/' bondi.opam \
+      | grep -E '^\s+"[a-z]' \
+      | grep -v -e '>=' -e 'with-doc' \
+      | { if read -r line; then echo "Missing lower bound:"; echo "$line"; cat; exit 1; fi; }
+
+lint: lint-doc lint-fmt lint-opam lint-dep-bounds
 
 build:
     opam exec -- dune build
