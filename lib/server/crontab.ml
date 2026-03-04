@@ -6,6 +6,10 @@ open Ppx_yojson_conv_lib.Yojson_conv
 open Json_helpers
 
 let ( let* ) = Result.bind
+
+type scheduled_job = { name : string; image : string } [@@deriving eq, show]
+(** A cron job found in the system crontab. *)
+
 let crontab_path = "/var/spool/cron/crontabs/root"
 let crontab_spool_dir = "/var/spool/cron/crontabs"
 let bondi_begin_marker = "# BEGIN BONDI CRON"
@@ -35,8 +39,8 @@ let read_crontab () : (string, string) result =
   | Sys_error _ -> Ok ""
   | exn -> Error (Printexc.to_string exn)
 
-(* Extract job name from a Bondi cron line by parsing the JSON in -d '...' *)
-let job_name_from_cron_line line =
+(* Extract the JSON payload from a cron line's -d '...' argument. *)
+let json_from_cron_line line =
   let prefix = "-d '" in
   let rec find_prefix i =
     if i + String.length prefix > String.length line then None
@@ -52,7 +56,7 @@ let job_name_from_cron_line line =
         else if line.[i] = '\'' then
           if i + 4 <= String.length line && String.sub line i 4 = "'\\''" then
             find_end (i + 4)
-          else Some i (* Escaped quote '\'' *)
+          else Some i
         else find_end (i + 1)
       in
       match find_end start with
@@ -60,15 +64,24 @@ let job_name_from_cron_line line =
       | Some end_idx -> (
           try
             let json_str = String.sub line start (end_idx - start) in
-            let json = Yojson.Safe.from_string json_str in
-            match json with
-            | `Assoc assoc -> (
-                match List.assoc_opt "job" assoc with
-                | Some (`String name) -> Some name
-                | _ -> None)
-            | _ -> None
+            Some (Yojson.Safe.from_string json_str)
           with
           | _ -> None))
+
+(* Extract a string field from the JSON payload in a cron line. *)
+let string_field_from_cron_line ~field line =
+  match json_from_cron_line line with
+  | Some (`Assoc assoc) -> (
+      match List.assoc_opt field assoc with
+      | Some (`String v) -> Some v
+      | _ -> None)
+  | _ -> None
+
+(* Extract job name from a Bondi cron line by parsing the JSON in -d '...' *)
+let job_name_from_cron_line line = string_field_from_cron_line ~field:"job" line
+
+(** Extract the image field from a cron line's embedded JSON payload. *)
+let image_from_cron_line line = string_field_from_cron_line ~field:"image" line
 
 (* Extract Bondi cron lines (between markers) and parse job name from each.
    Returns (lines_outside_bondi, (job_name, full_line) list for bondi entries). *)
@@ -177,3 +190,20 @@ let upsert (cron_jobs : Strategy.Simple.cron_job list option) :
   let* () = write_crontab contents in
   let* () = chmod crontab_path 0o600 in
   touch_spool_dir ()
+
+(** Pure: extract scheduled jobs (name + image) from bondi cron lines. *)
+let parse_scheduled_jobs (lines : string list) : scheduled_job list =
+  let _, bondi_entries = parse_bondi_section lines in
+  List.filter_map
+    (fun (name, line) ->
+      match image_from_cron_line line with
+      | Some image -> Some { name; image }
+      | None -> None)
+    bondi_entries
+
+(** Impure: read the crontab file and return all bondi-managed scheduled jobs.
+*)
+let list_scheduled_jobs () : (scheduled_job list, string) result =
+  let* contents = read_crontab () in
+  let lines = String.split_on_char '\n' contents in
+  Ok (parse_scheduled_jobs lines)

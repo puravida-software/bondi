@@ -20,9 +20,8 @@ Help output for the main command.
          setup [OPTION]…
              Set up Bondi for a project.
   
-         status [OPTION]…
-             Get the status of the deployed service container on all configured
-             servers.
+         status [--output=VAL] [OPTION]…
+             Get the status of deployed components on all configured servers.
   
   COMMON OPTIONS
          --help[=FMT] (default=auto)
@@ -157,11 +156,15 @@ Help for status.
 
   $ bondi-client status --help=plain
   NAME
-         bondi-status - Get the status of the deployed service container on all
-         configured servers.
+         bondi-status - Get the status of deployed components on all configured
+         servers.
   
   SYNOPSIS
-         bondi status [OPTION]…
+         bondi status [--output=VAL] [OPTION]…
+  
+  OPTIONS
+         --output=VAL (absent=table)
+             Output format. VAL must be json or table.
   
   COMMON OPTIONS
          --help[=FMT] (default=auto)
