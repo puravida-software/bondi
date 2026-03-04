@@ -101,6 +101,57 @@ let test_generate_bondi_entries () =
     (List.nth entries (List.length entries - 1));
   check int "3 lines total (marker + 2 jobs + marker)" 4 (List.length entries)
 
+let scheduled_job_testable =
+  let pp fmt (j : Crontab.scheduled_job) =
+    Format.fprintf fmt "{ name = %s; image = %s }" j.name j.image
+  in
+  testable pp Crontab.equal_scheduled_job
+
+let test_image_from_cron_line () =
+  let line =
+    "0 * * * * /usr/bin/curl -s -X POST http://localhost:3030/api/v1/run -H \
+     \"Content-Type: application/json\" -d \
+     '{\"job\":\"backup\",\"image\":\"ghcr.io/org/backup:v2.1.0\"}'"
+  in
+  check (option string) "extracts image" (Some "ghcr.io/org/backup:v2.1.0")
+    (Crontab.image_from_cron_line line)
+
+let test_image_from_cron_line_no_match () =
+  let line = "0 * * * * echo hello" in
+  check (option string) "no match for non-bondi line" None
+    (Crontab.image_from_cron_line line)
+
+let test_parse_scheduled_jobs () =
+  let lines =
+    [
+      "# some other cron";
+      "# BEGIN BONDI CRON";
+      "0 * * * * /usr/bin/curl -s -X POST http://localhost:3030/api/v1/run -H \
+       \"Content-Type: application/json\" -d \
+       '{\"job\":\"backup\",\"image\":\"ghcr.io/org/backup:v2.1.0\"}'";
+      "30 2 * * * /usr/bin/curl -s -X POST http://localhost:3030/api/v1/run -H \
+       \"Content-Type: application/json\" -d \
+       '{\"job\":\"cleanup\",\"image\":\"ghcr.io/org/cleanup:latest\"}'";
+      "# END BONDI CRON";
+    ]
+  in
+  let expected : Crontab.scheduled_job list =
+    [
+      { name = "backup"; image = "ghcr.io/org/backup:v2.1.0" };
+      { name = "cleanup"; image = "ghcr.io/org/cleanup:latest" };
+    ]
+  in
+  check
+    (list scheduled_job_testable)
+    "parses two scheduled jobs" expected
+    (Crontab.parse_scheduled_jobs lines)
+
+let test_parse_scheduled_jobs_empty () =
+  check
+    (list scheduled_job_testable)
+    "empty input" []
+    (Crontab.parse_scheduled_jobs [])
+
 let () =
   run "Crontab"
     [
@@ -131,5 +182,14 @@ let () =
         [
           test_case "includes markers and entries" `Quick
             test_generate_bondi_entries;
+        ] );
+      ( "scheduled_jobs",
+        [
+          test_case "image from cron line" `Quick test_image_from_cron_line;
+          test_case "image from non-bondi line" `Quick
+            test_image_from_cron_line_no_match;
+          test_case "parse scheduled jobs" `Quick test_parse_scheduled_jobs;
+          test_case "parse scheduled jobs empty" `Quick
+            test_parse_scheduled_jobs_empty;
         ] );
     ]

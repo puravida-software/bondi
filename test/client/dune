@@ -1,5 +1,9 @@
 (include_subdirs qualified)
 
 (tests
- (names test_config_file test_setup_plan test_deploy_helpers)
- (libraries alcotest bondi.client))
+ (names
+  test_config_file
+  test_setup_plan
+  test_deploy_helpers
+  test_status_format)
+ (libraries alcotest bondi.client bondi.common yojson))
