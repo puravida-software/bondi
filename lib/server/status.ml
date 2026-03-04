@@ -39,8 +39,8 @@ type status_context = {
 }
 (** Gathered state from Docker and crontab — input to the pure plan phase. *)
 
-(** Parse an image string into (image_name, tag), falling back to the raw
-    string and "unknown" if parsing fails. *)
+(** Parse an image string into (image_name, tag), falling back to the raw string
+    and "unknown" if parsing fails. *)
 let parse_image image =
   match Strategy.Simple.parse_image_and_tag image with
   | Ok (image_name, tag) -> (image_name, tag)

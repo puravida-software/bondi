@@ -57,9 +57,9 @@ let table_header =
   Printf.sprintf "  %-22s %-35s %-12s %-12s %-10s %s" "NAME" "IMAGE" "TAG"
     "STATUS" "RESTARTS" "CREATED"
 
-(** Render the service section lines. Returns empty list if no service configured. *)
-let service_section ~(config : Config_file.t)
-    (status : comprehensive_status) =
+(** Render the service section lines. Returns empty list if no service
+    configured. *)
+let service_section ~(config : Config_file.t) (status : comprehensive_status) =
   match config.user_service with
   | None -> []
   | Some svc ->
@@ -70,7 +70,8 @@ let service_section ~(config : Config_file.t)
       in
       [ "Service"; table_header; row; "" ]
 
-(** Render the cron jobs section lines. Returns empty list if no cron jobs configured. *)
+(** Render the cron jobs section lines. Returns empty list if no cron jobs
+    configured. *)
 let cron_jobs_section ~(config_cron_names : string list)
     (status : comprehensive_status) =
   match config_cron_names with
@@ -112,7 +113,8 @@ let warnings_section (status : comprehensive_status) =
   match status.errors with
   | [] -> []
   | errors ->
-      "Warnings" :: List.map (fun e -> Printf.sprintf "  %s" e) errors @ [ "" ]
+      ("Warnings" :: List.map (fun e -> Printf.sprintf "  %s" e) errors)
+      @ [ "" ]
 
 (** Pure: render status results as a human-readable table. Adds "not found" rows
     for components in config but missing from the server response (REQ-F8). *)
