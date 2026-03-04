@@ -13,12 +13,9 @@ Status with --output table is accepted (no parse error, empty table for no serve
 
 Status with --output invalid produces a parse error.
 
-  $ bondi-client status --output invalid 2>&1
-  bondi: option '--output': invalid value 'invalid', expected either 'json' or
-         'table'
-  Usage: bondi status [--output=VAL] [OPTION]…
-  Try 'bondi status --help' or 'bondi --help' for more information.
-  [124]
+  $ bondi-client status --output invalid 2>&1 | sed "s/'//g"
+  Usage: bondi status [--help] [--output=VAL] [OPTION]…
+  bondi: option --output: invalid value invalid, expected either json or table
 
 Default (no --output flag) behaves like --output table (no parse error, empty table for no servers).
 

@@ -1,7 +1,6 @@
 Docker logs with no container name argument.
 
   $ TERM=dumb bondi-client docker logs 2>&1
+  Usage: bondi docker logs [--help] [OPTION]… CONTAINER_NAME
   bondi: required argument CONTAINER_NAME is missing
-  Usage: bondi docker logs [OPTION]… CONTAINER_NAME
-  Try 'bondi docker logs --help' or 'bondi --help' for more information.
   [124]
