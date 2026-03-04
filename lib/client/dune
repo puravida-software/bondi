@@ -1,5 +1,11 @@
 (include_subdirs qualified)
 
+(rule
+ (targets version.ml)
+ (deps (env_var BONDI_VERSION))
+ (action
+  (bash "printf 'let value = \"%s\"\\n' \"${BONDI_VERSION:-dev}\" > version.ml")))
+
 (library
  (name bondi_client)
  (public_name bondi.client)

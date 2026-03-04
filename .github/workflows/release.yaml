@@ -34,8 +34,18 @@ jobs:
           just-version: "1.46.0"
       - uses: ./.github/actions/ocaml-deps
 
+      - name: Set version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not derive version from tag (GITHUB_REF_NAME=$GITHUB_REF_NAME)"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
       - name: Build CLI
         run: |
+          export BONDI_VERSION="${VERSION}"
           opam exec -- dune build @install
           opam exec -- dune install --prefix "$PWD/_build/install"
 
