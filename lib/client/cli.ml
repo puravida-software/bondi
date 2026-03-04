@@ -1,6 +1,7 @@
 let cmd =
   let info =
-    Cmdliner.Cmd.info "bondi" ~version:"dev" ~doc:"Bondi deployment CLI."
+    Cmdliner.Cmd.info "bondi" ~version:Version.value
+      ~doc:"Bondi deployment CLI."
   in
   Cmdliner.Cmd.group info
     [
