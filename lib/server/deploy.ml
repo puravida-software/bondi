@@ -1,7 +1,24 @@
 open Ppx_yojson_conv_lib.Yojson_conv
 module Simple = Strategy.Simple
 
-type deploy_response = { status : string; tag : string } [@@deriving yojson]
+type deploy_response = {
+  status : string;
+  tag : string;
+  strategy : string;
+  strategy_reason : string;
+}
+[@@deriving yojson]
+
+type deployment_strategy = Simple | Blue_green
+
+let string_of_deployment_strategy = function
+  | Simple -> "simple"
+  | Blue_green -> "blue-green"
+
+let deployment_strategy_of_string = function
+  | "blue-green" -> Some Blue_green
+  | "simple" -> Some Simple
+  | _ -> None
 
 (* ------------------------------------------------------------------------- *)
 (* Pure helpers (testable)                                                   *)
@@ -46,23 +63,19 @@ let registry_auth_for_cron (c : Simple.cron_job) =
       Some (Base64.encode_string (Yojson.Safe.to_string json))
   | _ -> None
 
-let tag_from_image image =
-  match String.split_on_char ':' image with
-  | [ _; tag ] -> tag
-  | _ -> "latest"
+let image_name_and_tag image =
+  match Simple.parse_image_and_tag image with
+  | Ok (name, "") -> (name, "latest")
+  | Ok (name, tag) -> (name, tag)
+  | Error _ -> (image, "latest")
 
-let parse_cron_image image =
-  match String.split_on_char ':' image with
-  | [ name; tag ] -> (name, tag)
-  | [ name ] -> (name, "latest")
-  | _ -> (image, "latest")
+let tag_from_image image = snd (image_name_and_tag image)
 
 (* ------------------------------------------------------------------------- *)
 (* Types                                                                     *)
 (* ------------------------------------------------------------------------- *)
 
 type deploy_action =
-  | DeployWorkload
   | PullCronImages of Simple.cron_job list
   | UpsertCrontab of Simple.cron_job list option
 
@@ -70,16 +83,12 @@ type deploy_action =
 (* Phase 1: Plan (pure)                                                      *)
 (* ------------------------------------------------------------------------- *)
 
-let plan (input : Simple.deploy_input) : deploy_action list =
-  let base = [ DeployWorkload ] in
-  let cron_actions =
-    match input.cron_jobs with
-    | None
-    | Some [] ->
-        []
-    | Some jobs -> [ PullCronImages jobs; UpsertCrontab (Some jobs) ]
-  in
-  base @ cron_actions
+let cron_plan (input : Simple.deploy_input) : deploy_action list =
+  match input.cron_jobs with
+  | None
+  | Some [] ->
+      []
+  | Some jobs -> [ PullCronImages jobs; UpsertCrontab (Some jobs) ]
 
 (* ------------------------------------------------------------------------- *)
 (* Phase 2: Interpreter                                                      *)
@@ -87,17 +96,14 @@ let plan (input : Simple.deploy_input) : deploy_action list =
 
 let ( let* ) = Result.bind
 
-let interpret ~clock ~client ~net input (actions : deploy_action list) :
+let interpret ~client ~net (actions : deploy_action list) :
     (unit, string) result =
   let rec run = function
     | [] -> Ok ()
-    | DeployWorkload :: rest ->
-        let* () = Simple.deploy ~clock ~client ~net input in
-        run rest
     | PullCronImages jobs :: rest ->
         List.iter
           (fun (c : Simple.cron_job) ->
-            let image_name, tag = parse_cron_image c.image in
+            let image_name, tag = image_name_and_tag c.image in
             let auth = registry_auth_for_cron c in
             Docker.Client.pull_image client ~net ~image:image_name ~tag
               ~registry_auth:auth)
@@ -125,15 +131,69 @@ let decode_input body =
            (Yojson.Safe.to_string yojson))
   | exn -> Error (Printexc.to_string exn)
 
-let build_response (input : Simple.deploy_input) =
-  { status = "Deploy initiated"; tag = tag_from_image input.image }
+let build_response ~strategy ~strategy_reason (input : Simple.deploy_input) =
+  {
+    status = "Deploy initiated";
+    tag = tag_from_image input.image;
+    strategy = string_of_deployment_strategy strategy;
+    strategy_reason;
+  }
+
+let has_healthcheck ~client ~net ~image =
+  let inspect = Docker.Client.inspect_image client ~net ~image in
+  Option.is_some inspect.container_config.healthcheck
+
+let pull_main_image ~client ~net input =
+  let auth = registry_auth input in
+  let image_name, tag = image_name_and_tag input.Simple.image in
+  Docker.Client.pull_image client ~net ~image:image_name ~tag
+    ~registry_auth:auth
+
+let try_pull_main_image ~client ~net input =
+  try
+    pull_main_image ~client ~net input;
+    Ok ()
+  with
+  | exn ->
+      Error
+        (Printf.sprintf "failed to pull image %s: %s" input.Simple.image
+           (Printexc.to_string exn))
+
+let select_strategy_and_prepare ~client ~net input :
+    (deployment_strategy * string, string) result =
+  match input.Simple.deployment_strategy with
+  | Some s -> (
+      match deployment_strategy_of_string s with
+      | None ->
+          Error
+            (Printf.sprintf
+               "unknown deployment_strategy: %s (valid values: blue-green, \
+                simple)"
+               s)
+      | Some Simple -> Ok (Simple, "configured in bondi.yaml")
+      | Some Blue_green ->
+          let* () = try_pull_main_image ~client ~net input in
+          Ok (Blue_green, "configured in bondi.yaml"))
+  | None ->
+      let* () = try_pull_main_image ~client ~net input in
+      if has_healthcheck ~client ~net ~image:input.image then
+        Ok (Blue_green, "image has HEALTHCHECK")
+      else Ok (Simple, "image has no HEALTHCHECK")
+
+let deploy_workload ~clock ~client ~net ~strategy input =
+  match strategy with
+  | Blue_green -> Strategy.Blue_green.deploy ~clock ~client ~net ~input
+  | Simple -> Simple.deploy ~clock ~client ~net input
 
 let run_deploy ~clock ~net input =
   Lwt_eio.run_eio @@ fun () ->
   let client = Docker.Client.create ?registry_auth:(registry_auth input) () in
-  let actions = plan input in
-  let* () = interpret ~clock ~client ~net input actions in
-  Ok (build_response input)
+  let* strategy, strategy_reason =
+    select_strategy_and_prepare ~client ~net input
+  in
+  let* () = deploy_workload ~clock ~client ~net ~strategy input in
+  let* () = interpret ~client ~net (cron_plan input) in
+  Ok (build_response ~strategy ~strategy_reason input)
 
 let route ~clock ~net =
   Dream.post "/deploy" @@ fun req ->

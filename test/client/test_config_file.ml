@@ -221,6 +221,181 @@ cron_jobs:
                   check string "cron job server ip" "1.2.3.4"
                     job.server.ip_address)))
 
+let test_parse_service_with_drain_grace_period () =
+  Unix.putenv "SSH_PRIVATE_KEY_CONTENTS" "ssh-key";
+  Unix.putenv "SSH_PRIVATE_KEY_PASS" "ssh-pass";
+  Unix.putenv "REGISTRY_USER" "registry-user";
+  Unix.putenv "REGISTRY_PASS" "registry-pass";
+  let yaml =
+    {|service:
+  name: my-app
+  image: registry.example.com/app
+  port: 8080
+  drain_grace_period: 5
+  registry_user: "{{REGISTRY_USER}}"
+  registry_pass: "{{REGISTRY_PASS}}"
+  env_vars: {}
+  servers:
+    - ip_address: 1.2.3.4
+      ssh:
+        user: root
+        private_key_contents: "{{SSH_PRIVATE_KEY_CONTENTS}}"
+        private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
+
+bondi_server:
+  version: 0.1.0
+|}
+  in
+  with_temp_config yaml (fun () ->
+      match Config_file.read () with
+      | Error message -> fail message
+      | Ok config -> (
+          match config.user_service with
+          | None -> fail "expected service"
+          | Some service ->
+              check (option int) "drain_grace_period" (Some 5)
+                service.drain_grace_period))
+
+let test_parse_service_without_drain_grace_period () =
+  Unix.putenv "SSH_PRIVATE_KEY_CONTENTS" "ssh-key";
+  Unix.putenv "SSH_PRIVATE_KEY_PASS" "ssh-pass";
+  Unix.putenv "REGISTRY_USER" "registry-user";
+  Unix.putenv "REGISTRY_PASS" "registry-pass";
+  let yaml =
+    {|service:
+  name: my-app
+  image: registry.example.com/app
+  port: 8080
+  registry_user: "{{REGISTRY_USER}}"
+  registry_pass: "{{REGISTRY_PASS}}"
+  env_vars: {}
+  servers:
+    - ip_address: 1.2.3.4
+      ssh:
+        user: root
+        private_key_contents: "{{SSH_PRIVATE_KEY_CONTENTS}}"
+        private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
+
+bondi_server:
+  version: 0.1.0
+|}
+  in
+  with_temp_config yaml (fun () ->
+      match Config_file.read () with
+      | Error message -> fail message
+      | Ok config -> (
+          match config.user_service with
+          | None -> fail "expected service"
+          | Some service ->
+              check (option int) "drain_grace_period" None
+                service.drain_grace_period))
+
+let test_parse_service_with_deployment_strategy () =
+  Unix.putenv "SSH_PRIVATE_KEY_CONTENTS" "ssh-key";
+  Unix.putenv "SSH_PRIVATE_KEY_PASS" "ssh-pass";
+  Unix.putenv "REGISTRY_USER" "registry-user";
+  Unix.putenv "REGISTRY_PASS" "registry-pass";
+  let yaml =
+    {|service:
+  name: my-app
+  image: registry.example.com/app
+  port: 8080
+  deployment_strategy: blue-green
+  registry_user: "{{REGISTRY_USER}}"
+  registry_pass: "{{REGISTRY_PASS}}"
+  env_vars: {}
+  servers:
+    - ip_address: 1.2.3.4
+      ssh:
+        user: root
+        private_key_contents: "{{SSH_PRIVATE_KEY_CONTENTS}}"
+        private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
+
+bondi_server:
+  version: 0.1.0
+|}
+  in
+  with_temp_config yaml (fun () ->
+      match Config_file.read () with
+      | Error message -> fail message
+      | Ok config -> (
+          match config.user_service with
+          | None -> fail "expected service"
+          | Some service ->
+              check (option string) "deployment_strategy" (Some "blue-green")
+                service.deployment_strategy))
+
+let test_parse_service_with_health_timeout () =
+  Unix.putenv "SSH_PRIVATE_KEY_CONTENTS" "ssh-key";
+  Unix.putenv "SSH_PRIVATE_KEY_PASS" "ssh-pass";
+  Unix.putenv "REGISTRY_USER" "registry-user";
+  Unix.putenv "REGISTRY_PASS" "registry-pass";
+  let yaml =
+    {|service:
+  name: my-app
+  image: registry.example.com/app
+  port: 8080
+  health_timeout: 60
+  poll_interval: 2
+  registry_user: "{{REGISTRY_USER}}"
+  registry_pass: "{{REGISTRY_PASS}}"
+  env_vars: {}
+  servers:
+    - ip_address: 1.2.3.4
+      ssh:
+        user: root
+        private_key_contents: "{{SSH_PRIVATE_KEY_CONTENTS}}"
+        private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
+
+bondi_server:
+  version: 0.1.0
+|}
+  in
+  with_temp_config yaml (fun () ->
+      match Config_file.read () with
+      | Error message -> fail message
+      | Ok config -> (
+          match config.user_service with
+          | None -> fail "expected service"
+          | Some service ->
+              check (option int) "health_timeout" (Some 60)
+                service.health_timeout;
+              check (option int) "poll_interval" (Some 2) service.poll_interval))
+
+let test_parse_service_without_health_timeout () =
+  Unix.putenv "SSH_PRIVATE_KEY_CONTENTS" "ssh-key";
+  Unix.putenv "SSH_PRIVATE_KEY_PASS" "ssh-pass";
+  Unix.putenv "REGISTRY_USER" "registry-user";
+  Unix.putenv "REGISTRY_PASS" "registry-pass";
+  let yaml =
+    {|service:
+  name: my-app
+  image: registry.example.com/app
+  port: 8080
+  registry_user: "{{REGISTRY_USER}}"
+  registry_pass: "{{REGISTRY_PASS}}"
+  env_vars: {}
+  servers:
+    - ip_address: 1.2.3.4
+      ssh:
+        user: root
+        private_key_contents: "{{SSH_PRIVATE_KEY_CONTENTS}}"
+        private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
+
+bondi_server:
+  version: 0.1.0
+|}
+  in
+  with_temp_config yaml (fun () ->
+      match Config_file.read () with
+      | Error message -> fail message
+      | Ok config -> (
+          match config.user_service with
+          | None -> fail "expected service"
+          | Some service ->
+              check (option int) "health_timeout" None service.health_timeout;
+              check (option int) "poll_interval" None service.poll_interval))
+
 let () =
   run "Config_file"
     [
@@ -230,5 +405,15 @@ let () =
           test_case "reads config with cron jobs" `Quick
             test_read_config_with_cron_jobs;
           test_case "reads cron-only config" `Quick test_read_config_cron_only;
+          test_case "parses service with drain_grace_period" `Quick
+            test_parse_service_with_drain_grace_period;
+          test_case "parses service without drain_grace_period" `Quick
+            test_parse_service_without_drain_grace_period;
+          test_case "parses service with deployment_strategy" `Quick
+            test_parse_service_with_deployment_strategy;
+          test_case "parses service with health_timeout and poll_interval"
+            `Quick test_parse_service_with_health_timeout;
+          test_case "parses service without health_timeout and poll_interval"
+            `Quick test_parse_service_without_health_timeout;
         ] );
     ]

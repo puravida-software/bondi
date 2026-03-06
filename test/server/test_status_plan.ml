@@ -1,6 +1,5 @@
 open Alcotest
 module Status = Bondi_server__Status
-module Docker = Bondi_server__Docker__Client
 module Crontab = Bondi_server__Crontab
 
 let component_status_testable =
@@ -8,20 +7,8 @@ let component_status_testable =
 
 let component_status_option_testable = option component_status_testable
 let component_status_list_testable = list component_status_testable
-
-let mk_container ~id ~image ~names : Docker.container =
-  {
-    id;
-    image;
-    image_id = "sha256:abc";
-    names;
-    state = Some "running";
-    status = Some "Up 2 hours";
-  }
-
-let mk_inspect ~created_at ~restart_count ~status ?(exit_code = 0) () :
-    Docker.inspect_response =
-  { created_at; restart_count; state = { status; exit_code } }
+let mk_container = Server_test_helpers.mk_container
+let mk_inspect = Server_test_helpers.mk_inspect
 
 (* --- Test helpers --- *)
 
@@ -30,19 +17,19 @@ let full_context : Status.status_context =
     service_inspection =
       Some
         ( mk_container ~id:"svc1" ~image:"ghcr.io/org/myapp:v1.2.3"
-            ~names:[ "/myapp" ],
+            ~names:[ "/myapp" ] (),
           mk_inspect ~created_at:"2026-03-01T00:00:00Z" ~restart_count:2
             ~status:"running" () );
     orchestrator_inspection =
       Some
         ( mk_container ~id:"orch1" ~image:"ghcr.io/puravida/bondi-server:0.1.0"
-            ~names:[ "/bondi-orchestrator" ],
+            ~names:[ "/bondi-orchestrator" ] (),
           mk_inspect ~created_at:"2026-02-28T00:00:00Z" ~restart_count:0
             ~status:"running" () );
     traefik_inspection =
       Some
         ( mk_container ~id:"traefik1" ~image:"traefik:v3.3.3"
-            ~names:[ "/bondi-traefik" ],
+            ~names:[ "/bondi-traefik" ] (),
           mk_inspect ~created_at:"2026-02-28T00:00:00Z" ~restart_count:1
             ~status:"running" () );
     scheduled_cron_jobs =

@@ -19,9 +19,23 @@ type container = {
 }
 [@@deriving yojson] [@@yojson.allow_extra_fields]
 
+type health_log_entry = {
+  output : string; [@key "Output"]
+  exit_code : int; [@key "ExitCode"]
+}
+[@@deriving yojson] [@@yojson.allow_extra_fields]
+
+type health_state = {
+  status : string; [@key "Status"]
+  failing_streak : int; [@key "FailingStreak"] [@default 0]
+  log : health_log_entry list; [@key "Log"] [@default []]
+}
+[@@deriving yojson] [@@yojson.allow_extra_fields]
+
 type inspect_state = {
   status : string; [@key "Status"]
   exit_code : int; [@key "ExitCode"]
+  health : health_state option; [@key "Health"] [@yojson.option]
 }
 [@@deriving yojson] [@@yojson.allow_extra_fields]
 
@@ -105,6 +119,19 @@ type networking_config = {
       [@key "EndpointsConfig"] [@yojson.option]
 }
 [@@deriving yojson]
+
+type image_healthcheck = { test : string list [@key "Test"] }
+[@@deriving yojson] [@@yojson.allow_extra_fields]
+
+type image_container_config = {
+  healthcheck : image_healthcheck option; [@key "Healthcheck"] [@yojson.option]
+}
+[@@deriving yojson] [@@yojson.allow_extra_fields]
+
+type image_inspect_response = {
+  container_config : image_container_config; [@key "ContainerConfig"]
+}
+[@@deriving yojson] [@@yojson.allow_extra_fields]
 
 type run_image_options = {
   container_name : string;
@@ -409,3 +436,23 @@ let wait_container : t -> net:_ Eio.Net.t -> container_id:string -> int =
   in
   let resp = wait_response_of_yojson json in
   resp.status_code
+
+let inspect_image :
+    t -> net:_ Eio.Net.t -> image:string -> image_inspect_response =
+ fun t ~net ~image ->
+  let json = call_json t ~net `GET ("/images/" ^ image ^ "/json") [] in
+  image_inspect_response_of_yojson json
+
+let disconnect_from_network :
+    t -> net:_ Eio.Net.t -> container_id:string -> network_name:string -> unit =
+ fun t ~net ~container_id ~network_name ->
+  let payload =
+    `Assoc [ ("Container", `String container_id); ("Force", `Bool true) ]
+  in
+  let headers, body = json_body payload in
+  let _ =
+    call ~headers ~body t ~net `POST
+      ("/networks/" ^ network_name ^ "/disconnect")
+      []
+  in
+  ()

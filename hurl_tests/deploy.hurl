@@ -15,3 +15,8 @@ Content-Type: application/json
 }
 
 HTTP 200
+[Asserts]
+jsonpath "$.strategy" exists
+jsonpath "$.strategy_reason" exists
+jsonpath "$.status" exists
+jsonpath "$.tag" exists

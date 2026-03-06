@@ -23,6 +23,10 @@ let mk_service name : Config_file.user_service =
     registry_pass = None;
     env_vars = [];
     servers = [];
+    drain_grace_period = None;
+    deployment_strategy = None;
+    health_timeout = None;
+    poll_interval = None;
   }
 
 let mk_cron_job name image ip : Config_file.cron_job =

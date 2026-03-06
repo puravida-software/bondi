@@ -1,5 +1,10 @@
 (include_subdirs qualified)
 
+(library
+ (name server_test_helpers)
+ (modules server_test_helpers)
+ (libraries bondi.server))
+
 (tests
  (names
   test_env
@@ -7,5 +12,16 @@
   test_deploy
   test_crontab
   test_status_plan
-  test_run)
- (libraries alcotest bondi.server))
+  test_run
+  test_docker_client
+  test_blue_green_plan)
+ (modules
+  test_env
+  test_simple_plan
+  test_deploy
+  test_crontab
+  test_status_plan
+  test_run
+  test_docker_client
+  test_blue_green_plan)
+ (libraries alcotest bondi.server server_test_helpers))
