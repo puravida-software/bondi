@@ -19,7 +19,10 @@ type container = {
 }
 [@@deriving yojson] [@@yojson.allow_extra_fields]
 
-type inspect_state = { status : string [@key "Status"] }
+type inspect_state = {
+  status : string; [@key "Status"]
+  exit_code : int; [@key "ExitCode"]
+}
 [@@deriving yojson] [@@yojson.allow_extra_fields]
 
 type inspect_response = {
@@ -335,6 +338,13 @@ let remove_container : t -> net:_ Eio.Net.t -> container_id:string -> unit =
  fun t ~net ~container_id ->
   let query = [ query_param "force" "true"; query_param "v" "true" ] in
   let _ = call t ~net `DELETE ("/containers/" ^ container_id) query in
+  ()
+
+let rename_container :
+    t -> net:_ Eio.Net.t -> container_id:string -> new_name:string -> unit =
+ fun t ~net ~container_id ~new_name ->
+  let query = [ query_param "name" new_name ] in
+  let _ = call t ~net `POST ("/containers/" ^ container_id ^ "/rename") query in
   ()
 
 let remove_container_and_image :

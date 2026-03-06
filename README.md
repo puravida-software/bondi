@@ -98,7 +98,7 @@ Use cases:
 - [x] Allow for cron workflows to be used
     - configure the underlying cron utility
     - Bondi runs the cron job itself
-- [ ] `status` should show the status of all Bondi
+- [x] `status` should show the status of all Bondi
     - service(s)
     - cron jobs
     - bondi-orchestrator
@@ -107,10 +107,11 @@ Use cases:
 - [ ] Add Alloy support for Grafana Cloud
 - [ ] When the cron job finishes, call a service like healthchecks.io
 - [ ] Allow removing a service/cron job
-- [ ] Set and update for consistent naming for the different concepts and moving parts in Bondi
+- [ ] Define (and update) consistent naming for the different concepts and moving parts in Bondi
 - [ ] Allow multiple server workflows to be used
 - [ ] Keep X amount of previous Docker images
 - [ ] Remove old bondi-orchestrator containers on the server
+- [ ] Automated cleanup of orphaned cron temp containers (see PRD 0003)
 
 Solve:
 - [ ] What to do if deploying the same version again?

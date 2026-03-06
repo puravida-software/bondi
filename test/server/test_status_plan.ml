@@ -19,8 +19,9 @@ let mk_container ~id ~image ~names : Docker.container =
     status = Some "Up 2 hours";
   }
 
-let mk_inspect ~created_at ~restart_count ~status : Docker.inspect_response =
-  { created_at; restart_count; state = { status } }
+let mk_inspect ~created_at ~restart_count ~status ?(exit_code = 0) () :
+    Docker.inspect_response =
+  { created_at; restart_count; state = { status; exit_code } }
 
 (* --- Test helpers --- *)
 
@@ -31,24 +32,25 @@ let full_context : Status.status_context =
         ( mk_container ~id:"svc1" ~image:"ghcr.io/org/myapp:v1.2.3"
             ~names:[ "/myapp" ],
           mk_inspect ~created_at:"2026-03-01T00:00:00Z" ~restart_count:2
-            ~status:"running" );
+            ~status:"running" () );
     orchestrator_inspection =
       Some
         ( mk_container ~id:"orch1" ~image:"ghcr.io/puravida/bondi-server:0.1.0"
             ~names:[ "/bondi-orchestrator" ],
           mk_inspect ~created_at:"2026-02-28T00:00:00Z" ~restart_count:0
-            ~status:"running" );
+            ~status:"running" () );
     traefik_inspection =
       Some
         ( mk_container ~id:"traefik1" ~image:"traefik:v3.3.3"
             ~names:[ "/bondi-traefik" ],
           mk_inspect ~created_at:"2026-02-28T00:00:00Z" ~restart_count:1
-            ~status:"running" );
+            ~status:"running" () );
     scheduled_cron_jobs =
       [
         { Crontab.name = "backup"; image = "ghcr.io/org/backup:v2.1.0" };
         { Crontab.name = "cleanup"; image = "ghcr.io/org/cleanup:latest" };
       ];
+    cron_container_inspections = [];
     cron_error = None;
   }
 
@@ -209,6 +211,117 @@ let test_plan_cron_error_propagation () =
     (list component_status_testable)
     "cron jobs empty with error" [] result.cron_jobs
 
+(* 11. test_plan_cron_job_completed *)
+let test_plan_cron_job_completed () =
+  let ctx =
+    {
+      full_context with
+      scheduled_cron_jobs =
+        [ { Crontab.name = "backup"; image = "ghcr.io/org/backup:v2.1.0" } ];
+      cron_container_inspections =
+        [
+          ( "backup",
+            mk_inspect ~created_at:"2026-03-01T12:00:00Z" ~restart_count:0
+              ~status:"exited" ~exit_code:0 () );
+        ];
+    }
+  in
+  let result = Status.plan ~service_name:None ctx in
+  let expected : Status.component_status =
+    {
+      name = "backup";
+      image_name = "ghcr.io/org/backup";
+      tag = "v2.1.0";
+      status = "completed";
+      restart_count = None;
+      created_at = None;
+    }
+  in
+  check component_status_list_testable "cron job completed" [ expected ]
+    result.cron_jobs
+
+(* 12. test_plan_cron_job_failed *)
+let test_plan_cron_job_failed () =
+  let ctx =
+    {
+      full_context with
+      scheduled_cron_jobs =
+        [ { Crontab.name = "backup"; image = "ghcr.io/org/backup:v2.1.0" } ];
+      cron_container_inspections =
+        [
+          ( "backup",
+            mk_inspect ~created_at:"2026-03-01T12:00:00Z" ~restart_count:0
+              ~status:"exited" ~exit_code:1 () );
+        ];
+    }
+  in
+  let result = Status.plan ~service_name:None ctx in
+  let expected : Status.component_status =
+    {
+      name = "backup";
+      image_name = "ghcr.io/org/backup";
+      tag = "v2.1.0";
+      status = "failed (exit 1)";
+      restart_count = None;
+      created_at = None;
+    }
+  in
+  check component_status_list_testable "cron job failed" [ expected ]
+    result.cron_jobs
+
+(* 13. test_plan_cron_job_no_container *)
+let test_plan_cron_job_no_container () =
+  let ctx =
+    {
+      full_context with
+      scheduled_cron_jobs =
+        [ { Crontab.name = "backup"; image = "ghcr.io/org/backup:v2.1.0" } ];
+      cron_container_inspections = [];
+    }
+  in
+  let result = Status.plan ~service_name:None ctx in
+  let expected : Status.component_status =
+    {
+      name = "backup";
+      image_name = "ghcr.io/org/backup";
+      tag = "v2.1.0";
+      status = "scheduled";
+      restart_count = None;
+      created_at = None;
+    }
+  in
+  check component_status_list_testable "cron job scheduled" [ expected ]
+    result.cron_jobs
+
+(* 14. test_plan_cron_job_running *)
+let test_plan_cron_job_running () =
+  let ctx =
+    {
+      full_context with
+      scheduled_cron_jobs =
+        [ { Crontab.name = "backup"; image = "ghcr.io/org/backup:v2.1.0" } ];
+      cron_container_inspections =
+        [
+          ( "backup",
+            mk_inspect ~created_at:"2026-03-01T12:00:00Z" ~restart_count:0
+              ~status:"running" ~exit_code:0 () );
+        ];
+    }
+  in
+  let result = Status.plan ~service_name:None ctx in
+  let expected : Status.component_status =
+    {
+      name = "backup";
+      image_name = "ghcr.io/org/backup";
+      tag = "v2.1.0";
+      status = "running";
+      restart_count = None;
+      created_at = None;
+    }
+  in
+  check component_status_list_testable "cron job running" [ expected ]
+    result.cron_jobs
+
 let () =
   run "Status.plan"
     [
@@ -227,5 +340,10 @@ let () =
           test_case "no errors" `Quick test_plan_no_errors;
           test_case "cron error propagation" `Quick
             test_plan_cron_error_propagation;
+          test_case "cron job completed" `Quick test_plan_cron_job_completed;
+          test_case "cron job failed" `Quick test_plan_cron_job_failed;
+          test_case "cron job no container" `Quick
+            test_plan_cron_job_no_container;
+          test_case "cron job running" `Quick test_plan_cron_job_running;
         ] );
     ]

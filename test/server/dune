@@ -1,5 +1,11 @@
 (include_subdirs qualified)
 
 (tests
- (names test_env test_simple_plan test_deploy test_crontab test_status_plan)
+ (names
+  test_env
+  test_simple_plan
+  test_deploy
+  test_crontab
+  test_status_plan
+  test_run)
  (libraries alcotest bondi.server))
