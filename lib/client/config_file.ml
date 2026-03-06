@@ -30,6 +30,10 @@ type user_service = {
   registry_pass : string option;
   env_vars : string_map;
   servers : server list;
+  drain_grace_period : int option; [@default None]
+  deployment_strategy : string option; [@default None]
+  health_timeout : int option; [@default None]
+  poll_interval : int option; [@default None]
 }
 [@@deriving yojson]
 

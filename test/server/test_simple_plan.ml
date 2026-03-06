@@ -25,6 +25,10 @@ let minimal_input =
     traefik_acme_email = Some "admin@example.com";
     force_traefik_redeploy = None;
     cron_jobs = None;
+    drain_grace_period = None;
+    deployment_strategy = None;
+    health_timeout = None;
+    poll_interval = None;
   }
 
 let input_with_registry =

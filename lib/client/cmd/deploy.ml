@@ -23,6 +23,10 @@ type deploy_payload = {
   registry_pass : string option;
   force_traefik_redeploy : bool option;
   cron_jobs : deploy_cron_job list option;
+  drain_grace_period : float option;
+  deployment_strategy : string option;
+  health_timeout : float option;
+  poll_interval : float option;
 }
 [@@deriving yojson]
 
@@ -209,6 +213,12 @@ let run force_traefik_redeploy deployments =
                   force_traefik_redeploy = Some force_traefik_redeploy;
                   cron_jobs =
                     cron_jobs_for_server ip_address config.cron_jobs deployments;
+                  drain_grace_period =
+                    Option.map float_of_int service.drain_grace_period;
+                  deployment_strategy = service.deployment_strategy;
+                  health_timeout =
+                    Option.map float_of_int service.health_timeout;
+                  poll_interval = Option.map float_of_int service.poll_interval;
                 }
               else
                 {
@@ -224,6 +234,10 @@ let run force_traefik_redeploy deployments =
                   force_traefik_redeploy = Some force_traefik_redeploy;
                   cron_jobs =
                     cron_jobs_for_server ip_address config.cron_jobs deployments;
+                  drain_grace_period = None;
+                  deployment_strategy = None;
+                  health_timeout = None;
+                  poll_interval = None;
                 }
             in
             print_endline

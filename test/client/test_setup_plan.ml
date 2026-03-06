@@ -23,6 +23,10 @@ let minimal_user_service =
     Config_file.registry_pass = None;
     Config_file.env_vars = [];
     Config_file.servers = [ minimal_server ];
+    Config_file.drain_grace_period = None;
+    Config_file.deployment_strategy = None;
+    Config_file.health_timeout = None;
+    Config_file.poll_interval = None;
   }
 
 let make_config ~user_service ~cron_jobs ~version =

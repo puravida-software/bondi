@@ -31,6 +31,10 @@ type deploy_input = {
   traefik_acme_email : string option;
   force_traefik_redeploy : bool option;
   cron_jobs : cron_job list option; [@default None]
+  drain_grace_period : float option; [@default None]
+  deployment_strategy : string option; [@default None]
+  health_timeout : float option; [@default None]
+  poll_interval : float option; [@default None]
 }
 [@@deriving yojson]
 

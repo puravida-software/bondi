@@ -103,8 +103,10 @@ Use cases:
     - cron jobs
     - bondi-orchestrator
     - Traefik
-- [ ] Add blue-green deployments for services
+- [x] Add blue-green deployments for services
 - [ ] Add Alloy support for Grafana Cloud
+- [ ] Add optional automatic rollbacks for blue-green deployments
+- [ ] Allow custom healthchecks in bondi.yaml for images without a built-in HEALTHCHECK
 - [ ] When the cron job finishes, call a service like healthchecks.io
 - [ ] Allow removing a service/cron job
 - [ ] Define (and update) consistent naming for the different concepts and moving parts in Bondi
