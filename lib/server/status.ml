@@ -35,6 +35,7 @@ type status_context = {
   traefik_inspection :
     (Docker.Client.container * Docker.Client.inspect_response) option;
   scheduled_cron_jobs : Crontab.scheduled_job list;
+  cron_container_inspections : (string * Docker.Client.inspect_response) list;
   cron_error : string option;
 }
 (** Gathered state from Docker and crontab — input to the pure plan phase. *)
@@ -61,15 +62,31 @@ let component_of_inspection ~name
       created_at = Some inspect.created_at;
     }
 
-(** Build a component_status for a scheduled cron job. *)
-let component_of_scheduled_job (job : Crontab.scheduled_job) : component_status
-    =
+(** Derive cron job status from a container's inspect state. Maps "exited" with
+    exit code 0 to "completed", non-zero to "failed (exit N)". Unknown statuses
+    (e.g. "dead", "paused") are passed through as-is. *)
+let cron_status_of_inspect (state : Docker.Client.inspect_state) : string =
+  match state.status with
+  | "exited" when state.exit_code = 0 -> "completed"
+  | "exited" -> Printf.sprintf "failed (exit %d)" state.exit_code
+  | s -> s
+
+(** Build a component_status for a scheduled cron job, optionally using
+    container inspect data if available. *)
+let component_of_scheduled_job
+    ~(inspections : (string * Docker.Client.inspect_response) list)
+    (job : Crontab.scheduled_job) : component_status =
   let image_name, tag = parse_image job.image in
+  let status =
+    match List.assoc_opt job.name inspections with
+    | Some inspect -> cron_status_of_inspect inspect.state
+    | None -> "scheduled"
+  in
   {
     name = job.name;
     image_name;
     tag;
-    status = "scheduled";
+    status;
     restart_count = None;
     created_at = None;
   }
@@ -113,7 +130,11 @@ let plan ~(service_name : string option) (ctx : status_context) :
         in
         component_of_inspection ~name pair ~image:container.image
   in
-  let cron_jobs = List.map component_of_scheduled_job ctx.scheduled_cron_jobs in
+  let cron_jobs =
+    List.map
+      (component_of_scheduled_job ~inspections:ctx.cron_container_inspections)
+      ctx.scheduled_cron_jobs
+  in
   let errors =
     match ctx.cron_error with
     | Some e -> [ e ]
@@ -150,11 +171,28 @@ let gather ~client ~net ~(service_name : string option) : status_context =
     | Ok jobs -> (jobs, None)
     | Error msg -> ([], Some (Printf.sprintf "Failed to read crontab: %s" msg))
   in
+  let cron_container_inspections =
+    List.filter_map
+      (fun (job : Crontab.scheduled_job) ->
+        match
+          Docker.Client.get_container_by_name client ~net
+            ~container_name:job.name
+        with
+        | None -> None
+        | Some container ->
+            let inspect =
+              Docker.Client.inspect_container client ~net
+                ~container_id:container.id
+            in
+            Some (job.name, inspect))
+      scheduled_cron_jobs
+  in
   {
     service_inspection;
     orchestrator_inspection;
     traefik_inspection;
     scheduled_cron_jobs;
+    cron_container_inspections;
     cron_error;
   }
 
