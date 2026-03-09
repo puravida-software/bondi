@@ -89,13 +89,24 @@ let get_running_version ~user ~host ~key_path =
 (* Types                                                                     *)
 (* ------------------------------------------------------------------------- *)
 
+type alloy_state = Alloy_not_running | Alloy_running of { image : string }
+
 type setup_context = {
   docker_status : [ `Installed of string | `NotInstalled of string ];
   acme_file_exists : bool;
   running_version : string;
+  alloy_state : alloy_state;
 }
 
-type action = EnsureDocker | EnsureAcmeFile | StopOrchestrator | RunServer
+type action =
+  | EnsureDocker
+  | EnsureAcmeFile
+  | StopOrchestrator
+  | RunServer
+  | EnsureAlloyConfig
+  | RunAlloy
+  | StopAlloy
+  | RemoveAlloy
 
 (* ------------------------------------------------------------------------- *)
 (* Phase 1: Gather context (read-only)                                       *)
@@ -126,7 +137,27 @@ let gather_context ~user ~host ~key_path : (setup_context, string) result =
         | Ok v -> v
         | Error _ -> "")
   in
-  Ok { docker_status; acme_file_exists; running_version }
+  let alloy_state =
+    match docker_status with
+    | `NotInstalled _ -> Alloy_not_running
+    | `Installed _ -> (
+        match
+          run_remote_docker ~user ~host ~key_path
+            "ps --filter name=^/bondi-alloy$ --format '{{.Image}}'"
+        with
+        | Ok output -> (
+            let image =
+              output
+              |> String.split_on_char '\n'
+              |> List.find_opt (fun line -> String.trim line <> "")
+              |> Option.map String.trim
+            in
+            match image with
+            | Some img when img <> "" -> Alloy_running { image = img }
+            | _ -> Alloy_not_running)
+        | Error _ -> Alloy_not_running)
+  in
+  Ok { docker_status; acme_file_exists; running_version; alloy_state }
 
 (* ------------------------------------------------------------------------- *)
 (* Phase 2: Plan (pure)                                                      *)
@@ -156,6 +187,9 @@ let needs_orchestrator_restart (config : Config_file.t) (ctx : setup_context) :
     in
     ctx.running_version <> config.bondi_server.version || has_cron_jobs
 
+let alloy_desired_image (alloy : Config_file.alloy) =
+  Option.value alloy.image ~default:Bondi_common.Defaults.alloy_image
+
 let plan (config : Config_file.t) (ctx : setup_context) : action list =
   let actions = ref [] in
   (* Always ensure Docker *)
@@ -167,7 +201,61 @@ let plan (config : Config_file.t) (ctx : setup_context) : action list =
     if needs_orchestrator_restart config ctx then
       actions := StopOrchestrator :: !actions;
     actions := RunServer :: !actions);
+  (* Alloy actions *)
+  (match (config.alloy, ctx.alloy_state) with
+  | None, Alloy_running _ ->
+      (* Alloy removed from config but still running *)
+      actions := StopAlloy :: !actions;
+      actions := RemoveAlloy :: !actions
+  | Some alloy, Alloy_running { image = running } ->
+      let desired = alloy_desired_image alloy in
+      if running <> desired then (
+        actions := StopAlloy :: !actions;
+        actions := RemoveAlloy :: !actions;
+        actions := EnsureAlloyConfig :: !actions;
+        actions := RunAlloy :: !actions)
+  | Some _, Alloy_not_running ->
+      (* Alloy configured but not running *)
+      actions := EnsureAlloyConfig :: !actions;
+      actions := RunAlloy :: !actions
+  | None, Alloy_not_running -> ());
   List.rev !actions
+
+(* ------------------------------------------------------------------------- *)
+(* Alloy River config generation (delegates to Bondi_common.Alloy_river)     *)
+(* ------------------------------------------------------------------------- *)
+
+let excluded_containers_from_config (config : Config_file.t) =
+  match config.user_service with
+  | Some svc when svc.logs = Some false -> [ svc.name ]
+  | _ -> []
+
+let alloy_river_config (config : Config_file.t) (alloy : Config_file.alloy) :
+    Bondi_common.Alloy_river.config =
+  let collect =
+    match alloy.collect with
+    | Some "services_only" -> Bondi_common.Alloy_river.Services_only
+    | Some "all"
+    | None ->
+        Bondi_common.Alloy_river.All
+    | Some _ ->
+        (* validate_alloy_collect rejects invalid values during config parsing,
+           so this branch is unreachable. Default to All defensively. *)
+        Bondi_common.Alloy_river.All
+  in
+  let labels =
+    match alloy.labels with
+    | Some l -> l
+    | None -> []
+  in
+  {
+    grafana_cloud_endpoint = alloy.grafana_cloud.endpoint;
+    grafana_cloud_instance_id = alloy.grafana_cloud.instance_id;
+    grafana_cloud_api_key = alloy.grafana_cloud.api_key;
+    collect;
+    labels;
+    excluded_containers = excluded_containers_from_config config;
+  }
 
 (* ------------------------------------------------------------------------- *)
 (* Phase 3: Interpreter                                                      *)
@@ -259,14 +347,81 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
           "docker run -d --name bondi-orchestrator -p 3030:3030 -v \
            /var/run/docker.sock:/var/run/docker.sock" ^ volume_mounts
           ^ user_flag
-          ^ " --group-add $(stat -c %g /var/run/docker.sock) --rm \
-             mlopez1506/bondi-server:" ^ config.bondi_server.version
+          ^ " --group-add $(stat -c %g /var/run/docker.sock) --label \
+             bondi.managed=true --label bondi.type=infrastructure --label \
+             bondi.logs=true --rm mlopez1506/bondi-server:"
+          ^ config.bondi_server.version
         in
         let* output = remote_run ~user ~host ~key_path run_cmd in
         print_endline
           (Printf.sprintf
              "bondi-orchestrator container started on server %s: %s" ip_address
              (String.trim output));
+        run rest
+    | EnsureAlloyConfig :: rest -> (
+        match config.alloy with
+        | None -> run rest
+        | Some alloy ->
+            let river_config =
+              Bondi_common.Alloy_river.generate
+                (alloy_river_config config alloy)
+            in
+            let config_dir = "/etc/bondi/alloy" in
+            let config_path = config_dir ^ "/config.alloy" in
+            let* _ =
+              remote_run ~user ~host ~key_path
+                (Printf.sprintf "sudo mkdir -p %s" config_dir)
+            in
+            let* _ =
+              remote_run ~user ~host ~key_path
+                (Printf.sprintf
+                   "cat > %s << '__BONDI_ALLOY_CFG_EOF__'\n\
+                    %s__BONDI_ALLOY_CFG_EOF__"
+                   config_path river_config)
+            in
+            print_endline
+              (Printf.sprintf "Alloy config written on server %s: %s" ip_address
+                 config_path);
+            run rest)
+    | RunAlloy :: rest -> (
+        match config.alloy with
+        | None -> run rest
+        | Some alloy ->
+            let image =
+              Option.value alloy.image
+                ~default:Bondi_common.Defaults.alloy_image
+            in
+            let run_cmd =
+              Printf.sprintf
+                "docker run -d --name bondi-alloy --restart unless-stopped -v \
+                 /var/run/docker.sock:/var/run/docker.sock:ro -v \
+                 /etc/bondi/alloy/config.alloy:/etc/bondi/alloy/config.alloy:ro \
+                 --label bondi.managed=true --label bondi.type=infrastructure \
+                 --label bondi.logs=false -e GRAFANA_CLOUD_INSTANCE_ID=%s -e \
+                 GRAFANA_CLOUD_API_KEY=%s %s run /etc/bondi/alloy/config.alloy"
+                (Filename.quote alloy.grafana_cloud.instance_id)
+                (Filename.quote alloy.grafana_cloud.api_key)
+                image
+            in
+            let* output = remote_run ~user ~host ~key_path run_cmd in
+            print_endline
+              (Printf.sprintf "bondi-alloy container started on server %s: %s"
+                 ip_address (String.trim output));
+            run rest)
+    | StopAlloy :: rest ->
+        let* _ = run_remote_docker ~user ~host ~key_path "stop bondi-alloy" in
+        print_endline
+          (Printf.sprintf "Stopped bondi-alloy container on server %s"
+             ip_address);
+        run rest
+    | RemoveAlloy :: rest ->
+        let* _ = run_remote_docker ~user ~host ~key_path "rm bondi-alloy" in
+        let* _ =
+          remote_run ~user ~host ~key_path "sudo rm -rf /etc/bondi/alloy"
+        in
+        print_endline
+          (Printf.sprintf
+             "Removed bondi-alloy container and config on server %s" ip_address);
         run rest
   in
   run actions

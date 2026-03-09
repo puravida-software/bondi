@@ -73,7 +73,13 @@ let run ~client ~net body =
         entrypoint = None;
         hostname = None;
         working_dir = None;
-        labels = None;
+        labels =
+          Some
+            [
+              ("bondi.managed", "true");
+              ("bondi.type", "cron");
+              ("bondi.logs", "true");
+            ];
         exposed_ports = None;
       }
     in

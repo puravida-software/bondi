@@ -14,6 +14,9 @@ type docker_config = {
 
 let docker_labels : (string * string) list =
   [
+    ("bondi.managed", "true");
+    ("bondi.type", "infrastructure");
+    ("bondi.logs", "true");
     ("traefik.http.middlewares.acme-http.redirectscheme.permanent", "false");
     ( "traefik.http.routers.acme-http.rule",
       "PathPrefix(`/.well-known/acme-challenge/`)" );

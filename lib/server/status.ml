@@ -14,6 +14,7 @@ type component_status = {
 type infrastructure_status = {
   orchestrator : component_status option;
   traefik : component_status option;
+  alloy : component_status option;
 }
 [@@deriving yojson, show, eq]
 (** Infrastructure components. *)
@@ -37,6 +38,8 @@ type status_context = {
   scheduled_cron_jobs : Crontab.scheduled_job list;
   cron_container_inspections : (string * Docker.Client.inspect_response) list;
   cron_error : string option;
+  alloy_inspection :
+    (Docker.Client.container * Docker.Client.inspect_response) option;
 }
 (** Gathered state from Docker and crontab — input to the pure plan phase. *)
 
@@ -130,6 +133,17 @@ let plan ~(service_name : string option) (ctx : status_context) :
         in
         component_of_inspection ~name pair ~image:container.image
   in
+  let alloy =
+    match ctx.alloy_inspection with
+    | None -> None
+    | Some ((container, _inspect) as pair) ->
+        let name =
+          match container.names with
+          | n :: _ -> Docker.Client.normalize_container_name n
+          | [] -> "unknown"
+        in
+        component_of_inspection ~name pair ~image:container.image
+  in
   let cron_jobs =
     List.map
       (component_of_scheduled_job ~inspections:ctx.cron_container_inspections)
@@ -140,7 +154,12 @@ let plan ~(service_name : string option) (ctx : status_context) :
     | Some e -> [ e ]
     | None -> []
   in
-  { service; cron_jobs; infrastructure = { orchestrator; traefik }; errors }
+  {
+    service;
+    cron_jobs;
+    infrastructure = { orchestrator; traefik; alloy };
+    errors;
+  }
 
 (** Inspect a container by name, returning the container + inspect pair if
     found. *)
@@ -165,6 +184,9 @@ let gather ~client ~net ~(service_name : string option) : status_context =
   in
   let traefik_inspection =
     inspect_by_name client ~net ~container_name:"bondi-traefik"
+  in
+  let alloy_inspection =
+    inspect_by_name client ~net ~container_name:"bondi-alloy"
   in
   let scheduled_cron_jobs, cron_error =
     match Crontab.list_scheduled_jobs () with
@@ -194,6 +216,7 @@ let gather ~client ~net ~(service_name : string option) : status_context =
     scheduled_cron_jobs;
     cron_container_inspections;
     cron_error;
+    alloy_inspection;
   }
 
 let route ~client ~net =

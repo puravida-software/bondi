@@ -34,6 +34,7 @@ type user_service = {
   deployment_strategy : string option; [@default None]
   health_timeout : int option; [@default None]
   poll_interval : int option; [@default None]
+  logs : bool option; [@default None]
 }
 [@@deriving yojson]
 
@@ -53,11 +54,27 @@ type cron_job = {
 }
 [@@deriving yojson]
 
+type alloy_grafana_cloud = {
+  instance_id : string;
+  api_key : string;
+  endpoint : string;
+}
+[@@deriving yojson]
+
+type alloy = {
+  image : string option; [@default None]
+  grafana_cloud : alloy_grafana_cloud;
+  collect : string option; [@default None]
+  labels : string_map option; [@default None]
+}
+[@@deriving yojson]
+
 type t = {
   user_service : user_service option; [@key "service"]
   bondi_server : bondi_server; [@key "bondi_server"]
   traefik : traefik option; [@key "traefik"]
   cron_jobs : cron_job list option; [@key "cron_jobs"]
+  alloy : alloy option; [@key "alloy"]
 }
 [@@deriving yojson]
 
@@ -128,6 +145,18 @@ let ensure_optional_key key = function
 let ensure_cron_jobs_key = ensure_optional_key "cron_jobs"
 let ensure_service_key = ensure_optional_key "service"
 let ensure_traefik_key = ensure_optional_key "traefik"
+let ensure_alloy_key = ensure_optional_key "alloy"
+
+let validate_alloy_collect config =
+  match config.alloy with
+  | None -> Ok config
+  | Some alloy -> (
+      match alloy.collect with
+      | None -> Ok config
+      | Some s -> (
+          match Bondi_common.Alloy_river.collect_mode_of_string s with
+          | Ok _ -> Ok config
+          | Error msg -> Error msg))
 
 let read () =
   match read_file config_file_name with
@@ -143,8 +172,12 @@ let read () =
             |> ensure_cron_jobs_key
             |> ensure_service_key
             |> ensure_traefik_key
+            |> ensure_alloy_key
           in
-          try Ok (t_of_yojson json) with
+          try
+            let config = t_of_yojson json in
+            validate_alloy_collect config
+          with
           | Ppx_yojson_conv_lib.Yojson_conv.Of_yojson_error (exn, _) ->
               Error (Printexc.to_string exn)
           | exn -> Error (Printexc.to_string exn)))

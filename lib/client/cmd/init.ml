@@ -43,8 +43,20 @@ traefik:
 #         user: root
 #         private_key_contents: "{{SSH_PRIVATE_KEY_CONTENTS}}"
 #         private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
+
+# Optional: Grafana Alloy log collection (ships container logs to Grafana Cloud)
+# alloy:
+#   grafana_cloud:
+#     instance_id: "{{GRAFANA_INSTANCE_ID}}"
+#     api_key: "{{GRAFANA_API_KEY}}"
+#     endpoint: "https://logs-prod-us-central1.grafana.net/loki/api/v1/push"
+#   # image: %s
+#   # collect: all
+#   # labels:
+#   #   env: production
 |}
     project_name Bondi_common.Defaults.traefik_image
+    Bondi_common.Defaults.alloy_image
 
 let write_file path contents =
   let oc = open_out path in

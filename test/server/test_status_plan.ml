@@ -39,6 +39,7 @@ let full_context : Status.status_context =
       ];
     cron_container_inspections = [];
     cron_error = None;
+    alloy_inspection = None;
   }
 
 (* 1. test_plan_all_found *)
@@ -280,6 +281,65 @@ let test_plan_cron_job_no_container () =
   check component_status_list_testable "cron job scheduled" [ expected ]
     result.cron_jobs
 
+(* 15. test_status_alloy_running *)
+let test_status_alloy_running () =
+  let ctx =
+    {
+      full_context with
+      alloy_inspection =
+        Some
+          ( mk_container ~id:"alloy1" ~image:"grafana/alloy:v1.8.0"
+              ~names:[ "/bondi-alloy" ] (),
+            mk_inspect ~created_at:"2026-03-01T00:00:00Z" ~restart_count:0
+              ~status:"running" () );
+    }
+  in
+  let result = Status.plan ~service_name:(Some "myapp") ctx in
+  check component_status_option_testable "alloy present"
+    (Some
+       {
+         Status.name = "bondi-alloy";
+         image_name = "grafana/alloy";
+         tag = "v1.8.0";
+         status = "running";
+         restart_count = Some 0;
+         created_at = Some "2026-03-01T00:00:00Z";
+       })
+    result.infrastructure.alloy
+
+(* 16. test_status_alloy_not_configured *)
+let test_status_alloy_not_configured () =
+  let result = Status.plan ~service_name:(Some "myapp") full_context in
+  check component_status_option_testable "alloy is None" None
+    result.infrastructure.alloy
+
+(* 17. test_status_alloy_stopped *)
+let test_status_alloy_stopped () =
+  let ctx =
+    {
+      full_context with
+      alloy_inspection =
+        Some
+          ( mk_container ~id:"alloy1" ~image:"grafana/alloy:v1.8.0"
+              ~names:[ "/bondi-alloy" ] ~state:(Some "exited")
+              ~status:(Some "Exited (0)") (),
+            mk_inspect ~created_at:"2026-03-01T00:00:00Z" ~restart_count:0
+              ~status:"exited" ~exit_code:0 () );
+    }
+  in
+  let result = Status.plan ~service_name:(Some "myapp") ctx in
+  check component_status_option_testable "alloy stopped"
+    (Some
+       {
+         Status.name = "bondi-alloy";
+         image_name = "grafana/alloy";
+         tag = "v1.8.0";
+         status = "exited";
+         restart_count = Some 0;
+         created_at = Some "2026-03-01T00:00:00Z";
+       })
+    result.infrastructure.alloy
+
 (* 14. test_plan_cron_job_running *)
 let test_plan_cron_job_running () =
   let ctx =
@@ -332,5 +392,9 @@ let () =
           test_case "cron job no container" `Quick
             test_plan_cron_job_no_container;
           test_case "cron job running" `Quick test_plan_cron_job_running;
+          test_case "alloy running" `Quick test_status_alloy_running;
+          test_case "alloy not configured" `Quick
+            test_status_alloy_not_configured;
+          test_case "alloy stopped" `Quick test_status_alloy_stopped;
         ] );
     ]
