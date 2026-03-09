@@ -18,6 +18,7 @@ let minimal_input =
     deployment_strategy = None;
     health_timeout = None;
     poll_interval = None;
+    logs = None;
   }
 
 let action_string = function
@@ -166,6 +167,25 @@ let test_string_of_deployment_strategy () =
   Alcotest.check Alcotest.string "Blue_green to string" "blue-green"
     (Deploy.string_of_deployment_strategy Deploy.Blue_green)
 
+let test_deploy_input_logs_flag () =
+  let input = { minimal_input with logs = Some false } in
+  Alcotest.check
+    (Alcotest.option Alcotest.bool)
+    "logs is Some false" (Some false) input.logs;
+  (* Round-trip through yojson *)
+  let json = Simple.yojson_of_deploy_input input in
+  let decoded = Simple.deploy_input_of_yojson json in
+  Alcotest.check
+    (Alcotest.option Alcotest.bool)
+    "logs survives JSON round-trip" (Some false) decoded.logs;
+  (* Default when absent *)
+  let input_no_logs = { minimal_input with logs = None } in
+  let json2 = Simple.yojson_of_deploy_input input_no_logs in
+  let decoded2 = Simple.deploy_input_of_yojson json2 in
+  Alcotest.check
+    (Alcotest.option Alcotest.bool)
+    "logs defaults to None" None decoded2.logs
+
 let () =
   Alcotest.run "Deploy"
     [
@@ -191,6 +211,11 @@ let () =
             test_deploy_response_with_strategy_json;
           Alcotest.test_case "simple strategy response" `Quick
             test_deploy_response_simple_strategy_json;
+        ] );
+      ( "logs flag",
+        [
+          Alcotest.test_case "deploy_input logs flag" `Quick
+            test_deploy_input_logs_flag;
         ] );
       ( "strategy dispatch",
         [

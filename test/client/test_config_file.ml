@@ -396,6 +396,242 @@ bondi_server:
               check (option int) "health_timeout" None service.health_timeout;
               check (option int) "poll_interval" None service.poll_interval))
 
+let test_service_logs_false () =
+  Unix.putenv "SSH_PRIVATE_KEY_CONTENTS" "ssh-key";
+  Unix.putenv "SSH_PRIVATE_KEY_PASS" "ssh-pass";
+  Unix.putenv "REGISTRY_USER" "registry-user";
+  Unix.putenv "REGISTRY_PASS" "registry-pass";
+  let yaml =
+    {|service:
+  name: my-app
+  image: registry.example.com/app
+  port: 8080
+  logs: false
+  registry_user: "{{REGISTRY_USER}}"
+  registry_pass: "{{REGISTRY_PASS}}"
+  env_vars: {}
+  servers:
+    - ip_address: 1.2.3.4
+      ssh:
+        user: root
+        private_key_contents: "{{SSH_PRIVATE_KEY_CONTENTS}}"
+        private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
+
+bondi_server:
+  version: 0.1.0
+|}
+  in
+  with_temp_config yaml (fun () ->
+      match Config_file.read () with
+      | Error message -> fail message
+      | Ok config -> (
+          match config.user_service with
+          | None -> fail "expected service"
+          | Some service -> check (option bool) "logs" (Some false) service.logs
+          ))
+
+let test_service_logs_default () =
+  Unix.putenv "SSH_PRIVATE_KEY_CONTENTS" "ssh-key";
+  Unix.putenv "SSH_PRIVATE_KEY_PASS" "ssh-pass";
+  Unix.putenv "REGISTRY_USER" "registry-user";
+  Unix.putenv "REGISTRY_PASS" "registry-pass";
+  let yaml =
+    {|service:
+  name: my-app
+  image: registry.example.com/app
+  port: 8080
+  registry_user: "{{REGISTRY_USER}}"
+  registry_pass: "{{REGISTRY_PASS}}"
+  env_vars: {}
+  servers:
+    - ip_address: 1.2.3.4
+      ssh:
+        user: root
+        private_key_contents: "{{SSH_PRIVATE_KEY_CONTENTS}}"
+        private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
+
+bondi_server:
+  version: 0.1.0
+|}
+  in
+  with_temp_config yaml (fun () ->
+      match Config_file.read () with
+      | Error message -> fail message
+      | Ok config -> (
+          match config.user_service with
+          | None -> fail "expected service"
+          | Some service ->
+              check (option bool) "logs defaults to None" None service.logs))
+
+let test_alloy_config_parses () =
+  Unix.putenv "SSH_PRIVATE_KEY_CONTENTS" "ssh-key";
+  Unix.putenv "SSH_PRIVATE_KEY_PASS" "ssh-pass";
+  Unix.putenv "GRAFANA_INSTANCE_ID" "123456";
+  Unix.putenv "GRAFANA_API_KEY" "glc_secret";
+  let yaml =
+    {|bondi_server:
+  version: 0.1.0
+
+alloy:
+  image: grafana/alloy:v1.9.0
+  grafana_cloud:
+    instance_id: "{{GRAFANA_INSTANCE_ID}}"
+    api_key: "{{GRAFANA_API_KEY}}"
+    endpoint: https://logs-prod.grafana.net/loki/api/v1/push
+  collect: services_only
+  labels:
+    env: production
+    team: backend
+|}
+  in
+  with_temp_config yaml (fun () ->
+      match Config_file.read () with
+      | Error message -> fail message
+      | Ok config -> (
+          match config.alloy with
+          | None -> fail "expected alloy config"
+          | Some alloy -> (
+              check (option string) "alloy image" (Some "grafana/alloy:v1.9.0")
+                alloy.image;
+              check string "grafana cloud instance_id" "123456"
+                alloy.grafana_cloud.instance_id;
+              check string "grafana cloud api_key" "glc_secret"
+                alloy.grafana_cloud.api_key;
+              check string "grafana cloud endpoint"
+                "https://logs-prod.grafana.net/loki/api/v1/push"
+                alloy.grafana_cloud.endpoint;
+              check (option string) "collect" (Some "services_only")
+                alloy.collect;
+              match alloy.labels with
+              | None -> fail "expected labels"
+              | Some labels ->
+                  check
+                    (list (pair string string))
+                    "labels"
+                    [ ("env", "production"); ("team", "backend") ]
+                    labels)))
+
+let test_alloy_config_optional () =
+  Unix.putenv "SSH_PRIVATE_KEY_CONTENTS" "ssh-key";
+  Unix.putenv "SSH_PRIVATE_KEY_PASS" "ssh-pass";
+  let yaml = {|bondi_server:
+  version: 0.1.0
+|} in
+  with_temp_config yaml (fun () ->
+      match Config_file.read () with
+      | Error message -> fail message
+      | Ok config ->
+          check bool "alloy absent defaults to None" true (config.alloy = None))
+
+let test_alloy_env_var_templating () =
+  Unix.putenv "SSH_PRIVATE_KEY_CONTENTS" "ssh-key";
+  Unix.putenv "SSH_PRIVATE_KEY_PASS" "ssh-pass";
+  Unix.putenv "MY_INSTANCE" "inst-999";
+  Unix.putenv "MY_KEY" "key-abc";
+  Unix.putenv "MY_ENDPOINT" "https://logs.example.com/push";
+  let yaml =
+    {|bondi_server:
+  version: 0.1.0
+
+alloy:
+  grafana_cloud:
+    instance_id: "{{MY_INSTANCE}}"
+    api_key: "{{MY_KEY}}"
+    endpoint: "{{MY_ENDPOINT}}"
+|}
+  in
+  with_temp_config yaml (fun () ->
+      match Config_file.read () with
+      | Error message -> fail message
+      | Ok config -> (
+          match config.alloy with
+          | None -> fail "expected alloy config"
+          | Some alloy ->
+              check string "instance_id templated" "inst-999"
+                alloy.grafana_cloud.instance_id;
+              check string "api_key templated" "key-abc"
+                alloy.grafana_cloud.api_key;
+              check string "endpoint templated" "https://logs.example.com/push"
+                alloy.grafana_cloud.endpoint))
+
+let test_alloy_collect_default () =
+  Unix.putenv "SSH_PRIVATE_KEY_CONTENTS" "ssh-key";
+  Unix.putenv "SSH_PRIVATE_KEY_PASS" "ssh-pass";
+  let yaml =
+    {|bondi_server:
+  version: 0.1.0
+
+alloy:
+  grafana_cloud:
+    instance_id: "123"
+    api_key: "abc"
+    endpoint: https://logs.example.com/push
+|}
+  in
+  with_temp_config yaml (fun () ->
+      match Config_file.read () with
+      | Error message -> fail message
+      | Ok config -> (
+          match config.alloy with
+          | None -> fail "expected alloy config"
+          | Some alloy ->
+              check (option string) "collect defaults to None" None
+                alloy.collect))
+
+let test_alloy_labels_parse () =
+  Unix.putenv "SSH_PRIVATE_KEY_CONTENTS" "ssh-key";
+  Unix.putenv "SSH_PRIVATE_KEY_PASS" "ssh-pass";
+  let yaml =
+    {|bondi_server:
+  version: 0.1.0
+
+alloy:
+  grafana_cloud:
+    instance_id: "123"
+    api_key: "abc"
+    endpoint: https://logs.example.com/push
+  labels:
+    region: us-east-1
+|}
+  in
+  with_temp_config yaml (fun () ->
+      match Config_file.read () with
+      | Error message -> fail message
+      | Ok config -> (
+          match config.alloy with
+          | None -> fail "expected alloy config"
+          | Some alloy -> (
+              match alloy.labels with
+              | None -> fail "expected labels"
+              | Some labels ->
+                  check
+                    (list (pair string string))
+                    "labels"
+                    [ ("region", "us-east-1") ]
+                    labels)))
+
+let test_alloy_collect_invalid () =
+  Unix.putenv "SSH_PRIVATE_KEY_CONTENTS" "ssh-key";
+  Unix.putenv "SSH_PRIVATE_KEY_PASS" "ssh-pass";
+  let yaml =
+    {|bondi_server:
+  version: 0.1.0
+
+alloy:
+  grafana_cloud:
+    instance_id: "123"
+    api_key: "abc"
+    endpoint: https://logs.example.com/push
+  collect: invalid_mode
+|}
+  in
+  with_temp_config yaml (fun () ->
+      match Config_file.read () with
+      | Error msg ->
+          check bool "error mentions invalid value" true
+            (Bondi_common.String_utils.contains ~needle:"invalid_mode" msg)
+      | Ok _ -> fail "expected error for invalid collect mode")
+
 let () =
   run "Config_file"
     [
@@ -415,5 +651,17 @@ let () =
             `Quick test_parse_service_with_health_timeout;
           test_case "parses service without health_timeout and poll_interval"
             `Quick test_parse_service_without_health_timeout;
+          test_case "service logs false" `Quick test_service_logs_false;
+          test_case "service logs default" `Quick test_service_logs_default;
+        ] );
+      ( "alloy",
+        [
+          test_case "alloy config parses" `Quick test_alloy_config_parses;
+          test_case "alloy config optional" `Quick test_alloy_config_optional;
+          test_case "alloy env var templating" `Quick
+            test_alloy_env_var_templating;
+          test_case "alloy collect default" `Quick test_alloy_collect_default;
+          test_case "alloy labels parse" `Quick test_alloy_labels_parse;
+          test_case "alloy collect invalid" `Quick test_alloy_collect_invalid;
         ] );
     ]

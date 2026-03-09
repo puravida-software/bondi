@@ -27,6 +27,7 @@ type deploy_payload = {
   deployment_strategy : string option;
   health_timeout : float option;
   poll_interval : float option;
+  logs : bool option;
 }
 [@@deriving yojson]
 
@@ -219,6 +220,7 @@ let run force_traefik_redeploy deployments =
                   health_timeout =
                     Option.map float_of_int service.health_timeout;
                   poll_interval = Option.map float_of_int service.poll_interval;
+                  logs = service.logs;
                 }
               else
                 {
@@ -238,6 +240,7 @@ let run force_traefik_redeploy deployments =
                   deployment_strategy = None;
                   health_timeout = None;
                   poll_interval = None;
+                  logs = None;
                 }
             in
             print_endline

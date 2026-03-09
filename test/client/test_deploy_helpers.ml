@@ -48,6 +48,7 @@ let mk_config ?user_service ?cron_jobs () : Config_file.t =
     bondi_server = { version = "0.1.0" };
     traefik = None;
     cron_jobs;
+    alloy = None;
   }
 
 let mk_service name : Config_file.user_service =
@@ -63,6 +64,7 @@ let mk_service name : Config_file.user_service =
     deployment_strategy = None;
     health_timeout = None;
     poll_interval = None;
+    logs = None;
   }
 
 let mk_cron_job name ip : Config_file.cron_job =
@@ -133,6 +135,39 @@ let test_cron_job_to_deploy () =
   check string "image" "img:v1" result.image;
   check string "schedule" "* * * * *" result.schedule
 
+(* deploy_payload logs flag *)
+
+let test_deploy_payload_includes_logs_flag () =
+  let config =
+    mk_config ~user_service:{ (mk_service "web") with logs = Some false } ()
+  in
+  let service = Option.get config.user_service in
+  let payload : Deploy.deploy_payload =
+    {
+      service_name = Some service.name;
+      image = service.image ^ ":v1";
+      port = service.port;
+      env_vars = service.env_vars;
+      traefik_domain_name = None;
+      traefik_image = None;
+      traefik_acme_email = None;
+      registry_user = service.registry_user;
+      registry_pass = service.registry_pass;
+      force_traefik_redeploy = None;
+      cron_jobs = None;
+      drain_grace_period = None;
+      deployment_strategy = None;
+      health_timeout = None;
+      poll_interval = None;
+      logs = Some false;
+    }
+  in
+  check (option bool) "logs flag is Some false" (Some false) payload.logs;
+  (* Round-trip through JSON *)
+  let json = Deploy.yojson_of_deploy_payload payload in
+  let decoded = Deploy.deploy_payload_of_yojson json in
+  check (option bool) "logs survives JSON round-trip" (Some false) decoded.logs
+
 let () =
   run "Deploy_helpers"
     [
@@ -158,4 +193,9 @@ let () =
         ] );
       ( "cron_job_to_deploy",
         [ test_case "correct field mapping" `Quick test_cron_job_to_deploy ] );
+      ( "deploy_payload",
+        [
+          test_case "includes logs flag" `Quick
+            test_deploy_payload_includes_logs_flag;
+        ] );
     ]

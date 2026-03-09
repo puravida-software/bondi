@@ -17,6 +17,7 @@ type component_status = {
 type infrastructure_status = {
   orchestrator : component_status option;
   traefik : component_status option;
+  alloy : component_status option;
 }
 [@@deriving yojson]
 (** Infrastructure components. *)
@@ -106,7 +107,12 @@ let infrastructure_section (status : comprehensive_status) =
     | Some c -> format_row c
     | None -> not_found_row "bondi-traefik"
   in
-  [ "Infrastructure"; table_header; orch_row; traefik_row; "" ]
+  let alloy_row =
+    match status.infrastructure.alloy with
+    | Some c -> [ format_row c ]
+    | None -> []
+  in
+  [ "Infrastructure"; table_header; orch_row; traefik_row ] @ alloy_row @ [ "" ]
 
 (** Render the warnings section lines. Returns empty list if no errors. *)
 let warnings_section (status : comprehensive_status) =

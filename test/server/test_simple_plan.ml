@@ -29,6 +29,7 @@ let minimal_input =
     deployment_strategy = None;
     health_timeout = None;
     poll_interval = None;
+    logs = None;
   }
 
 let input_with_registry =
@@ -171,6 +172,46 @@ let test_plan_cron_only_skips_workload () =
       check bool "no workload actions when traefik_domain_name is None" false
         has_workload
 
+let extract_workload_labels actions =
+  List.find_map
+    (function
+      | Simple.RunWorkload { config; _ } -> config.labels
+      | _ -> None)
+    actions
+
+let test_deploy_adds_bondi_managed_label () =
+  let context = { Simple.current_traefik = None; current_workload = None } in
+  match Simple.plan minimal_input context with
+  | Error e -> Alcotest.fail ("plan failed: " ^ e)
+  | Ok actions -> (
+      match extract_workload_labels actions with
+      | None -> Alcotest.fail "expected labels on workload container"
+      | Some labels ->
+          check bool "has bondi.managed=true" true
+            (List.mem ("bondi.managed", "true") labels))
+
+let test_deploy_adds_bondi_type_label () =
+  let context = { Simple.current_traefik = None; current_workload = None } in
+  match Simple.plan minimal_input context with
+  | Error e -> Alcotest.fail ("plan failed: " ^ e)
+  | Ok actions -> (
+      match extract_workload_labels actions with
+      | None -> Alcotest.fail "expected labels on workload container"
+      | Some labels ->
+          check bool "has bondi.type=service" true
+            (List.mem ("bondi.type", "service") labels))
+
+let test_deploy_adds_bondi_logs_label () =
+  let context = { Simple.current_traefik = None; current_workload = None } in
+  match Simple.plan minimal_input context with
+  | Error e -> Alcotest.fail ("plan failed: " ^ e)
+  | Ok actions -> (
+      match extract_workload_labels actions with
+      | None -> Alcotest.fail "expected labels on workload container"
+      | Some labels ->
+          check bool "has bondi.logs label" true
+            (List.exists (fun (k, _) -> k = "bondi.logs") labels))
+
 let () =
   run "Simple.plan"
     [
@@ -199,5 +240,14 @@ let () =
         [
           test_case "skips workload when traefik_domain_name is None" `Quick
             test_plan_cron_only_skips_workload;
+        ] );
+      ( "container labels",
+        [
+          test_case "adds bondi.managed label" `Quick
+            test_deploy_adds_bondi_managed_label;
+          test_case "adds bondi.type label" `Quick
+            test_deploy_adds_bondi_type_label;
+          test_case "adds bondi.logs label" `Quick
+            test_deploy_adds_bondi_logs_label;
         ] );
     ]

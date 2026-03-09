@@ -72,6 +72,10 @@ cli-ps:
 cli-logs CONTAINER_NAME:
     opam exec -- dune exec bondi-client -- docker logs {{ CONTAINER_NAME }}
 
+# Validate generated Alloy River configs with alloy fmt (requires Docker)
+lint-alloy:
+    opam exec -- dune exec test/common/test_alloy_river.exe -- test "alloy fmt"
+
 # Versioning
 
 version:

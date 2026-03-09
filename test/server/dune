@@ -14,7 +14,8 @@
   test_status_plan
   test_run
   test_docker_client
-  test_blue_green_plan)
+  test_blue_green_plan
+  test_alloy_config)
  (modules
   test_env
   test_simple_plan
@@ -23,5 +24,6 @@
   test_status_plan
   test_run
   test_docker_client
-  test_blue_green_plan)
+  test_blue_green_plan
+  test_alloy_config)
  (libraries alcotest bondi.server server_test_helpers))

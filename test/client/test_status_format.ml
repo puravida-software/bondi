@@ -12,6 +12,7 @@ let mk_config ?user_service ?cron_jobs () : Config_file.t =
     bondi_server = { version = "0.1.0" };
     traefik = None;
     cron_jobs;
+    alloy = None;
   }
 
 let mk_service name : Config_file.user_service =
@@ -27,6 +28,7 @@ let mk_service name : Config_file.user_service =
     deployment_strategy = None;
     health_timeout = None;
     poll_interval = None;
+    logs = None;
   }
 
 let mk_cron_job name image ip : Config_file.cron_job =
@@ -72,7 +74,11 @@ let full_status : Status.comprehensive_status =
     service = Some full_service;
     cron_jobs = [ cron_backup; cron_cleanup ];
     infrastructure =
-      { orchestrator = Some full_orchestrator; traefik = Some full_traefik };
+      {
+        orchestrator = Some full_orchestrator;
+        traefik = Some full_traefik;
+        alloy = None;
+      };
     errors = [];
   }
 
@@ -111,7 +117,11 @@ let test_format_table_no_service () =
       service = None;
       cron_jobs = [];
       infrastructure =
-        { orchestrator = Some full_orchestrator; traefik = Some full_traefik };
+        {
+          orchestrator = Some full_orchestrator;
+          traefik = Some full_traefik;
+          alloy = None;
+        };
       errors = [];
     }
   in
@@ -128,7 +138,11 @@ let test_format_table_not_found_service () =
       service = None;
       cron_jobs = [];
       infrastructure =
-        { orchestrator = Some full_orchestrator; traefik = Some full_traefik };
+        {
+          orchestrator = Some full_orchestrator;
+          traefik = Some full_traefik;
+          alloy = None;
+        };
       errors = [];
     }
   in
@@ -148,7 +162,11 @@ let test_format_table_not_found_cron () =
       service = None;
       cron_jobs = [];
       infrastructure =
-        { orchestrator = Some full_orchestrator; traefik = Some full_traefik };
+        {
+          orchestrator = Some full_orchestrator;
+          traefik = Some full_traefik;
+          alloy = None;
+        };
       errors = [];
     }
   in
@@ -169,7 +187,11 @@ let test_format_table_cron_restart_na () =
       service = None;
       cron_jobs = [ cron_backup ];
       infrastructure =
-        { orchestrator = Some full_orchestrator; traefik = Some full_traefik };
+        {
+          orchestrator = Some full_orchestrator;
+          traefik = Some full_traefik;
+          alloy = None;
+        };
       errors = [];
     }
   in
@@ -184,7 +206,11 @@ let test_format_table_errors () =
       service = None;
       cron_jobs = [];
       infrastructure =
-        { orchestrator = Some full_orchestrator; traefik = Some full_traefik };
+        {
+          orchestrator = Some full_orchestrator;
+          traefik = Some full_traefik;
+          alloy = None;
+        };
       errors = [ "Failed to read crontab: permission denied" ];
     }
   in
@@ -213,6 +239,34 @@ let test_format_json () =
       | _ -> fail "expected server status to be an object")
   | _ -> fail "expected top-level object with single server key"
 
+(* 8. test_format_table_with_alloy — alloy present in infrastructure → alloy row shown *)
+let test_format_table_with_alloy () =
+  let config = mk_config () in
+  let alloy_component =
+    mk_component ~name:"bondi-alloy" ~image_name:"grafana/alloy" ~tag:"v1.8.0"
+      ~status:"running" ~restart_count:(Some 0)
+      ~created_at:(Some "2026-03-01T00:00:00Z")
+  in
+  let status : Status.comprehensive_status =
+    {
+      service = None;
+      cron_jobs = [];
+      infrastructure =
+        {
+          orchestrator = Some full_orchestrator;
+          traefik = Some full_traefik;
+          alloy = Some alloy_component;
+        };
+      errors = [];
+    }
+  in
+  let result = Status.format_table ~config [ ("1.2.3.4", status) ] in
+  check bool "has Infrastructure header" true
+    (contains result ~needle:"Infrastructure");
+  check bool "has bondi-alloy" true (contains result ~needle:"bondi-alloy");
+  check bool "has grafana/alloy" true (contains result ~needle:"grafana/alloy");
+  check bool "has v1.8.0 tag" true (contains result ~needle:"v1.8.0")
+
 let () =
   run "Status_format"
     [
@@ -225,6 +279,7 @@ let () =
           test_case "not found cron" `Quick test_format_table_not_found_cron;
           test_case "cron restart N/A" `Quick test_format_table_cron_restart_na;
           test_case "errors displayed" `Quick test_format_table_errors;
+          test_case "with alloy" `Quick test_format_table_with_alloy;
         ] );
       ("format_json", [ test_case "json structure" `Quick test_format_json ]);
     ]

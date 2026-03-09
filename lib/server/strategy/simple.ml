@@ -35,6 +35,7 @@ type deploy_input = {
   deployment_strategy : string option; [@default None]
   health_timeout : float option; [@default None]
   poll_interval : float option; [@default None]
+  logs : bool option; [@default None]
 }
 [@@deriving yojson]
 
@@ -90,6 +91,9 @@ let service_config (input : deploy_input) :
       in
       let labels : string_map =
         [
+          ("bondi.managed", "true");
+          ("bondi.type", "service");
+          ("bondi.logs", string_of_bool (Option.value ~default:true input.logs));
           ("traefik.enable", "true");
           ( "traefik.http.routers.bondi.rule",
             Printf.sprintf "Host(`%s`) || Host(`www.%s`)" domain_name
