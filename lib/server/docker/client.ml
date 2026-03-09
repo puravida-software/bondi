@@ -1,7 +1,6 @@
-exception Docker_error of string
-
-open Ppx_yojson_conv_lib.Yojson_conv
 open Json_helpers
+
+let ( let* ) = Result.bind
 
 type t = {
   socket_path : string;
@@ -14,124 +13,153 @@ type container = {
   image : string; [@key "Image"]
   image_id : string; [@key "ImageID"]
   names : string list; [@key "Names"]
-  state : string option; [@key "State"]
-  status : string option; [@key "Status"]
+  state : string option; [@default None] [@key "State"]
+  status : string option; [@default None] [@key "Status"]
 }
-[@@deriving yojson] [@@yojson.allow_extra_fields]
+[@@deriving yojson { strict = false }]
 
 type health_log_entry = {
   output : string; [@key "Output"]
   exit_code : int; [@key "ExitCode"]
 }
-[@@deriving yojson] [@@yojson.allow_extra_fields]
+[@@deriving yojson { strict = false }]
 
 type health_state = {
   status : string; [@key "Status"]
   failing_streak : int; [@key "FailingStreak"] [@default 0]
   log : health_log_entry list; [@key "Log"] [@default []]
 }
-[@@deriving yojson] [@@yojson.allow_extra_fields]
+[@@deriving yojson { strict = false }]
 
 type inspect_state = {
   status : string; [@key "Status"]
   exit_code : int; [@key "ExitCode"]
-  health : health_state option; [@key "Health"] [@yojson.option]
+  health : health_state option; [@key "Health"] [@default None]
 }
-[@@deriving yojson] [@@yojson.allow_extra_fields]
+[@@deriving yojson { strict = false }]
 
 type inspect_response = {
   created_at : string; [@key "Created"]
   restart_count : int; [@key "RestartCount"]
   state : inspect_state; [@key "State"]
 }
-[@@deriving yojson] [@@yojson.allow_extra_fields]
+[@@deriving yojson { strict = false }]
 
 type restart_policy = {
   name : string; [@key "Name"]
-  maximum_retry_count : int option; [@key "MaximumRetryCount"] [@yojson.option]
+  maximum_retry_count : int option; [@key "MaximumRetryCount"] [@default None]
 }
 [@@deriving yojson]
 
 type port_binding = {
-  host_ip : string option; [@key "HostIp"] [@yojson.option]
-  host_port : string option; [@key "HostPort"] [@yojson.option]
+  host_ip : string option; [@key "HostIp"] [@default None]
+  host_port : string option; [@key "HostPort"] [@default None]
 }
 [@@deriving yojson]
 
 type port_bindings = (string * port_binding list) list
 
-let yojson_of_port_bindings bindings =
+let port_bindings_to_yojson bindings =
   assoc_of_list
-    (fun values -> `List (List.map yojson_of_port_binding values))
+    (fun values -> `List (List.map port_binding_to_yojson values))
     bindings
 
 let port_bindings_of_yojson json =
-  let open Yojson.Safe.Util in
-  list_of_assoc ~field:"PortBindings"
-    (fun value -> value |> to_list |> List.map port_binding_of_yojson)
-    json
+  match json with
+  | `Assoc entries ->
+      let rec parse = function
+        | [] -> Ok []
+        | (key, `List values) :: rest ->
+            let rec parse_bindings acc = function
+              | [] -> Ok (List.rev acc)
+              | v :: vs ->
+                  let* pb = port_binding_of_yojson v in
+                  parse_bindings (pb :: acc) vs
+            in
+            let* bindings = parse_bindings [] values in
+            let* rest_bindings = parse rest in
+            Ok ((key, bindings) :: rest_bindings)
+        | (key, _) :: _ ->
+            Error (Printf.sprintf "expected list for port binding key %s" key)
+      in
+      parse entries
+  | `Null -> Ok []
+  | _ -> Error "expected object for PortBindings"
 
 type exposed_ports = string list
 
-let yojson_of_exposed_ports ports =
+let exposed_ports_to_yojson ports =
   let entries = List.map (fun port -> (port, ())) ports in
   assoc_of_list (fun () -> `Assoc []) entries
 
 let exposed_ports_of_yojson json =
-  list_of_assoc ~field:"ExposedPorts" (fun _ -> ()) json |> List.map fst
+  let* entries = list_of_assoc ~field:"ExposedPorts" (fun _ -> ()) json in
+  Ok (List.map fst entries)
 
 type endpoint_config = {
-  aliases : string list option; [@key "Aliases"] [@yojson.option]
-  ipv4_address : string option; [@key "IPv4Address"] [@yojson.option]
+  aliases : string list option; [@key "Aliases"] [@default None]
+  ipv4_address : string option; [@key "IPv4Address"] [@default None]
 }
 [@@deriving yojson]
 
 type endpoints_config = (string * endpoint_config) list
 
-let yojson_of_endpoints_config configs =
-  assoc_of_list yojson_of_endpoint_config configs
+let endpoints_config_to_yojson configs =
+  assoc_of_list endpoint_config_to_yojson configs
 
 let endpoints_config_of_yojson json =
-  list_of_assoc ~field:"EndpointsConfig" endpoint_config_of_yojson json
+  match json with
+  | `Assoc entries ->
+      let rec parse = function
+        | [] -> Ok []
+        | (key, value) :: rest ->
+            let* ec = endpoint_config_of_yojson value in
+            let* rest_configs = parse rest in
+            Ok ((key, ec) :: rest_configs)
+      in
+      parse entries
+  | `Null -> Ok []
+  | _ -> Error "expected object for EndpointsConfig"
 
 type container_config = {
-  image : string option; [@key "Image"] [@yojson.option]
-  env : string list option; [@key "Env"] [@yojson.option]
-  cmd : string list option; [@key "Cmd"] [@yojson.option]
-  entrypoint : string list option; [@key "Entrypoint"] [@yojson.option]
-  hostname : string option; [@key "Hostname"] [@yojson.option]
-  working_dir : string option; [@key "WorkingDir"] [@yojson.option]
-  labels : string_map option; [@key "Labels"] [@yojson.option]
-  exposed_ports : exposed_ports option; [@key "ExposedPorts"] [@yojson.option]
+  image : string option; [@key "Image"] [@default None]
+  env : string list option; [@key "Env"] [@default None]
+  cmd : string list option; [@key "Cmd"] [@default None]
+  entrypoint : string list option; [@key "Entrypoint"] [@default None]
+  hostname : string option; [@key "Hostname"] [@default None]
+  working_dir : string option; [@key "WorkingDir"] [@default None]
+  labels : string_map option; [@key "Labels"] [@default None]
+  exposed_ports : exposed_ports option; [@key "ExposedPorts"] [@default None]
 }
 [@@deriving yojson]
 
 type host_config = {
-  binds : string list option; [@key "Binds"] [@yojson.option]
-  port_bindings : port_bindings option; [@key "PortBindings"] [@yojson.option]
-  network_mode : string option; [@key "NetworkMode"] [@yojson.option]
-  restart_policy : restart_policy option; [@key "RestartPolicy"] [@yojson.option]
+  binds : string list option; [@key "Binds"] [@default None]
+  port_bindings : port_bindings option; [@key "PortBindings"] [@default None]
+  network_mode : string option; [@key "NetworkMode"] [@default None]
+  restart_policy : restart_policy option; [@key "RestartPolicy"] [@default None]
 }
 [@@deriving yojson]
 
 type networking_config = {
   endpoints_config : endpoints_config option;
-      [@key "EndpointsConfig"] [@yojson.option]
+      [@key "EndpointsConfig"] [@default None]
 }
 [@@deriving yojson]
 
 type image_healthcheck = { test : string list [@key "Test"] }
-[@@deriving yojson] [@@yojson.allow_extra_fields]
+[@@deriving yojson { strict = false }]
 
 type image_container_config = {
-  healthcheck : image_healthcheck option; [@key "Healthcheck"] [@yojson.option]
+  healthcheck : image_healthcheck option; [@key "Healthcheck"] [@default None]
 }
-[@@deriving yojson] [@@yojson.allow_extra_fields]
+[@@deriving yojson { strict = false }]
 
 type image_inspect_response = {
-  container_config : image_container_config; [@key "ContainerConfig"]
+  container_config : image_container_config option;
+      [@key "ContainerConfig"] [@default None]
 }
-[@@deriving yojson] [@@yojson.allow_extra_fields]
+[@@deriving yojson { strict = false }]
 
 type run_image_options = {
   container_name : string;
@@ -141,17 +169,17 @@ type run_image_options = {
 }
 
 type create_container_request = {
-  image : string option; [@key "Image"] [@yojson.option]
-  env : string list option; [@key "Env"] [@yojson.option]
-  cmd : string list option; [@key "Cmd"] [@yojson.option]
-  entrypoint : string list option; [@key "Entrypoint"] [@yojson.option]
-  hostname : string option; [@key "Hostname"] [@yojson.option]
-  working_dir : string option; [@key "WorkingDir"] [@yojson.option]
-  labels : string_map option; [@key "Labels"] [@yojson.option]
-  exposed_ports : exposed_ports option; [@key "ExposedPorts"] [@yojson.option]
-  host_config : host_config option; [@key "HostConfig"] [@yojson.option]
+  image : string option; [@key "Image"] [@default None]
+  env : string list option; [@key "Env"] [@default None]
+  cmd : string list option; [@key "Cmd"] [@default None]
+  entrypoint : string list option; [@key "Entrypoint"] [@default None]
+  hostname : string option; [@key "Hostname"] [@default None]
+  working_dir : string option; [@key "WorkingDir"] [@default None]
+  labels : string_map option; [@key "Labels"] [@default None]
+  exposed_ports : exposed_ports option; [@key "ExposedPorts"] [@default None]
+  host_config : host_config option; [@key "HostConfig"] [@default None]
   networking_config : networking_config option;
-      [@key "NetworkingConfig"] [@yojson.option]
+      [@key "NetworkingConfig"] [@default None]
 }
 [@@deriving yojson]
 
@@ -173,23 +201,25 @@ let uri_for : t -> string -> (string * string list) list -> Uri.t =
   let full_path = "/" ^ t.api_version ^ path in
   Uri.make ~scheme:"httpunix" ~host:t.socket_path ~path:full_path ~query ()
 
-let ensure_success : resp:Cohttp.Response.t -> body_str:string -> unit =
+let ensure_success :
+    resp:Cohttp.Response.t -> body_str:string -> (unit, string) result =
  fun ~resp ~body_str ->
   let status = Cohttp.Response.status resp in
   let code = Cohttp.Code.code_of_status status in
   if code < 200 || (code >= 300 && code <> 304) then
-    let msg = Printf.sprintf "docker http %d: %s" code (String.trim body_str) in
-    raise (Docker_error msg)
+    Error (Printf.sprintf "docker http %d: %s" code (String.trim body_str))
+  else Ok ()
 
 let ensure_success_or_allowed :
-    allowed:int list -> resp:Cohttp.Response.t -> body_str:string -> unit =
+    allowed:int list ->
+    resp:Cohttp.Response.t ->
+    body_str:string ->
+    (unit, string) result =
  fun ~allowed ~resp ~body_str ->
   let status = Cohttp.Response.status resp in
   let code = Cohttp.Code.code_of_status status in
-  if (code >= 200 && code < 300) || List.mem code allowed then ()
-  else
-    let msg = Printf.sprintf "docker http %d: %s" code (String.trim body_str) in
-    raise (Docker_error msg)
+  if (code >= 200 && code < 300) || List.mem code allowed then Ok ()
+  else Error (Printf.sprintf "docker http %d: %s" code (String.trim body_str))
 
 let read_body_string : Cohttp_eio.Body.t -> string =
  fun body -> Eio.Buf_read.(of_flow ~max_size:max_int body |> take_all)
@@ -211,7 +241,7 @@ let call :
     Cohttp.Code.meth ->
     string ->
     (string * string list) list ->
-    string =
+    (string, string) result =
  fun ?(headers = Cohttp.Header.init ()) ?body t ~net meth path query ->
   with_client ~net (fun ~sw client ->
       let uri = uri_for t path query in
@@ -219,8 +249,8 @@ let call :
         Cohttp_eio.Client.call client ~sw ~headers ?body meth uri
       in
       let body_str = read_body_string body in
-      ensure_success ~resp:response ~body_str;
-      body_str)
+      let* () = ensure_success ~resp:response ~body_str in
+      Ok body_str)
 
 let call_allow_status :
     allowed:int list ->
@@ -231,7 +261,7 @@ let call_allow_status :
     Cohttp.Code.meth ->
     string ->
     (string * string list) list ->
-    string =
+    (string, string) result =
  fun ~allowed ?(headers = Cohttp.Header.init ()) ?body t ~net meth path query ->
   with_client ~net (fun ~sw client ->
       let uri = uri_for t path query in
@@ -239,17 +269,18 @@ let call_allow_status :
         Cohttp_eio.Client.call client ~sw ~headers ?body meth uri
       in
       let body_str = read_body_string body in
-      ensure_success_or_allowed ~allowed ~resp:response ~body_str;
-      body_str)
+      let* () = ensure_success_or_allowed ~allowed ~resp:response ~body_str in
+      Ok body_str)
 
-let start_container : t -> net:_ Eio.Net.t -> container_id:string -> unit =
+let start_container :
+    t -> net:_ Eio.Net.t -> container_id:string -> (unit, string) result =
  fun t ~net ~container_id ->
-  let _ =
+  let* _ =
     call_allow_status ~allowed:[ 304 ] t ~net `POST
       ("/containers/" ^ container_id ^ "/start")
       []
   in
-  ()
+  Ok ()
 
 let call_json :
     ?headers:Cohttp.Header.t ->
@@ -259,10 +290,10 @@ let call_json :
     Cohttp.Code.meth ->
     string ->
     (string * string list) list ->
-    Yojson.Safe.t =
+    (Yojson.Safe.t, string) result =
  fun ?headers ?body t ~net meth path query ->
-  let body_str = call ?headers ?body t ~net meth path query in
-  Yojson.Safe.from_string body_str
+  let* body_str = call ?headers ?body t ~net meth path query in
+  Ok (Yojson.Safe.from_string body_str)
 
 let json_body : Yojson.Safe.t -> Cohttp.Header.t * Cohttp_eio.Body.t =
  fun json ->
@@ -276,61 +307,83 @@ let normalize_container_name : string -> string =
     String.sub name 1 (String.length name - 1)
   else name
 
-let container_of_json : Yojson.Safe.t -> container =
- fun json -> container_of_yojson json
+let container_of_json : Yojson.Safe.t -> (container, string) result =
+ fun json ->
+  container_of_yojson json
+  |> Result.map_error (fun msg -> "failed to parse container: " ^ msg)
 
 let list_containers :
-    t -> net:_ Eio.Net.t -> ?all:bool -> unit -> container list =
+    t -> net:_ Eio.Net.t -> ?all:bool -> unit -> (container list, string) result
+    =
  fun t ~net ?(all = true) () ->
   let query = [ query_param "all" (if all then "true" else "false") ] in
-  let json = call_json t ~net `GET "/containers/json" query in
+  let* json = call_json t ~net `GET "/containers/json" query in
   match json with
-  | `List values -> List.map container_of_json values
-  | _ -> raise (Docker_error "invalid containers list json")
+  | `List values ->
+      let rec parse_all acc = function
+        | [] -> Ok (List.rev acc)
+        | v :: rest -> (
+            match container_of_json v with
+            | Ok c -> parse_all (c :: acc) rest
+            | Error _ as e -> e)
+      in
+      parse_all [] values
+  | _ -> Error "expected JSON array from /containers/json"
 
 let get_container_by_image_name :
-    t -> net:_ Eio.Net.t -> image_name:string -> container option =
+    t ->
+    net:_ Eio.Net.t ->
+    image_name:string ->
+    (container option, string) result =
  fun t ~net ~image_name ->
-  let containers = list_containers t ~net ~all:true () in
-  List.find_opt
-    (fun c ->
-      let image = (c : container).image in
-      Bondi_common.String_utils.contains ~needle:image_name image)
-    containers
+  let* containers = list_containers t ~net ~all:true () in
+  Ok
+    (List.find_opt
+       (fun c ->
+         let image = (c : container).image in
+         Bondi_common.String_utils.contains ~needle:image_name image)
+       containers)
 
 let get_container_by_name :
-    t -> net:_ Eio.Net.t -> container_name:string -> container option =
+    t ->
+    net:_ Eio.Net.t ->
+    container_name:string ->
+    (container option, string) result =
  fun t ~net ~container_name ->
-  let containers = list_containers t ~net ~all:true () in
-  List.find_opt
-    (fun c ->
-      List.exists
-        (fun name -> normalize_container_name name = container_name)
-        c.names)
-    containers
+  let* containers = list_containers t ~net ~all:true () in
+  Ok
+    (List.find_opt
+       (fun c ->
+         List.exists
+           (fun name -> normalize_container_name name = container_name)
+           c.names)
+       containers)
 
 let get_container_by_id :
-    t -> net:_ Eio.Net.t -> container_id:string -> container option =
+    t ->
+    net:_ Eio.Net.t ->
+    container_id:string ->
+    (container option, string) result =
  fun t ~net ~container_id ->
-  let containers = list_containers t ~net ~all:false () in
-  List.find_opt (fun c -> c.id = container_id) containers
+  let* containers = list_containers t ~net ~all:false () in
+  Ok (List.find_opt (fun c -> c.id = container_id) containers)
 
 let create_network_if_not_exists :
-    t -> net:_ Eio.Net.t -> network_name:string -> unit =
+    t -> net:_ Eio.Net.t -> network_name:string -> (unit, string) result =
  fun t ~net ~network_name ->
-  let json = call_json t ~net `GET "/networks" [] in
+  let* json = call_json t ~net `GET "/networks" [] in
   let open Yojson.Safe.Util in
   let networks =
     json |> to_list |> List.map (fun n -> n |> member "Name" |> to_string)
   in
-  if List.exists (fun name -> name = network_name) networks then ()
+  if List.exists (fun name -> name = network_name) networks then Ok ()
   else
     let payload =
       `Assoc [ ("Name", `String network_name); ("Driver", `String "bridge") ]
     in
     let headers, body = json_body payload in
-    let _ = call ~headers ~body t ~net `POST "/networks/create" [] in
-    ()
+    let* _ = call ~headers ~body t ~net `POST "/networks/create" [] in
+    Ok ()
 
 let pull_image :
     t ->
@@ -338,7 +391,7 @@ let pull_image :
     image:string ->
     tag:string ->
     registry_auth:string option ->
-    unit =
+    (unit, string) result =
  fun t ~net ~image ~tag ~registry_auth ->
   let query = [ query_param "fromImage" image; query_param "tag" tag ] in
   let headers =
@@ -346,48 +399,58 @@ let pull_image :
     | None -> Cohttp.Header.init ()
     | Some auth -> Cohttp.Header.init_with "X-Registry-Auth" auth
   in
-  let _ =
+  let* _ =
     call_allow_status ~allowed:[ 304 ] ~headers t ~net `POST "/images/create"
       query
   in
-  ()
+  Ok ()
 
 let pull_image_with_auth :
-    t -> net:_ Eio.Net.t -> image:string -> tag:string -> unit =
+    t -> net:_ Eio.Net.t -> image:string -> tag:string -> (unit, string) result
+    =
  fun t ~net ~image ~tag ->
   pull_image t ~net ~image ~tag ~registry_auth:t.registry_auth
 
 let pull_image_no_auth :
-    t -> net:_ Eio.Net.t -> image:string -> tag:string -> unit =
+    t -> net:_ Eio.Net.t -> image:string -> tag:string -> (unit, string) result
+    =
  fun t ~net ~image ~tag -> pull_image t ~net ~image ~tag ~registry_auth:None
 
-let remove_container : t -> net:_ Eio.Net.t -> container_id:string -> unit =
+let remove_container :
+    t -> net:_ Eio.Net.t -> container_id:string -> (unit, string) result =
  fun t ~net ~container_id ->
   let query = [ query_param "force" "true"; query_param "v" "true" ] in
-  let _ = call t ~net `DELETE ("/containers/" ^ container_id) query in
-  ()
+  let* _ = call t ~net `DELETE ("/containers/" ^ container_id) query in
+  Ok ()
 
 let rename_container :
-    t -> net:_ Eio.Net.t -> container_id:string -> new_name:string -> unit =
+    t ->
+    net:_ Eio.Net.t ->
+    container_id:string ->
+    new_name:string ->
+    (unit, string) result =
  fun t ~net ~container_id ~new_name ->
   let query = [ query_param "name" new_name ] in
-  let _ = call t ~net `POST ("/containers/" ^ container_id ^ "/rename") query in
-  ()
+  let* _ =
+    call t ~net `POST ("/containers/" ^ container_id ^ "/rename") query
+  in
+  Ok ()
 
 let remove_container_and_image :
-    t -> net:_ Eio.Net.t -> container:container -> unit =
+    t -> net:_ Eio.Net.t -> container:container -> (unit, string) result =
  fun t ~net ~container ->
-  remove_container t ~net ~container_id:container.id;
+  let* () = remove_container t ~net ~container_id:container.id in
   let image_query =
     [ query_param "force" "true"; query_param "noprune" "false" ]
   in
-  let _ = call t ~net `DELETE ("/images/" ^ container.image_id) image_query in
-  ()
+  let* _ = call t ~net `DELETE ("/images/" ^ container.image_id) image_query in
+  Ok ()
 
-let run_image_with_opts : t -> net:_ Eio.Net.t -> run_image_options -> string =
+let run_image_with_opts :
+    t -> net:_ Eio.Net.t -> run_image_options -> (string, string) result =
  fun t ~net opts ->
   let payload =
-    yojson_of_create_container_request
+    create_container_request_to_yojson
       {
         image = opts.config.image;
         env = opts.config.env;
@@ -406,53 +469,78 @@ let run_image_with_opts : t -> net:_ Eio.Net.t -> run_image_options -> string =
     if opts.container_name = "" then []
     else [ query_param "name" opts.container_name ]
   in
-  let json = call_json ~headers ~body t ~net `POST "/containers/create" query in
+  let* json =
+    call_json ~headers ~body t ~net `POST "/containers/create" query
+  in
   let open Yojson.Safe.Util in
   let container_id = json |> member "Id" |> to_string in
-  let _ = start_container t ~net ~container_id in
-  container_id
+  let* () = start_container t ~net ~container_id in
+  Ok container_id
 
-let stop_container : t -> net:_ Eio.Net.t -> container_id:string -> unit =
+let stop_container :
+    t -> net:_ Eio.Net.t -> container_id:string -> (unit, string) result =
  fun t ~net ~container_id ->
   let query = [ query_param "t" "10" ] in
-  let _ = call t ~net `POST ("/containers/" ^ container_id ^ "/stop") query in
-  ()
+  let* _ = call t ~net `POST ("/containers/" ^ container_id ^ "/stop") query in
+  Ok ()
 
 let inspect_container :
-    t -> net:_ Eio.Net.t -> container_id:string -> inspect_response =
+    t ->
+    net:_ Eio.Net.t ->
+    container_id:string ->
+    (inspect_response, string) result =
  fun t ~net ~container_id ->
-  let json =
+  let* json =
     call_json t ~net `GET ("/containers/" ^ container_id ^ "/json") []
   in
   inspect_response_of_yojson json
+  |> Result.map_error (fun msg ->
+      Printf.sprintf "failed to parse inspect response for container %s: %s"
+        container_id msg)
 
 type wait_response = { status_code : int [@key "StatusCode"] }
 [@@deriving yojson]
 
-let wait_container : t -> net:_ Eio.Net.t -> container_id:string -> int =
+let wait_container :
+    t -> net:_ Eio.Net.t -> container_id:string -> (int, string) result =
  fun t ~net ~container_id ->
-  let json =
+  let* json =
     call_json t ~net `POST ("/containers/" ^ container_id ^ "/wait") []
   in
-  let resp = wait_response_of_yojson json in
-  resp.status_code
+  let* resp =
+    wait_response_of_yojson json
+    |> Result.map_error (fun msg ->
+        Printf.sprintf "failed to parse wait response for container %s: %s"
+          container_id msg)
+  in
+  Ok resp.status_code
 
 let inspect_image :
-    t -> net:_ Eio.Net.t -> image:string -> image_inspect_response =
+    t ->
+    net:_ Eio.Net.t ->
+    image:string ->
+    (image_inspect_response, string) result =
  fun t ~net ~image ->
-  let json = call_json t ~net `GET ("/images/" ^ image ^ "/json") [] in
+  let* json = call_json t ~net `GET ("/images/" ^ image ^ "/json") [] in
   image_inspect_response_of_yojson json
+  |> Result.map_error (fun msg ->
+      Printf.sprintf "failed to parse inspect response for image %s: %s" image
+        msg)
 
 let disconnect_from_network :
-    t -> net:_ Eio.Net.t -> container_id:string -> network_name:string -> unit =
+    t ->
+    net:_ Eio.Net.t ->
+    container_id:string ->
+    network_name:string ->
+    (unit, string) result =
  fun t ~net ~container_id ~network_name ->
   let payload =
     `Assoc [ ("Container", `String container_id); ("Force", `Bool true) ]
   in
   let headers, body = json_body payload in
-  let _ =
+  let* _ =
     call ~headers ~body t ~net `POST
       ("/networks/" ^ network_name ^ "/disconnect")
       []
   in
-  ()
+  Ok ()

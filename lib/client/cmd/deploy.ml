@@ -1,33 +1,31 @@
-open Ppx_yojson_conv_lib.Yojson_conv
-
 (* Cron job for deploy payload - excludes server (server filters which jobs to send per target) *)
 type deploy_cron_job = {
   name : string;
   image : string;
   schedule : string;
-  env_vars : Config_file.string_map option;
-  registry_user : string option;
-  registry_pass : string option;
+  env_vars : Config_file.string_map option; [@default None]
+  registry_user : string option; [@default None]
+  registry_pass : string option; [@default None]
 }
 [@@deriving yojson]
 
 type deploy_payload = {
-  service_name : string option;
+  service_name : string option; [@default None]
   image : string; (* Full image string including tag *)
   port : int;
   env_vars : Config_file.string_map;
-  traefik_domain_name : string option;
-  traefik_image : string option;
-  traefik_acme_email : string option;
-  registry_user : string option;
-  registry_pass : string option;
-  force_traefik_redeploy : bool option;
-  cron_jobs : deploy_cron_job list option;
-  drain_grace_period : float option;
-  deployment_strategy : string option;
-  health_timeout : float option;
-  poll_interval : float option;
-  logs : bool option;
+  traefik_domain_name : string option; [@default None]
+  traefik_image : string option; [@default None]
+  traefik_acme_email : string option; [@default None]
+  registry_user : string option; [@default None]
+  registry_pass : string option; [@default None]
+  force_traefik_redeploy : bool option; [@default None]
+  cron_jobs : deploy_cron_job list option; [@default None]
+  drain_grace_period : float option; [@default None]
+  deployment_strategy : string option; [@default None]
+  health_timeout : float option; [@default None]
+  poll_interval : float option; [@default None]
+  logs : bool option; [@default None]
 }
 [@@deriving yojson]
 
@@ -38,7 +36,7 @@ let post_deploy ~client ip_address payload =
   let url = Printf.sprintf "http://%s:3030/api/v1/deploy" ip_address in
   let uri = Uri.of_string url in
   let headers = Cohttp.Header.init_with "Content-Type" "application/json" in
-  let body_str = payload |> yojson_of_deploy_payload |> Yojson.Safe.to_string in
+  let body_str = payload |> deploy_payload_to_yojson |> Yojson.Safe.to_string in
   let body = Cohttp_eio.Body.of_string body_str in
   try
     let response, response_body =

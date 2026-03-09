@@ -1,30 +1,33 @@
 type string_map = (string * string) list
 
-let raise_error msg json =
-  raise (Ppx_yojson_conv_lib.Yojson_conv.Of_yojson_error (Failure msg, json))
-
 let assoc_of_list to_value list =
   `Assoc (List.map (fun (key, value) -> (key, to_value value)) list)
 
 let list_of_assoc ?field of_value json =
   match json with
   | `Assoc entries ->
-      List.map (fun (key, value) -> (key, of_value value)) entries
-  | `Null -> []
+      Ok (List.map (fun (key, value) -> (key, of_value value)) entries)
+  | `Null -> Ok []
   | _ ->
-      let msg =
-        match field with
+      Error
+        (match field with
         | None -> "expected object"
-        | Some name -> "expected object for " ^ name
+        | Some name -> "expected object for " ^ name)
+
+let string_map_of_yojson json =
+  match json with
+  | `Assoc entries ->
+      let rec parse = function
+        | [] -> Ok []
+        | (key, `String v) :: rest ->
+            Result.map (fun tl -> (key, v) :: tl) (parse rest)
+        | (key, _) :: _ ->
+            Error
+              (Printf.sprintf "expected string value for key %s in string_map"
+                 key)
       in
-      raise_error msg json
+      parse entries
+  | `Null -> Ok []
+  | _ -> Error "expected object for string_map"
 
-let string_map_of_yojson ?field json =
-  list_of_assoc ?field
-    (fun value ->
-      match value with
-      | `String v -> v
-      | _ -> raise_error "expected string values in object" json)
-    json
-
-let yojson_of_string_map map = assoc_of_list (fun value -> `String value) map
+let string_map_to_yojson map = assoc_of_list (fun value -> `String value) map

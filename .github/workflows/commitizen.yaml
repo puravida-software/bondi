@@ -2,12 +2,23 @@ name: commitizen
 
 on:
   pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
     branches:
       - main
+
+# Cancel any previous runs of this workflow for the same PR.
+concurrency:
+  group: commitizen-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   commitizen:
     runs-on: ubuntu-22.04
+    if: "!github.event.pull_request.draft"
 
     steps:
       - uses: actions/checkout@v6

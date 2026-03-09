@@ -30,6 +30,8 @@ The CLI:
 
 ## Usage (WIP)
 
+For a step-by-step walkthrough covering services, deployment strategies, cron jobs, and Alloy, see the **[Usage Guide](USAGE.md)**.
+
 1. Install the CLI (Homebrew)
 
 ```bash

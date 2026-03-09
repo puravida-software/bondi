@@ -1,5 +1,9 @@
 module Docker = Bondi_server__Docker__Client
 
+let unwrap = function
+  | Ok v -> v
+  | Error msg -> Alcotest.fail ("unexpected error: " ^ msg)
+
 let test_image_inspect_response_with_healthcheck_json () =
   let json =
     Yojson.Safe.from_string
@@ -11,8 +15,9 @@ let test_image_inspect_response_with_healthcheck_json () =
         }
       }|}
   in
-  let response = Docker.image_inspect_response_of_yojson json in
-  let healthcheck = response.container_config.healthcheck in
+  let response = Docker.image_inspect_response_of_yojson json |> unwrap in
+  let cc = Option.get response.container_config in
+  let healthcheck = cc.healthcheck in
   Alcotest.check Alcotest.bool "healthcheck is present" true
     (Option.is_some healthcheck);
   let hc = Option.get healthcheck in
@@ -31,8 +36,9 @@ let test_image_inspect_response_without_healthcheck_json () =
         }
       }|}
   in
-  let response = Docker.image_inspect_response_of_yojson json in
-  let healthcheck = response.container_config.healthcheck in
+  let response = Docker.image_inspect_response_of_yojson json |> unwrap in
+  let cc = Option.get response.container_config in
+  let healthcheck = cc.healthcheck in
   Alcotest.check Alcotest.bool "healthcheck is absent" false
     (Option.is_some healthcheck)
 
@@ -51,7 +57,7 @@ let test_inspect_state_with_health_json () =
         }
       }|}
   in
-  let state = Docker.inspect_state_of_yojson json in
+  let state = Docker.inspect_state_of_yojson json |> unwrap in
   Alcotest.check Alcotest.string "status" "running" state.status;
   Alcotest.check Alcotest.bool "health is present" true
     (Option.is_some state.health);
@@ -71,7 +77,7 @@ let test_inspect_state_without_health_json () =
         "ExitCode": 0
       }|}
   in
-  let state = Docker.inspect_state_of_yojson json in
+  let state = Docker.inspect_state_of_yojson json |> unwrap in
   Alcotest.check Alcotest.string "status" "running" state.status;
   Alcotest.check Alcotest.bool "health is absent" false
     (Option.is_some state.health)
@@ -93,7 +99,7 @@ let test_inspect_state_unhealthy_with_streak_json () =
         }
       }|}
   in
-  let state = Docker.inspect_state_of_yojson json in
+  let state = Docker.inspect_state_of_yojson json |> unwrap in
   let health = Option.get state.health in
   Alcotest.check Alcotest.string "health status" "unhealthy" health.status;
   Alcotest.check Alcotest.int "failing streak" 3 health.failing_streak;
@@ -105,7 +111,7 @@ let test_health_state_defaults_json () =
         "Status": "starting"
       }|}
   in
-  let health = Docker.health_state_of_yojson json in
+  let health = Docker.health_state_of_yojson json |> unwrap in
   Alcotest.check Alcotest.string "status" "starting" health.status;
   Alcotest.check Alcotest.int "default failing streak" 0 health.failing_streak;
   Alcotest.check Alcotest.int "default log" 0 (List.length health.log)

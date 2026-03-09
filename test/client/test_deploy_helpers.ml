@@ -164,8 +164,12 @@ let test_deploy_payload_includes_logs_flag () =
   in
   check (option bool) "logs flag is Some false" (Some false) payload.logs;
   (* Round-trip through JSON *)
-  let json = Deploy.yojson_of_deploy_payload payload in
-  let decoded = Deploy.deploy_payload_of_yojson json in
+  let json = Deploy.deploy_payload_to_yojson payload in
+  let decoded =
+    match Deploy.deploy_payload_of_yojson json with
+    | Ok v -> v
+    | Error msg -> Alcotest.fail ("unexpected error: " ^ msg)
+  in
   check (option bool) "logs survives JSON round-trip" (Some false) decoded.logs
 
 let () =

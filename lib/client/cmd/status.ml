@@ -1,5 +1,3 @@
-open Ppx_yojson_conv_lib.Yojson_conv
-
 (** Output format for the status command. *)
 type output_format = Table | Json
 
@@ -8,22 +6,22 @@ type component_status = {
   image_name : string;
   tag : string;
   status : string;
-  restart_count : int option;
-  created_at : string option;
+  restart_count : int option; [@default None]
+  created_at : string option; [@default None]
 }
 [@@deriving yojson]
 (** Status of a single Bondi-managed component. *)
 
 type infrastructure_status = {
-  orchestrator : component_status option;
-  traefik : component_status option;
-  alloy : component_status option;
+  orchestrator : component_status option; [@default None]
+  traefik : component_status option; [@default None]
+  alloy : component_status option; [@default None]
 }
 [@@deriving yojson]
 (** Infrastructure components. *)
 
 type comprehensive_status = {
-  service : component_status option;
+  service : component_status option; [@default None]
   cron_jobs : component_status list;
   infrastructure : infrastructure_status;
   errors : string list;
@@ -148,7 +146,7 @@ let format_json (results : (string * comprehensive_status) list) =
   let json =
     `Assoc
       (List.map
-         (fun (ip, status) -> (ip, yojson_of_comprehensive_status status))
+         (fun (ip, status) -> (ip, comprehensive_status_to_yojson status))
          results)
   in
   Yojson.Safe.pretty_to_string json
@@ -173,19 +171,12 @@ let fetch_status ~client ip_address ~service_name =
     let status = Cohttp.Response.status resp in
     let body_str = read_body_string body in
     match status with
-    | `OK -> (
-        try
-          let json = Yojson.Safe.from_string body_str in
-          Ok (comprehensive_status_of_yojson json)
-        with
-        | Ppx_yojson_conv_lib.Yojson_conv.Of_yojson_error (exn, _) ->
-            Error
-              (Printf.sprintf "Error decoding response from server %s: %s"
-                 ip_address (Printexc.to_string exn))
-        | exn ->
-            Error
-              (Printf.sprintf "Error decoding response from server %s: %s"
-                 ip_address (Printexc.to_string exn)))
+    | `OK ->
+        let json = Yojson.Safe.from_string body_str in
+        comprehensive_status_of_yojson json
+        |> Result.map_error (fun msg ->
+            Printf.sprintf "error decoding status response from server %s: %s"
+              ip_address msg)
     | _ ->
         Error
           (Printf.sprintf "Non-OK response from server %s: %s" ip_address

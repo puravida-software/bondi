@@ -1,26 +1,24 @@
-open Ppx_yojson_conv_lib.Yojson_conv
-
 type component_status = {
   name : string;
   image_name : string;
   tag : string;
   status : string;
-  restart_count : int option;
-  created_at : string option;
+  restart_count : int option; [@default None]
+  created_at : string option; [@default None]
 }
 [@@deriving yojson, show, eq]
 (** Status of a single Bondi-managed component. *)
 
 type infrastructure_status = {
-  orchestrator : component_status option;
-  traefik : component_status option;
-  alloy : component_status option;
+  orchestrator : component_status option; [@default None]
+  traefik : component_status option; [@default None]
+  alloy : component_status option; [@default None]
 }
 [@@deriving yojson, show, eq]
 (** Infrastructure components. *)
 
 type comprehensive_status = {
-  service : component_status option;
+  service : component_status option; [@default None]
   cron_jobs : component_status list;
   infrastructure : infrastructure_status;
   errors : string list;
@@ -165,12 +163,18 @@ let plan ~(service_name : string option) (ctx : status_context) :
     found. *)
 let inspect_by_name client ~net ~container_name =
   match Docker.Client.get_container_by_name client ~net ~container_name with
-  | None -> None
-  | Some container ->
-      let inspect =
+  | Error msg ->
+      Dream.log "failed to look up container %s: %s" container_name msg;
+      None
+  | Ok None -> None
+  | Ok (Some container) -> (
+      match
         Docker.Client.inspect_container client ~net ~container_id:container.id
-      in
-      Some (container, inspect)
+      with
+      | Ok inspect -> Some (container, inspect)
+      | Error msg ->
+          Dream.log "failed to inspect container %s: %s" container_name msg;
+          None)
 
 (** Impure: inspect Docker containers and read crontab. *)
 let gather ~client ~net ~(service_name : string option) : status_context =
@@ -200,13 +204,19 @@ let gather ~client ~net ~(service_name : string option) : status_context =
           Docker.Client.get_container_by_name client ~net
             ~container_name:job.name
         with
-        | None -> None
-        | Some container ->
-            let inspect =
+        | Error msg ->
+            Dream.log "failed to look up cron container %s: %s" job.name msg;
+            None
+        | Ok None -> None
+        | Ok (Some container) -> (
+            match
               Docker.Client.inspect_container client ~net
                 ~container_id:container.id
-            in
-            Some (job.name, inspect))
+            with
+            | Ok inspect -> Some (job.name, inspect)
+            | Error msg ->
+                Dream.log "failed to inspect cron container %s: %s" job.name msg;
+                None))
       scheduled_cron_jobs
   in
   {
@@ -230,7 +240,7 @@ let route ~client ~net =
       let status = plan ~service_name ctx in
       List.iter (fun e -> Dream.log "status warning: %s" e) status.errors;
       status
-      |> yojson_of_comprehensive_status
+      |> comprehensive_status_to_yojson
       |> Yojson.Safe.to_string
       |> Dream.json)
     (fun exn ->

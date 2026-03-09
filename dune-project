@@ -22,10 +22,8 @@
  (depends
   (ocaml
    (>= 5.3.0))
-  (ppx_yojson_conv_lib
-   (>= v0.17.0))
-  (ppx_yojson_conv
-   (>= v0.17.1))
+  (ppx_deriving_yojson
+   (>= 3.10.0))
   (ppx_deriving
    (>= 6.1.1))
   (lwt_ppx
