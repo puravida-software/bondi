@@ -6,7 +6,7 @@ on:
       - opened
       - synchronize
       - reopened
-      - labeled
+      - ready_for_review
     branches:
       - main
 
@@ -18,7 +18,7 @@ concurrency:
 jobs:
   lint-doc:
     runs-on: ubuntu-latest
-    if: contains(github.event.pull_request.labels.*.name, 'ready')
+    if: "!github.event.pull_request.draft"
 
     steps:
       - name: Checkout tree
@@ -35,7 +35,7 @@ jobs:
 
   lint-fmt:
     runs-on: ubuntu-latest
-    if: contains(github.event.pull_request.labels.*.name, 'ready')
+    if: "!github.event.pull_request.draft"
 
     steps:
       - name: Checkout tree
@@ -52,7 +52,7 @@ jobs:
 
   lint-opam:
     runs-on: ubuntu-latest
-    if: contains(github.event.pull_request.labels.*.name, 'ready')
+    if: "!github.event.pull_request.draft"
 
     steps:
       - name: Checkout tree
@@ -69,7 +69,7 @@ jobs:
 
   lint-dep-bounds:
     runs-on: ubuntu-latest
-    if: contains(github.event.pull_request.labels.*.name, 'ready')
+    if: "!github.event.pull_request.draft"
 
     steps:
       - name: Checkout tree

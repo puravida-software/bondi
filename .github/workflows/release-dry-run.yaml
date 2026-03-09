@@ -6,14 +6,20 @@ on:
       - opened
       - synchronize
       - reopened
-      - labeled
+      - ready_for_review
     branches:
       - main
+
+# Cancel any previous runs of this workflow for the same PR.
+concurrency:
+  group: release-dry-run-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   build-cli:
     name: build-${{ matrix.platform }}
     runs-on: ${{ matrix.os }}
+    if: "!github.event.pull_request.draft"
     strategy:
       fail-fast: false
       matrix:
