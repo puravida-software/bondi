@@ -2,7 +2,6 @@
    Writes to root's crontab at /var/spool/cron/crontabs/root.
    Job specs are inlined in the curl -d argument. *)
 
-open Ppx_yojson_conv_lib.Yojson_conv
 open Json_helpers
 
 let ( let* ) = Result.bind
@@ -19,7 +18,7 @@ let bondi_end_marker = "# END BONDI CRON"
 type run_payload = {
   job : string;
   image : string;
-  env_vars : string_map option;
+  env_vars : string_map option; [@default None]
 }
 [@@deriving yojson]
 
@@ -104,7 +103,7 @@ let string_of_lines lines = String.concat "\n" lines ^ "\n"
 
 let entry_of_cron_job (c : Strategy.Simple.cron_job) =
   let payload = run_payload_of_cron_job c in
-  let json_str = yojson_of_run_payload payload |> Yojson.Safe.to_string in
+  let json_str = run_payload_to_yojson payload |> Yojson.Safe.to_string in
   let escaped = escape_for_shell json_str in
   Printf.sprintf
     "%s /usr/bin/curl -s -X POST http://localhost:3030/api/v1/run -H \

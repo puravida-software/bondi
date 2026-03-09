@@ -4,7 +4,7 @@ let test_run_response_with_warning_json () =
   let response : Run.run_response =
     { exit_code = 1; warning = Some "failed to remove old container" }
   in
-  let json = Run.yojson_of_run_response response in
+  let json = Run.run_response_to_yojson response in
   let expected =
     `Assoc
       [
@@ -18,8 +18,8 @@ let test_run_response_with_warning_json () =
 
 let test_run_response_without_warning_json () =
   let response : Run.run_response = { exit_code = 0; warning = None } in
-  let json = Run.yojson_of_run_response response in
-  let expected = `Assoc [ ("exit_code", `Int 0); ("warning", `Null) ] in
+  let json = Run.run_response_to_yojson response in
+  let expected = `Assoc [ ("exit_code", `Int 0) ] in
   Alcotest.check Alcotest.string "run_response without warning"
     (Yojson.Safe.to_string expected)
     (Yojson.Safe.to_string json)

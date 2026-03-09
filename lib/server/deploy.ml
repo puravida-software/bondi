@@ -1,4 +1,3 @@
-open Ppx_yojson_conv_lib.Yojson_conv
 module Simple = Strategy.Simple
 
 type deploy_response = {
@@ -98,16 +97,21 @@ let ( let* ) = Result.bind
 
 let interpret ~client ~net (actions : deploy_action list) :
     (unit, string) result =
+  let rec pull_cron_images = function
+    | [] -> Ok ()
+    | (c : Simple.cron_job) :: rest ->
+        let image_name, tag = image_name_and_tag c.image in
+        let auth = registry_auth_for_cron c in
+        let* () =
+          Docker.Client.pull_image client ~net ~image:image_name ~tag
+            ~registry_auth:auth
+        in
+        pull_cron_images rest
+  in
   let rec run = function
     | [] -> Ok ()
     | PullCronImages jobs :: rest ->
-        List.iter
-          (fun (c : Simple.cron_job) ->
-            let image_name, tag = image_name_and_tag c.image in
-            let auth = registry_auth_for_cron c in
-            Docker.Client.pull_image client ~net ~image:image_name ~tag
-              ~registry_auth:auth)
-          jobs;
+        let* () = pull_cron_images jobs in
         run rest
     | UpsertCrontab cron_jobs :: rest -> (
         match Crontab.upsert cron_jobs with
@@ -122,14 +126,11 @@ let interpret ~client ~net (actions : deploy_action list) :
 (* ------------------------------------------------------------------------- *)
 
 let decode_input body =
-  try Ok (Simple.deploy_input_of_yojson (Yojson.Safe.from_string body)) with
-  | Yojson.Json_error msg -> Error ("invalid JSON: " ^ msg)
-  | Of_yojson_error (exn, yojson) ->
-      Error
-        (Printf.sprintf "invalid deploy payload: %s (json: %s)"
-           (Printexc.to_string exn)
-           (Yojson.Safe.to_string yojson))
-  | exn -> Error (Printexc.to_string exn)
+  match Yojson.Safe.from_string body with
+  | exception Yojson.Json_error msg -> Error ("invalid JSON: " ^ msg)
+  | json ->
+      Simple.deploy_input_of_yojson json
+      |> Result.map_error (fun msg -> "invalid deploy payload: " ^ msg)
 
 let build_response ~strategy ~strategy_reason (input : Simple.deploy_input) =
   {
@@ -140,24 +141,20 @@ let build_response ~strategy ~strategy_reason (input : Simple.deploy_input) =
   }
 
 let has_healthcheck ~client ~net ~image =
-  let inspect = Docker.Client.inspect_image client ~net ~image in
-  Option.is_some inspect.container_config.healthcheck
+  match Docker.Client.inspect_image client ~net ~image with
+  | Ok inspect -> (
+      match inspect.container_config with
+      | Some cc -> Option.is_some cc.healthcheck
+      | None -> false)
+  | Error _ -> false
 
-let pull_main_image ~client ~net input =
+let try_pull_main_image ~client ~net input =
   let auth = registry_auth input in
   let image_name, tag = image_name_and_tag input.Simple.image in
   Docker.Client.pull_image client ~net ~image:image_name ~tag
     ~registry_auth:auth
-
-let try_pull_main_image ~client ~net input =
-  try
-    pull_main_image ~client ~net input;
-    Ok ()
-  with
-  | exn ->
-      Error
-        (Printf.sprintf "failed to pull image %s: %s" input.Simple.image
-           (Printexc.to_string exn))
+  |> Result.map_error (fun msg ->
+      Printf.sprintf "failed to pull image %s: %s" input.Simple.image msg)
 
 let select_strategy_and_prepare ~client ~net input :
     (deployment_strategy * string, string) result =
@@ -207,7 +204,7 @@ let route ~clock ~net =
           run_deploy ~clock ~net input >>= function
           | Ok response ->
               response
-              |> yojson_of_deploy_response
+              |> deploy_response_to_yojson
               |> Yojson.Safe.to_string
               |> Dream.json
           | Error msg ->

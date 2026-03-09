@@ -1,4 +1,3 @@
-open Ppx_yojson_conv_lib.Yojson_conv
 open Json_helpers
 
 let ( let* ) = Result.bind
@@ -13,7 +12,7 @@ type cron_job = {
   name : string;
   image : string;
   schedule : string;
-  env_vars : string_map option;
+  env_vars : string_map option; [@default None]
   registry_user : string option; [@default None]
   registry_pass : string option; [@default None]
 }
@@ -23,13 +22,13 @@ type deploy_input = {
   service_name : string option; [@default None]
   image : string; (* Full image string including tag *)
   port : int;
-  registry_user : string option;
-  registry_pass : string option;
-  env_vars : string_map option;
-  traefik_domain_name : string option;
-  traefik_image : string option;
-  traefik_acme_email : string option;
-  force_traefik_redeploy : bool option;
+  registry_user : string option; [@default None]
+  registry_pass : string option; [@default None]
+  env_vars : string_map option; [@default None]
+  traefik_domain_name : string option; [@default None]
+  traefik_image : string option; [@default None]
+  traefik_acme_email : string option; [@default None]
+  force_traefik_redeploy : bool option; [@default None]
   cron_jobs : cron_job list option; [@default None]
   drain_grace_period : float option; [@default None]
   deployment_strategy : string option; [@default None]
@@ -126,20 +125,16 @@ let service_config (input : deploy_input) :
 
 let gather_context ~client ~net (input : deploy_input) :
     (deploy_context, string) result =
-  try
-    let current_traefik =
-      Docker.Client.get_container_by_image_name client ~net
-        ~image_name:"traefik"
-    in
-    let current_workload =
-      match input.service_name with
-      | Some name ->
-          Docker.Client.get_container_by_name client ~net ~container_name:name
-      | None -> None
-    in
-    Ok { current_traefik; current_workload }
-  with
-  | exn -> Error (Printexc.to_string exn)
+  let* current_traefik =
+    Docker.Client.get_container_by_image_name client ~net ~image_name:"traefik"
+  in
+  let* current_workload =
+    match input.service_name with
+    | Some name ->
+        Docker.Client.get_container_by_name client ~net ~container_name:name
+    | None -> Ok None
+  in
+  Ok { current_traefik; current_workload }
 
 (* ------------------------------------------------------------------------- *)
 (* Phase 2: Plan (pure)                                                     *)
@@ -266,22 +261,19 @@ let wait_for_traefik ~clock ~client ~net ~container_id : (unit, string) result =
            last_state)
     else
       let state =
-        try
-          let inspect =
-            Docker.Client.inspect_container client ~net ~container_id
-          in
-          Ok inspect.state.status
-        with
-        | exn -> Error (Printexc.to_string exn)
+        Result.map
+          (fun (inspect : Docker.Client.inspect_response) ->
+            inspect.state.status)
+          (Docker.Client.inspect_container client ~net ~container_id)
       in
       match state with
       | Ok "running" -> Ok ()
       | Ok "created" ->
-          Docker.Client.start_container client ~net ~container_id;
+          let* () = Docker.Client.start_container client ~net ~container_id in
           Eio.Time.sleep clock 1.0;
           loop (attempt + 1) "created"
       | Ok "exited" ->
-          Docker.Client.start_container client ~net ~container_id;
+          let* () = Docker.Client.start_container client ~net ~container_id in
           Eio.Time.sleep clock 1.0;
           loop (attempt + 1) "exited"
       | Ok status ->
@@ -296,7 +288,9 @@ let interpret ~clock ~client ~net (actions : action list) :
   let rec run = function
     | [] -> Ok ()
     | CreateNetwork { network_name } :: rest ->
-        Docker.Client.create_network_if_not_exists client ~net ~network_name;
+        let* () =
+          Docker.Client.create_network_if_not_exists client ~net ~network_name
+        in
         run rest
     | EnsureTraefik { image; traefik_config; domain_name = _; acme_email = _ }
       :: rest ->
@@ -310,8 +304,10 @@ let interpret ~clock ~client ~net (actions : action list) :
           | Ok (n, t) -> (n, t)
           | Error _ -> (image, "")
         in
-        Docker.Client.pull_image_no_auth client ~net ~image:image_name
-          ~tag:image_tag;
+        let* () =
+          Docker.Client.pull_image_no_auth client ~net ~image:image_name
+            ~tag:image_tag
+        in
         let opts : Docker.Client.run_image_options =
           {
             container_name = traefik_name;
@@ -320,17 +316,25 @@ let interpret ~clock ~client ~net (actions : action list) :
             networking_conf = Some default_networking_config;
           }
         in
-        let container_id = Docker.Client.run_image_with_opts client ~net opts in
+        let* container_id =
+          Docker.Client.run_image_with_opts client ~net opts
+        in
         let* () = wait_for_traefik ~clock ~client ~net ~container_id in
         run rest
     | StopAndRemoveContainer container :: rest ->
-        Docker.Client.stop_container client ~net ~container_id:container.id;
-        Docker.Client.remove_container_and_image client ~net ~container;
+        let* () =
+          Docker.Client.stop_container client ~net ~container_id:container.id
+        in
+        let* () =
+          Docker.Client.remove_container_and_image client ~net ~container
+        in
         run rest
     | PullImage { image; tag; with_auth } :: rest ->
-        if with_auth then
-          Docker.Client.pull_image_with_auth client ~net ~image ~tag
-        else Docker.Client.pull_image_no_auth client ~net ~image ~tag;
+        let* () =
+          if with_auth then
+            Docker.Client.pull_image_with_auth client ~net ~image ~tag
+          else Docker.Client.pull_image_no_auth client ~net ~image ~tag
+        in
         run rest
     | RunWorkload { container_name; config; networking_conf } :: rest ->
         let opts : Docker.Client.run_image_options =
@@ -341,7 +345,7 @@ let interpret ~clock ~client ~net (actions : action list) :
             networking_conf = Some networking_conf;
           }
         in
-        let _ = Docker.Client.run_image_with_opts client ~net opts in
+        let* _ = Docker.Client.run_image_with_opts client ~net opts in
         run rest
   in
   run actions

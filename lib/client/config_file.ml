@@ -1,16 +1,4 @@
-open Ppx_yojson_conv_lib.Yojson_conv
 include Bondi_common.Json_utils
-
-let int_of_yojson json =
-  match json with
-  | `Int value -> value
-  | `Float value ->
-      let truncated = Float.trunc value in
-      if Float.equal truncated value then int_of_float value
-      else
-        raise_error (Printf.sprintf "expected integer, got float %f" value) json
-  | `String value -> int_of_string value
-  | _ -> raise_error "expected integer" json
 
 type server_ssh = {
   user : string;
@@ -19,15 +7,15 @@ type server_ssh = {
 }
 [@@deriving yojson]
 
-type server = { ip_address : string; ssh : server_ssh option }
+type server = { ip_address : string; ssh : server_ssh option [@default None] }
 [@@deriving yojson]
 
 type user_service = {
   name : string;
   image : string; (* Base image without tag, e.g. registry.com/app *)
   port : int;
-  registry_user : string option;
-  registry_pass : string option;
+  registry_user : string option; [@default None]
+  registry_pass : string option; [@default None]
   env_vars : string_map;
   servers : server list;
   drain_grace_period : int option; [@default None]
@@ -47,7 +35,7 @@ type cron_job = {
   name : string;
   image : string; (* Base image without tag *)
   schedule : string;
-  env_vars : string_map option;
+  env_vars : string_map option; [@default None]
   registry_user : string option; [@default None]
   registry_pass : string option; [@default None]
   server : server;
@@ -70,11 +58,11 @@ type alloy = {
 [@@deriving yojson]
 
 type t = {
-  user_service : user_service option; [@key "service"]
+  user_service : user_service option; [@key "service"] [@default None]
   bondi_server : bondi_server; [@key "bondi_server"]
-  traefik : traefik option; [@key "traefik"]
-  cron_jobs : cron_job list option; [@key "cron_jobs"]
-  alloy : alloy option; [@key "alloy"]
+  traefik : traefik option; [@key "traefik"] [@default None]
+  cron_jobs : cron_job list option; [@key "cron_jobs"] [@default None]
+  alloy : alloy option; [@key "alloy"] [@default None]
 }
 [@@deriving yojson]
 
@@ -132,7 +120,11 @@ let rec yojson_of_yaml = function
       `Assoc (List.map (fun (key, value) -> (key, yojson_of_yaml value)) assoc)
   | `A list -> `List (List.map yojson_of_yaml list)
   | `String value -> `String value
-  | `Float value -> `Float value
+  | `Float value ->
+      (* YAML does not distinguish int from float; coerce whole numbers *)
+      let truncated = Float.trunc value in
+      if Float.equal truncated value then `Int (int_of_float value)
+      else `Float value
   | `Bool value -> `Bool value
   | `Null -> `Null
 
@@ -165,7 +157,8 @@ let read () =
       let rendered = apply_env_template contents in
       match Yaml.of_string rendered with
       | Error (`Msg message) -> Error message
-      | Ok yaml -> (
+      | Ok yaml ->
+          let ( let* ) = Result.bind in
           let json =
             yaml
             |> yojson_of_yaml
@@ -174,10 +167,8 @@ let read () =
             |> ensure_traefik_key
             |> ensure_alloy_key
           in
-          try
-            let config = t_of_yojson json in
-            validate_alloy_collect config
-          with
-          | Ppx_yojson_conv_lib.Yojson_conv.Of_yojson_error (exn, _) ->
-              Error (Printexc.to_string exn)
-          | exn -> Error (Printexc.to_string exn)))
+          let* config =
+            of_yojson json
+            |> Result.map_error (fun msg -> "invalid bondi.yaml: " ^ msg)
+          in
+          validate_alloy_collect config)

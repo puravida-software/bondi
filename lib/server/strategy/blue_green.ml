@@ -143,7 +143,7 @@ let wait_for_healthy ~clock ~client ~net ~container_name ~poll_interval ~timeout
         (Printf.sprintf "timeout waiting for container %s to become healthy"
            container_name)
     else
-      let inspect =
+      let* inspect =
         Docker.Client.inspect_container client ~net ~container_id:container_name
       in
       match inspect.state.health with
@@ -159,7 +159,11 @@ let wait_for_healthy ~clock ~client ~net ~container_name ~poll_interval ~timeout
   loop ()
 
 let rollback ~client ~net ~rollback_container_name =
-  Docker.Client.stop_container client ~net ~container_id:rollback_container_name;
+  let ( let* ) = Result.bind in
+  let* () =
+    Docker.Client.stop_container client ~net
+      ~container_id:rollback_container_name
+  in
   Docker.Client.remove_container client ~net
     ~container_id:rollback_container_name
 
@@ -167,8 +171,8 @@ let interpret ~clock ~client ~net (plan : deploy_plan) : (unit, string) result =
   let rec run = function
     | [] -> Ok ()
     | CleanupOrphanedContainer { container_id } :: rest ->
-        Docker.Client.stop_container client ~net ~container_id;
-        Docker.Client.remove_container client ~net ~container_id;
+        let* () = Docker.Client.stop_container client ~net ~container_id in
+        let* () = Docker.Client.remove_container client ~net ~container_id in
         run rest
     | RunNewContainer { container_name; config; networking_conf } :: rest ->
         let opts : Docker.Client.run_image_options =
@@ -179,7 +183,7 @@ let interpret ~clock ~client ~net (plan : deploy_plan) : (unit, string) result =
             networking_conf = Some networking_conf;
           }
         in
-        let _ = Docker.Client.run_image_with_opts client ~net opts in
+        let* _ = Docker.Client.run_image_with_opts client ~net opts in
         run rest
     | WaitForHealthy { container_name; poll_interval; timeout } :: rest -> (
         match
@@ -188,22 +192,28 @@ let interpret ~clock ~client ~net (plan : deploy_plan) : (unit, string) result =
         with
         | Ok () -> run rest
         | Error msg ->
-            rollback ~client ~net
-              ~rollback_container_name:plan.rollback_container_name;
+            let _rollback_result =
+              rollback ~client ~net
+                ~rollback_container_name:plan.rollback_container_name
+            in
             Error msg)
     | DisconnectFromNetwork { container_id; network_name } :: rest ->
-        Docker.Client.disconnect_from_network client ~net ~container_id
-          ~network_name;
+        let* () =
+          Docker.Client.disconnect_from_network client ~net ~container_id
+            ~network_name
+        in
         run rest
     | DrainGracePeriod { seconds } :: rest ->
         Eio.Time.sleep clock seconds;
         run rest
     | StopAndRemoveContainer { container_id } :: rest ->
-        Docker.Client.stop_container client ~net ~container_id;
-        Docker.Client.remove_container client ~net ~container_id;
+        let* () = Docker.Client.stop_container client ~net ~container_id in
+        let* () = Docker.Client.remove_container client ~net ~container_id in
         run rest
     | RenameContainer { container_id; new_name } :: rest ->
-        Docker.Client.rename_container client ~net ~container_id ~new_name;
+        let* () =
+          Docker.Client.rename_container client ~net ~container_id ~new_name
+        in
         run rest
   in
   run plan.success_path
@@ -214,17 +224,14 @@ let interpret ~clock ~client ~net (plan : deploy_plan) : (unit, string) result =
 
 let gather_context ~client ~net ~container_name ~temp_container_name :
     (blue_green_context, string) result =
-  try
-    let current_workload =
-      Docker.Client.get_container_by_name client ~net ~container_name
-    in
-    let orphaned_new_container =
-      Docker.Client.get_container_by_name client ~net
-        ~container_name:temp_container_name
-    in
-    Ok { current_workload; orphaned_new_container }
-  with
-  | exn -> Error (Printexc.to_string exn)
+  let* current_workload =
+    Docker.Client.get_container_by_name client ~net ~container_name
+  in
+  let* orphaned_new_container =
+    Docker.Client.get_container_by_name client ~net
+      ~container_name:temp_container_name
+  in
+  Ok { current_workload; orphaned_new_container }
 
 (* ------------------------------------------------------------------------- *)
 (* Entry point                                                               *)

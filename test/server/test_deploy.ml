@@ -109,7 +109,7 @@ let test_deploy_response_with_strategy_json () =
       strategy_reason = "image has HEALTHCHECK";
     }
   in
-  let json = Deploy.yojson_of_deploy_response response in
+  let json = Deploy.deploy_response_to_yojson response in
   let strategy =
     Yojson.Safe.Util.member "strategy" json |> Yojson.Safe.Util.to_string
   in
@@ -129,7 +129,7 @@ let test_deploy_response_simple_strategy_json () =
       strategy_reason = "image has no HEALTHCHECK";
     }
   in
-  let json = Deploy.yojson_of_deploy_response response in
+  let json = Deploy.deploy_response_to_yojson response in
   let strategy =
     Yojson.Safe.Util.member "strategy" json |> Yojson.Safe.Util.to_string
   in
@@ -173,15 +173,23 @@ let test_deploy_input_logs_flag () =
     (Alcotest.option Alcotest.bool)
     "logs is Some false" (Some false) input.logs;
   (* Round-trip through yojson *)
-  let json = Simple.yojson_of_deploy_input input in
-  let decoded = Simple.deploy_input_of_yojson json in
+  let json = Simple.deploy_input_to_yojson input in
+  let decoded =
+    match Simple.deploy_input_of_yojson json with
+    | Ok v -> v
+    | Error msg -> Alcotest.fail ("unexpected error: " ^ msg)
+  in
   Alcotest.check
     (Alcotest.option Alcotest.bool)
     "logs survives JSON round-trip" (Some false) decoded.logs;
   (* Default when absent *)
   let input_no_logs = { minimal_input with logs = None } in
-  let json2 = Simple.yojson_of_deploy_input input_no_logs in
-  let decoded2 = Simple.deploy_input_of_yojson json2 in
+  let json2 = Simple.deploy_input_to_yojson input_no_logs in
+  let decoded2 =
+    match Simple.deploy_input_of_yojson json2 with
+    | Ok v -> v
+    | Error msg -> Alcotest.fail ("unexpected error: " ^ msg)
+  in
   Alcotest.check
     (Alcotest.option Alcotest.bool)
     "logs defaults to None" None decoded2.logs
