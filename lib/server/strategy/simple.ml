@@ -20,8 +20,8 @@ type cron_job = {
 
 type deploy_input = {
   service_name : string option; [@default None]
-  image : string; (* Full image string including tag *)
-  port : int;
+  image : string option; [@default None]
+  port : int option; [@default None]
   registry_user : string option; [@default None]
   registry_pass : string option; [@default None]
   env_vars : string_map option; [@default None]
@@ -78,46 +78,64 @@ let parse_image_and_tag image =
   | [ name ] -> Ok (name, "")
   | _ -> Error ("invalid image format: " ^ image)
 
+let require_image_and_tag image =
+  match parse_image_and_tag image with
+  | Ok (name, "") ->
+      Error
+        (Printf.sprintf
+           "image %s has no tag — specify an explicit tag (e.g. %s:v1.0.0)" name
+           name)
+  | Ok (name, tag) -> Ok (name, tag)
+  | Error msg -> Error msg
+
 let service_config (input : deploy_input) :
     (Docker.Client.container_config, string) result =
-  match input.traefik_domain_name with
-  | None -> Error "missing traefik_domain_name for service labels"
-  | Some domain_name ->
-      let new_image =
-        match parse_image_and_tag input.image with
-        | Ok (name, tag) -> if tag = "" then name ^ ":latest" else input.image
-        | Error _ -> input.image
-      in
-      let labels : string_map =
-        [
-          ("bondi.managed", "true");
-          ("bondi.type", "service");
-          ("bondi.logs", string_of_bool (Option.value ~default:true input.logs));
-          ("traefik.enable", "true");
-          ( "traefik.http.routers.bondi.rule",
-            Printf.sprintf "Host(`%s`) || Host(`www.%s`)" domain_name
-              domain_name );
-          ("traefik.http.routers.bondi.entrypoints", "websecure");
-          ("traefik.http.routers.bondi.tls", "true");
-          ("traefik.http.routers.bondi.tls.certresolver", "bondi_resolver");
-          ( "traefik.http.services.bondi.loadbalancer.server.port",
-            string_of_int input.port );
-        ]
-      in
-      let env = Option.map env_vars_to_list input.env_vars in
-      let config : Docker.Client.container_config =
-        {
-          image = Some new_image;
-          env;
-          cmd = None;
-          entrypoint = None;
-          hostname = None;
-          working_dir = None;
-          labels = Some labels;
-          exposed_ports = None;
-        }
-      in
-      Ok config
+  match input.image with
+  | None -> Error "image is required when deploying a service (got null)"
+  | Some image -> (
+      match input.port with
+      | None -> Error "port is required when deploying a service (got null)"
+      | Some port -> (
+          match input.traefik_domain_name with
+          | None -> Error "missing traefik_domain_name for service labels"
+          | Some domain_name ->
+              let new_image =
+                match parse_image_and_tag image with
+                | Ok (name, tag) -> if tag = "" then name ^ ":latest" else image
+                | Error _ -> image
+              in
+              let labels : string_map =
+                [
+                  ("bondi.managed", "true");
+                  ("bondi.type", "service");
+                  ( "bondi.logs",
+                    string_of_bool (Option.value ~default:true input.logs) );
+                  ("traefik.enable", "true");
+                  ( "traefik.http.routers.bondi.rule",
+                    Printf.sprintf "Host(`%s`) || Host(`www.%s`)" domain_name
+                      domain_name );
+                  ("traefik.http.routers.bondi.entrypoints", "websecure");
+                  ("traefik.http.routers.bondi.tls", "true");
+                  ( "traefik.http.routers.bondi.tls.certresolver",
+                    "bondi_resolver" );
+                  ( "traefik.http.services.bondi.loadbalancer.server.port",
+                    string_of_int port );
+                ]
+              in
+              let env = Option.map env_vars_to_list input.env_vars in
+              let config : Docker.Client.container_config =
+                {
+                  image = Some new_image;
+                  env;
+                  cmd = None;
+                  entrypoint = None;
+                  hostname = None;
+                  working_dir = None;
+                  labels = Some labels;
+                  exposed_ports = None;
+                }
+              in
+              Ok config))
 
 (* ------------------------------------------------------------------------- *)
 (* Phase 1: Gather context (read-only)                                       *)
@@ -217,34 +235,41 @@ let plan (input : deploy_input) (context : deploy_context) :
     match input.traefik_domain_name with
     | None -> Ok ()
     | Some _ -> (
-        match (service_config input, input.service_name) with
-        | Error e, _ -> Error e
-        | Ok _, None -> Error "service_name required when deploying a service"
-        | Ok service_cfg, Some name ->
-            (match context.current_workload with
-            | None -> ()
-            | Some container ->
-                actions := StopAndRemoveContainer container :: !actions);
-            (match parse_image_and_tag input.image with
-            | Ok (image_name, image_tag) ->
+        match input.image with
+        | None ->
+            Error
+              "image is required when deploying a service (traefik_domain_name \
+               is set but image is null)"
+        | Some image -> (
+            match (service_config input, input.service_name) with
+            | Error e, _ -> Error e
+            | Ok _, None ->
+                Error "service_name required when deploying a service"
+            | Ok service_cfg, Some name ->
+                (match context.current_workload with
+                | None -> ()
+                | Some container ->
+                    actions := StopAndRemoveContainer container :: !actions);
+                (match parse_image_and_tag image with
+                | Ok (image_name, image_tag) ->
+                    actions :=
+                      PullImage
+                        {
+                          image = image_name;
+                          tag = (if image_tag = "" then "latest" else image_tag);
+                          with_auth = Option.is_some input.registry_user;
+                        }
+                      :: !actions
+                | Error _ -> ());
                 actions :=
-                  PullImage
+                  RunWorkload
                     {
-                      image = image_name;
-                      tag = (if image_tag = "" then "latest" else image_tag);
-                      with_auth = Option.is_some input.registry_user;
+                      container_name = name;
+                      config = service_cfg;
+                      networking_conf = default_networking_config;
                     }
-                  :: !actions
-            | Error _ -> ());
-            actions :=
-              RunWorkload
-                {
-                  container_name = name;
-                  config = service_cfg;
-                  networking_conf = default_networking_config;
-                }
-              :: !actions;
-            Ok ())
+                  :: !actions;
+                Ok ()))
   in
   Ok (List.rev !actions)
 

@@ -76,14 +76,14 @@ let get_running_version ~user ~host ~key_path =
         |> String.trim
       in
       let prefix = "mlopez1506/bondi-server:" in
-      if image = "" then Ok ""
+      if image = "" then Ok None
       else if Bondi_common.String_utils.starts_with ~prefix image then
         let version =
           String.sub image (String.length prefix)
             (String.length image - String.length prefix)
         in
-        Ok (String.trim version)
-      else Ok image
+        Ok (Some (String.trim version))
+      else Ok (Some image)
 
 (* ------------------------------------------------------------------------- *)
 (* Types                                                                     *)
@@ -94,7 +94,7 @@ type alloy_state = Alloy_not_running | Alloy_running of { image : string }
 type setup_context = {
   docker_status : [ `Installed of string | `NotInstalled of string ];
   acme_file_exists : bool;
-  running_version : string;
+  running_version : string option;
   alloy_state : alloy_state;
 }
 
@@ -131,11 +131,11 @@ let gather_context ~user ~host ~key_path : (setup_context, string) result =
   in
   let running_version =
     match docker_status with
-    | `NotInstalled _ -> ""
+    | `NotInstalled _ -> None
     | `Installed _ -> (
         match get_running_version ~user ~host ~key_path with
         | Ok v -> v
-        | Error _ -> "")
+        | Error _ -> None)
   in
   let alloy_state =
     match docker_status with
@@ -172,20 +172,21 @@ let should_skip_server (config : Config_file.t) (ctx : setup_context) : bool =
     | Some jobs when jobs <> [] -> true
     | _ -> false
   in
-  ctx.running_version <> ""
-  && ctx.running_version = config.bondi_server.version
-  && not has_cron_jobs
+  match ctx.running_version with
+  | None -> false
+  | Some v -> v = config.bondi_server.version && not has_cron_jobs
 
 let needs_orchestrator_restart (config : Config_file.t) (ctx : setup_context) :
     bool =
-  if ctx.running_version = "" then false
-  else
-    let has_cron_jobs =
-      match config.cron_jobs with
-      | Some jobs when jobs <> [] -> true
-      | _ -> false
-    in
-    ctx.running_version <> config.bondi_server.version || has_cron_jobs
+  match ctx.running_version with
+  | None -> false
+  | Some v ->
+      let has_cron_jobs =
+        match config.cron_jobs with
+        | Some jobs when jobs <> [] -> true
+        | _ -> false
+      in
+      v <> config.bondi_server.version || has_cron_jobs
 
 let alloy_desired_image (alloy : Config_file.alloy) =
   Option.value alloy.image ~default:Bondi_common.Defaults.alloy_image
@@ -432,7 +433,7 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
 
 let setup_server config server =
   let open Config_file in
-  let { ip_address; ssh } = server in
+  let { ip_address; ssh; _ } = server in
   print_endline ("Processing server: " ^ ip_address);
   match ssh with
   | None ->
@@ -446,14 +447,14 @@ let setup_server config server =
           let actions = plan config context in
           (* Log skip/restart reason when we have a running server *)
           (match (context.running_version, actions) with
-          | "", _ -> ()
-          | running, actions when not (List.mem RunServer actions) ->
+          | None, _ -> ()
+          | Some running, actions when not (List.mem RunServer actions) ->
               print_endline
                 (Printf.sprintf
                    "bondi-orchestrator container is already running on server \
                     %s: %s, skipping..."
                    ip_address running)
-          | running, actions when List.mem StopOrchestrator actions ->
+          | Some running, actions when List.mem StopOrchestrator actions ->
               let reason =
                 if running <> config.bondi_server.version then
                   Printf.sprintf "version mismatch: running %s, want %s" running

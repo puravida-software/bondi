@@ -4,8 +4,8 @@ module Simple = Bondi_server__Strategy__Simple
 let minimal_input =
   {
     Simple.service_name = Some "my-service";
-    image = "myapp:v1";
-    port = 8080;
+    image = Some "myapp:v1";
+    port = Some 8080;
     registry_user = None;
     registry_pass = None;
     env_vars = None;
@@ -28,34 +28,49 @@ let action_string = function
       | None -> "UpsertCrontab(None)"
       | Some jobs -> "UpsertCrontab(" ^ string_of_int (List.length jobs) ^ ")")
 
+let result_testable ok_t =
+  Alcotest.testable
+    (fun fmt r ->
+      match r with
+      | Ok v -> Fmt.pf fmt "Ok(%a)" (Alcotest.pp ok_t) v
+      | Error msg -> Fmt.pf fmt "Error(%s)" msg)
+    (fun a b ->
+      match (a, b) with
+      | Ok a, Ok b -> Alcotest.equal ok_t a b
+      | Error a, Error b -> String.equal a b
+      | _ -> false)
+
 let test_serveraddress_from_image () =
-  Alcotest.check Alcotest.string "registry from full image"
-    "registry.gitlab.com"
+  Alcotest.check
+    (result_testable Alcotest.string)
+    "registry from full image" (Ok "registry.gitlab.com")
     (Deploy.serveraddress_from_image "registry.gitlab.com/org/repo:v1.2.3");
-  Alcotest.check Alcotest.string "image name when no registry (nginx:latest)"
-    "nginx"
-    (Deploy.serveraddress_from_image "nginx:latest");
-  Alcotest.check Alcotest.string "first path component" "library"
+  (match Deploy.serveraddress_from_image "nginx:latest" with
+  | Error _ -> ()
+  | Ok _ -> Alcotest.fail "expected error for image without registry");
+  Alcotest.check
+    (result_testable Alcotest.string)
+    "first path component" (Ok "library")
     (Deploy.serveraddress_from_image "library/nginx")
 
 let test_tag_from_image () =
   Alcotest.check Alcotest.string "extracts tag" "v1.2.3"
     (Deploy.tag_from_image "registry.example.com/app:v1.2.3");
-  Alcotest.check Alcotest.string "defaults to latest" "latest"
+  Alcotest.check Alcotest.string "unknown when no tag" "unknown"
     (Deploy.tag_from_image "registry.example.com/app")
 
 let test_image_name_and_tag () =
   Alcotest.check
-    (Alcotest.pair Alcotest.string Alcotest.string)
-    "name and tag" ("backup", "v1")
+    (result_testable (Alcotest.pair Alcotest.string Alcotest.string))
+    "name and tag"
+    (Ok ("backup", "v1"))
     (Deploy.image_name_and_tag "backup:v1");
-  Alcotest.check
-    (Alcotest.pair Alcotest.string Alcotest.string)
-    "default tag" ("backup", "latest")
-    (Deploy.image_name_and_tag "backup")
+  match Deploy.image_name_and_tag "backup" with
+  | Error _ -> ()
+  | Ok _ -> Alcotest.fail "expected error for missing tag"
 
 let test_build_response () =
-  let input = { minimal_input with image = "app:v2.0" } in
+  let input = { minimal_input with image = Some "app:v2.0" } in
   let response =
     Deploy.build_response ~strategy:Deploy.Simple
       ~strategy_reason:"image has no HEALTHCHECK" input

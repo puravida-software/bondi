@@ -154,8 +154,8 @@ let format_json (results : (string * comprehensive_status) list) =
 let read_body_string body =
   Eio.Buf_read.(of_flow ~max_size:max_int body |> take_all)
 
-let fetch_status ~client ip_address ~service_name =
-  let base_url = Printf.sprintf "http://%s:3030/api/v1/status" ip_address in
+let fetch_status ~client ip_address ~port ~service_name =
+  let base_url = Printf.sprintf "http://%s:%d/api/v1/status" ip_address port in
   let url =
     match service_name with
     | None -> base_url
@@ -204,7 +204,13 @@ let run output_format () =
       let status_per_server =
         List.fold_left
           (fun acc (server : Config_file.server) ->
-            match fetch_status ~client server.ip_address ~service_name with
+            let port =
+              Option.value ~default:Bondi_common.Defaults.server_port
+                server.port
+            in
+            match
+              fetch_status ~client server.ip_address ~port ~service_name
+            with
             | Ok status -> (server.ip_address, status) :: acc
             | Error message ->
                 prerr_endline message;

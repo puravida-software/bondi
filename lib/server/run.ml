@@ -19,11 +19,7 @@ let env_vars_to_list = function
   | None -> None
   | Some env -> Some (List.map (fun (k, v) -> k ^ "=" ^ v) env)
 
-let parse_image image =
-  match Strategy.Simple.parse_image_and_tag image with
-  | Ok (name, "") -> (name, "latest")
-  | Ok (name, tag) -> (name, tag)
-  | Error _ -> (image, "latest")
+let parse_image image = Strategy.Simple.require_image_and_tag image
 
 let temp_container_name job =
   let ts = Unix.gettimeofday () |> Float.to_string in
@@ -61,7 +57,7 @@ let run ~client ~net body =
         run_payload_of_yojson json
         |> Result.map_error (fun msg -> "invalid run payload: " ^ msg)
   in
-  let image_name, tag = parse_image payload.image in
+  let* image_name, tag = parse_image payload.image in
   let full_image = image_name ^ ":" ^ tag in
   let config : Docker.Client.container_config =
     {

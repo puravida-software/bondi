@@ -16,7 +16,7 @@ let check_actions ~expected actions =
   check (list string) "actions" expected (List.map action_string actions)
 
 let minimal_server =
-  { Config_file.ip_address = "1.2.3.4"; Config_file.ssh = None }
+  { Config_file.ip_address = "1.2.3.4"; Config_file.ssh = None; port = None }
 
 let minimal_user_service =
   {
@@ -59,7 +59,7 @@ let test_plan_always_includes_ensure_docker () =
     make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
   in
   let context =
-    ctx ~running_version:"" ~docker_installed:true ~acme_exists:false ()
+    ctx ~running_version:None ~docker_installed:true ~acme_exists:false ()
   in
   let actions = Setup.plan config context in
   check bool "EnsureDocker is first" (List.hd actions = Setup.EnsureDocker) true
@@ -69,7 +69,7 @@ let test_plan_no_user_service_skips_acme () =
     make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
   in
   let context =
-    ctx ~running_version:"" ~docker_installed:true ~acme_exists:false ()
+    ctx ~running_version:None ~docker_installed:true ~acme_exists:false ()
   in
   let actions = Setup.plan config context in
   check bool "no EnsureAcmeFile when no user_service"
@@ -82,7 +82,7 @@ let test_plan_with_user_service_includes_acme () =
       ~version:"1.0.0" ()
   in
   let context =
-    ctx ~running_version:"" ~docker_installed:true ~acme_exists:false ()
+    ctx ~running_version:None ~docker_installed:true ~acme_exists:false ()
   in
   let actions = Setup.plan config context in
   check bool "EnsureAcmeFile when user_service present"
@@ -94,7 +94,8 @@ let test_plan_skip_server_when_up_to_date () =
     make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
   in
   let context =
-    ctx ~running_version:"1.0.0" ~docker_installed:true ~acme_exists:false ()
+    ctx ~running_version:(Some "1.0.0") ~docker_installed:true
+      ~acme_exists:false ()
   in
   let actions = Setup.plan config context in
   check bool "no RunServer when version matches and no cron"
@@ -109,7 +110,7 @@ let test_plan_fresh_install_runs_server () =
     make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
   in
   let context =
-    ctx ~running_version:"" ~docker_installed:true ~acme_exists:false ()
+    ctx ~running_version:None ~docker_installed:true ~acme_exists:false ()
   in
   let actions = Setup.plan config context in
   check bool "RunServer when no running orchestrator"
@@ -124,7 +125,8 @@ let test_plan_version_mismatch_stops_and_runs () =
     make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
   in
   let context =
-    ctx ~running_version:"0.9.0" ~docker_installed:true ~acme_exists:false ()
+    ctx ~running_version:(Some "0.9.0") ~docker_installed:true
+      ~acme_exists:false ()
   in
   let actions = Setup.plan config context in
   check bool "StopOrchestrator on version mismatch"
@@ -151,7 +153,8 @@ let test_plan_cron_jobs_force_restart () =
       ~version:"1.0.0" ()
   in
   let context =
-    ctx ~running_version:"1.0.0" ~docker_installed:true ~acme_exists:false ()
+    ctx ~running_version:(Some "1.0.0") ~docker_installed:true
+      ~acme_exists:false ()
   in
   let actions = Setup.plan config context in
   check bool "StopOrchestrator when adding cron jobs"
@@ -167,7 +170,8 @@ let test_plan_action_order () =
       ~version:"1.0.0" ()
   in
   let context =
-    ctx ~running_version:"0.9.0" ~docker_installed:true ~acme_exists:false ()
+    ctx ~running_version:(Some "0.9.0") ~docker_installed:true
+      ~acme_exists:false ()
   in
   let actions = Setup.plan config context in
   check_actions
@@ -192,7 +196,7 @@ let test_plan_cron_only_no_acme () =
       ~version:"1.0.0" ()
   in
   let context =
-    ctx ~running_version:"" ~docker_installed:true ~acme_exists:false ()
+    ctx ~running_version:None ~docker_installed:true ~acme_exists:false ()
   in
   let actions = Setup.plan config context in
   check bool "no EnsureAcmeFile when cron-only (no user_service)"
@@ -219,7 +223,7 @@ let test_plan_alloy_enabled () =
       ~version:"1.0.0" ()
   in
   let context =
-    ctx ~running_version:"" ~docker_installed:true ~acme_exists:false ()
+    ctx ~running_version:None ~docker_installed:true ~acme_exists:false ()
   in
   let actions = Setup.plan config context in
   check bool "EnsureAlloyConfig when alloy configured"
@@ -234,7 +238,7 @@ let test_plan_alloy_disabled () =
     make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
   in
   let context =
-    ctx ~running_version:"" ~docker_installed:true ~acme_exists:false ()
+    ctx ~running_version:None ~docker_installed:true ~acme_exists:false ()
   in
   let actions = Setup.plan config context in
   check bool "no EnsureAlloyConfig when alloy not configured"
@@ -252,7 +256,8 @@ let test_plan_alloy_removed () =
     ctx
       ~alloy_state:
         (Setup.Alloy_running { image = Bondi_common.Defaults.alloy_image })
-      ~running_version:"1.0.0" ~docker_installed:true ~acme_exists:false ()
+      ~running_version:(Some "1.0.0") ~docker_installed:true ~acme_exists:false
+      ()
   in
   let actions = Setup.plan config context in
   check bool "StopAlloy when alloy removed from config"
@@ -273,7 +278,8 @@ let test_plan_alloy_version_change () =
   let context =
     ctx
       ~alloy_state:(Setup.Alloy_running { image = "grafana/alloy:v1.8.0" })
-      ~running_version:"1.0.0" ~docker_installed:true ~acme_exists:false ()
+      ~running_version:(Some "1.0.0") ~docker_installed:true ~acme_exists:false
+      ()
   in
   let actions = Setup.plan config context in
   check bool "StopAlloy on version change"
@@ -380,7 +386,8 @@ let test_plan_alloy_already_running () =
   let context =
     ctx
       ~alloy_state:(Setup.Alloy_running { image = desired_image })
-      ~running_version:"1.0.0" ~docker_installed:true ~acme_exists:false ()
+      ~running_version:(Some "1.0.0") ~docker_installed:true ~acme_exists:false
+      ()
   in
   let actions = Setup.plan config context in
   check bool "no StopAlloy when already running with same version"

@@ -75,7 +75,7 @@ let mk_cron_job name ip : Config_file.cron_job =
     env_vars = None;
     registry_user = None;
     registry_pass = None;
-    server = { ip_address = ip; ssh = None };
+    server = { ip_address = ip; ssh = None; port = None };
   }
 
 let test_validate_deployments_valid () =
@@ -145,8 +145,8 @@ let test_deploy_payload_includes_logs_flag () =
   let payload : Deploy.deploy_payload =
     {
       service_name = Some service.name;
-      image = service.image ^ ":v1";
-      port = service.port;
+      image = Some (service.image ^ ":v1");
+      port = Some service.port;
       env_vars = service.env_vars;
       traefik_domain_name = None;
       traefik_image = None;

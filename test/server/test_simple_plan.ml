@@ -15,8 +15,8 @@ let mock_container ~id ~image =
 let minimal_input =
   {
     Simple.service_name = Some "my-service";
-    image = "myapp:v1";
-    port = 8080;
+    image = Some "myapp:v1";
+    port = Some 8080;
     registry_user = None;
     registry_pass = None;
     env_vars = None;
