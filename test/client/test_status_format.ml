@@ -39,7 +39,7 @@ let mk_cron_job name image ip : Config_file.cron_job =
     env_vars = None;
     registry_user = None;
     registry_pass = None;
-    server = { ip_address = ip; ssh = None };
+    server = { ip_address = ip; ssh = None; port = None };
   }
 
 let mk_component ~name ~image_name ~tag ~status ~restart_count ~created_at :

@@ -7,7 +7,11 @@ type server_ssh = {
 }
 [@@deriving yojson]
 
-type server = { ip_address : string; ssh : server_ssh option [@default None] }
+type server = {
+  ip_address : string;
+  ssh : server_ssh option; [@default None]
+  port : int option; [@default None]
+}
 [@@deriving yojson]
 
 type user_service = {

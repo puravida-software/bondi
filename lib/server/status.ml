@@ -41,27 +41,36 @@ type status_context = {
 }
 (** Gathered state from Docker and crontab — input to the pure plan phase. *)
 
-(** Parse an image string into (image_name, tag), falling back to the raw string
-    and "unknown" if parsing fails. *)
+(** Parse an image string into (image_name, tag). Returns Error when parsing
+    fails. *)
 let parse_image image =
   match Strategy.Simple.parse_image_and_tag image with
-  | Ok (image_name, tag) -> (image_name, tag)
-  | Error _ -> (image, "unknown")
+  | Ok (image_name, tag) -> Ok (image_name, tag)
+  | Error _ -> Error (Printf.sprintf "failed to parse image: %s" image)
 
-(** Build a component_status from a Docker container + inspect response. *)
+(** Build a component_status from a Docker container + inspect response. Returns
+    (Some status, None) on success, or (None, Some error) on parse failure. *)
 let component_of_inspection ~name
     ((_container, inspect) :
       Docker.Client.container * Docker.Client.inspect_response) ~image =
-  let image_name, tag = parse_image image in
-  Some
-    {
-      name;
-      image_name;
-      tag;
-      status = inspect.state.status;
-      restart_count = Some inspect.restart_count;
-      created_at = Some inspect.created_at;
-    }
+  match parse_image image with
+  | Ok (image_name, tag) ->
+      ( Some
+          {
+            name;
+            image_name;
+            tag;
+            status = inspect.state.status;
+            restart_count = Some inspect.restart_count;
+            created_at = Some inspect.created_at;
+          },
+        None )
+  | Error msg -> (None, Some msg)
+
+let container_display_name (container : Docker.Client.container) =
+  match container.names with
+  | n :: _ -> Ok (Docker.Client.normalize_container_name n)
+  | [] -> Error (Printf.sprintf "container %s has no name" container.id)
 
 (** Derive cron job status from a container's inspect state. Maps "exited" with
     exit code 0 to "completed", non-zero to "failed (exit N)". Unknown statuses
@@ -73,90 +82,83 @@ let cron_status_of_inspect (state : Docker.Client.inspect_state) : string =
   | s -> s
 
 (** Build a component_status for a scheduled cron job, optionally using
-    container inspect data if available. *)
+    container inspect data if available. Returns (Some status, None) on success,
+    or (None, Some error) on parse failure. *)
 let component_of_scheduled_job
     ~(inspections : (string * Docker.Client.inspect_response) list)
-    (job : Crontab.scheduled_job) : component_status =
-  let image_name, tag = parse_image job.image in
-  let status =
-    match List.assoc_opt job.name inspections with
-    | Some inspect -> cron_status_of_inspect inspect.state
-    | None -> "scheduled"
-  in
-  {
-    name = job.name;
-    image_name;
-    tag;
-    status;
-    restart_count = None;
-    created_at = None;
-  }
+    (job : Crontab.scheduled_job) =
+  match parse_image job.image with
+  | Ok (image_name, tag) ->
+      let status =
+        match List.assoc_opt job.name inspections with
+        | Some inspect -> cron_status_of_inspect inspect.state
+        | None -> "scheduled"
+      in
+      ( Some
+          {
+            name = job.name;
+            image_name;
+            tag;
+            status;
+            restart_count = None;
+            created_at = None;
+          },
+        None )
+  | Error msg -> (None, Some msg)
+
+(** Extract a component from an inspection pair, collecting errors. *)
+let extract_component inspection =
+  match inspection with
+  | None -> (None, [])
+  | Some ((container, _inspect) as pair) -> (
+      match container_display_name container with
+      | Error msg -> (None, [ msg ])
+      | Ok name ->
+          let component, err =
+            component_of_inspection ~name pair ~image:container.image
+          in
+          (component, Option.to_list err))
 
 (** Pure: build a comprehensive status response from gathered context. *)
 let plan ~(service_name : string option) (ctx : status_context) :
     comprehensive_status =
+  let errors = ref [] in
+  let add_errors errs = errors := !errors @ errs in
   let service =
     match service_name with
     | None -> None
-    | Some _ -> (
-        match ctx.service_inspection with
-        | None -> None
-        | Some ((container, _inspect) as pair) ->
-            let name =
-              match container.names with
-              | n :: _ -> Docker.Client.normalize_container_name n
-              | [] -> "unknown"
-            in
-            component_of_inspection ~name pair ~image:container.image)
+    | Some _ ->
+        let component, errs = extract_component ctx.service_inspection in
+        add_errors errs;
+        component
   in
-  let orchestrator =
-    match ctx.orchestrator_inspection with
-    | None -> None
-    | Some ((container, _inspect) as pair) ->
-        let name =
-          match container.names with
-          | n :: _ -> Docker.Client.normalize_container_name n
-          | [] -> "unknown"
-        in
-        component_of_inspection ~name pair ~image:container.image
-  in
-  let traefik =
-    match ctx.traefik_inspection with
-    | None -> None
-    | Some ((container, _inspect) as pair) ->
-        let name =
-          match container.names with
-          | n :: _ -> Docker.Client.normalize_container_name n
-          | [] -> "unknown"
-        in
-        component_of_inspection ~name pair ~image:container.image
-  in
-  let alloy =
-    match ctx.alloy_inspection with
-    | None -> None
-    | Some ((container, _inspect) as pair) ->
-        let name =
-          match container.names with
-          | n :: _ -> Docker.Client.normalize_container_name n
-          | [] -> "unknown"
-        in
-        component_of_inspection ~name pair ~image:container.image
-  in
+  let orchestrator, orch_errs = extract_component ctx.orchestrator_inspection in
+  add_errors orch_errs;
+  let traefik, traefik_errs = extract_component ctx.traefik_inspection in
+  add_errors traefik_errs;
+  let alloy, alloy_errs = extract_component ctx.alloy_inspection in
+  add_errors alloy_errs;
   let cron_jobs =
-    List.map
-      (component_of_scheduled_job ~inspections:ctx.cron_container_inspections)
+    List.filter_map
+      (fun job ->
+        let component, err =
+          component_of_scheduled_job ~inspections:ctx.cron_container_inspections
+            job
+        in
+        (match err with
+        | Some msg -> add_errors [ msg ]
+        | None -> ());
+        component)
       ctx.scheduled_cron_jobs
   in
-  let errors =
-    match ctx.cron_error with
-    | Some e -> [ e ]
-    | None -> []
-  in
+  (match ctx.cron_error with
+  | Some e -> add_errors [ e ]
+  | None -> ());
   {
     service;
     cron_jobs;
     infrastructure = { orchestrator; traefik; alloy };
-    errors;
+    errors = !errors;
   }
 
 (** Inspect a container by name, returning the container + inspect pair if

@@ -11,8 +11,8 @@ type deploy_cron_job = {
 
 type deploy_payload = {
   service_name : string option; [@default None]
-  image : string; (* Full image string including tag *)
-  port : int;
+  image : string option; [@default None]
+  port : int option; [@default None]
   env_vars : Config_file.string_map;
   traefik_domain_name : string option; [@default None]
   traefik_image : string option; [@default None]
@@ -32,8 +32,8 @@ type deploy_payload = {
 let read_body_string body =
   Eio.Buf_read.(of_flow ~max_size:max_int body |> take_all)
 
-let post_deploy ~client ip_address payload =
-  let url = Printf.sprintf "http://%s:3030/api/v1/deploy" ip_address in
+let post_deploy ~client ip_address ~port payload =
+  let url = Printf.sprintf "http://%s:%d/api/v1/deploy" ip_address port in
   let uri = Uri.of_string url in
   let headers = Cohttp.Header.init_with "Content-Type" "application/json" in
   let body_str = payload |> deploy_payload_to_yojson |> Yojson.Safe.to_string in
@@ -192,8 +192,8 @@ let run force_traefik_redeploy deployments =
                 let tag = Option.get (tag_of_name service.name) in
                 {
                   service_name = Some service.name;
-                  image = service.image ^ ":" ^ tag;
-                  port = service.port;
+                  image = Some (service.image ^ ":" ^ tag);
+                  port = Some service.port;
                   env_vars = service.env_vars;
                   traefik_domain_name =
                     Option.map
@@ -223,8 +223,8 @@ let run force_traefik_redeploy deployments =
               else
                 {
                   service_name = None;
-                  image = "cron-only:latest";
-                  port = 0;
+                  image = None;
+                  port = None;
                   env_vars = [];
                   traefik_domain_name = None;
                   traefik_image = None;
@@ -241,11 +241,15 @@ let run force_traefik_redeploy deployments =
                   logs = None;
                 }
             in
+            let port =
+              Option.value ~default:Bondi_common.Defaults.server_port
+                server.port
+            in
             print_endline
               (Printf.sprintf
-                 "Deploying to server: %s at http://%s:3030/api/v1/deploy"
-                 ip_address ip_address);
-            post_deploy ~client ip_address base_payload)
+                 "Deploying to server: %s at http://%s:%d/api/v1/deploy"
+                 ip_address ip_address port);
+            post_deploy ~client ip_address ~port base_payload)
           servers
       in
       match
