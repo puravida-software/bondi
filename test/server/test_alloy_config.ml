@@ -64,12 +64,12 @@ let test_river_config_grafana_cloud_auth () =
   Alcotest.check Alcotest.bool "contains endpoint" true
     (Bondi_common.String_utils.contains
        ~needle:"https://logs-prod.grafana.net/loki/api/v1/push" river);
-  Alcotest.check Alcotest.bool "uses env() for instance_id" true
+  Alcotest.check Alcotest.bool "uses sys.env() for instance_id" true
     (Bondi_common.String_utils.contains
-       ~needle:"env(\"GRAFANA_CLOUD_INSTANCE_ID\")" river);
-  Alcotest.check Alcotest.bool "uses env() for api_key" true
-    (Bondi_common.String_utils.contains ~needle:"env(\"GRAFANA_CLOUD_API_KEY\")"
-       river);
+       ~needle:"sys.env(\"GRAFANA_CLOUD_INSTANCE_ID\")" river);
+  Alcotest.check Alcotest.bool "uses sys.env() for api_key" true
+    (Bondi_common.String_utils.contains
+       ~needle:"sys.env(\"GRAFANA_CLOUD_API_KEY\")" river);
   Alcotest.check Alcotest.bool "does not contain raw credentials" false
     (Bondi_common.String_utils.contains ~needle:"123456" river
     || Bondi_common.String_utils.contains ~needle:"glc_secret_key" river)

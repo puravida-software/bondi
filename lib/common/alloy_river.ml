@@ -115,8 +115,8 @@ let generate (config : config) : string =
   add (Printf.sprintf "\t\turl = \"%s\"\n" (esc config.grafana_cloud_endpoint));
   add "\n";
   add "\t\tbasic_auth {\n";
-  add "\t\t\tusername = env(\"GRAFANA_CLOUD_INSTANCE_ID\")\n";
-  add "\t\t\tpassword = env(\"GRAFANA_CLOUD_API_KEY\")\n";
+  add "\t\t\tusername = sys.env(\"GRAFANA_CLOUD_INSTANCE_ID\")\n";
+  add "\t\t\tpassword = sys.env(\"GRAFANA_CLOUD_API_KEY\")\n";
   add "\t\t}\n";
   add "\t}\n";
   (* Custom labels *)

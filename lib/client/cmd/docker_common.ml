@@ -11,22 +11,19 @@ let read_all ic =
   Buffer.contents buffer
 
 let run_command cmd =
-  let in_chan, out_chan, err_chan =
-    Unix.open_process_full cmd (Unix.environment ())
-  in
-  close_out_noerr out_chan;
-  let stdout = read_all in_chan in
-  let stderr = read_all err_chan in
-  match Unix.close_process_full (in_chan, out_chan, err_chan) with
-  | Unix.WEXITED 0 -> if stderr = "" then Ok stdout else Ok (stdout ^ stderr)
+  let merged_cmd = cmd ^ " 2>&1" in
+  let ic = Unix.open_process_in merged_cmd in
+  let output = read_all ic in
+  match Unix.close_process_in ic with
+  | Unix.WEXITED 0 -> Ok output
   | Unix.WEXITED code ->
-      Error (Printf.sprintf "command failed (%d): %s" code (String.trim stderr))
+      Error (Printf.sprintf "command failed (%d): %s" code (String.trim output))
   | Unix.WSIGNALED signal ->
       Error
-        (Printf.sprintf "command killed (%d): %s" signal (String.trim stderr))
+        (Printf.sprintf "command killed (%d): %s" signal (String.trim output))
   | Unix.WSTOPPED signal ->
       Error
-        (Printf.sprintf "command stopped (%d): %s" signal (String.trim stderr))
+        (Printf.sprintf "command stopped (%d): %s" signal (String.trim output))
 
 let decode_private_key contents =
   match Base64.decode contents with

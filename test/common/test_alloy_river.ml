@@ -65,10 +65,10 @@ let test_generate_escapes_endpoint () =
 
 let test_generate_uses_env_for_credentials () =
   let river = R.generate base_config in
-  check bool "uses env() for instance_id" true
-    (contains ~needle:"env(\"GRAFANA_CLOUD_INSTANCE_ID\")" river);
-  check bool "uses env() for api_key" true
-    (contains ~needle:"env(\"GRAFANA_CLOUD_API_KEY\")" river);
+  check bool "uses sys.env() for instance_id" true
+    (contains ~needle:"sys.env(\"GRAFANA_CLOUD_INSTANCE_ID\")" river);
+  check bool "uses sys.env() for api_key" true
+    (contains ~needle:"sys.env(\"GRAFANA_CLOUD_API_KEY\")" river);
   check bool "does not contain raw instance_id" false
     (contains ~needle:"123456" river);
   check bool "does not contain raw api_key" false
