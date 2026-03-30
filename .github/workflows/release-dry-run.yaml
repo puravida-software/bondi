@@ -54,6 +54,34 @@ jobs:
           name: bondi-${{ matrix.platform }}
           path: bondi-${{ matrix.platform }}.tar.gz
 
+  build-server:
+    name: build-server-image
+    runs-on: ubuntu-22.04
+    if: "!github.event.pull_request.draft"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: extractions/setup-just@v3
+        with:
+          just-version: "1.46.0"
+      - uses: Homebrew/actions/setup-homebrew@master
+      - name: Install Commitizen
+        run: brew install commitizen
+
+      - name: Set version
+        run: |
+          set -euo pipefail
+          VERSION=$(just next-version)
+          if [ -z "$VERSION" ]; then
+            echo "::error::just next-version returned empty"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      - name: Build server Docker image (dry run)
+        run: just build-server "$VERSION"
+
   update-homebrew-tap-dry-run:
     name: update-homebrew-tap-dry-run
     runs-on: ubuntu-22.04

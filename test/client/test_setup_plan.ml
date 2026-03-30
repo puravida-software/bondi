@@ -390,15 +390,18 @@ let test_plan_alloy_already_running () =
       ()
   in
   let actions = Setup.plan config context in
-  check bool "no StopAlloy when already running with same version"
+  check bool "StopAlloy to converge config"
     (List.mem Setup.StopAlloy actions)
-    false;
-  check bool "no RemoveAlloy when already running with same version"
+    true;
+  check bool "RemoveAlloy to converge config"
     (List.mem Setup.RemoveAlloy actions)
-    false;
-  check bool "no RunAlloy when already running with same version"
+    true;
+  check bool "EnsureAlloyConfig to converge config"
+    (List.mem Setup.EnsureAlloyConfig actions)
+    true;
+  check bool "RunAlloy to converge config"
     (List.mem Setup.RunAlloy actions)
-    false
+    true
 
 let () =
   run "Setup.plan"
@@ -434,7 +437,8 @@ let () =
           test_case "disabled" `Quick test_plan_alloy_disabled;
           test_case "removed" `Quick test_plan_alloy_removed;
           test_case "version change" `Quick test_plan_alloy_version_change;
-          test_case "already running" `Quick test_plan_alloy_already_running;
+          test_case "already running converges" `Quick
+            test_plan_alloy_already_running;
         ] );
       ( "excluded_containers_from_config",
         [

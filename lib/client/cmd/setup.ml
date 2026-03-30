@@ -208,13 +208,11 @@ let plan (config : Config_file.t) (ctx : setup_context) : action list =
       (* Alloy removed from config but still running *)
       actions := StopAlloy :: !actions;
       actions := RemoveAlloy :: !actions
-  | Some alloy, Alloy_running { image = running } ->
-      let desired = alloy_desired_image alloy in
-      if running <> desired then (
-        actions := StopAlloy :: !actions;
-        actions := RemoveAlloy :: !actions;
-        actions := EnsureAlloyConfig :: !actions;
-        actions := RunAlloy :: !actions)
+  | Some _, Alloy_running _ ->
+      actions := StopAlloy :: !actions;
+      actions := RemoveAlloy :: !actions;
+      actions := EnsureAlloyConfig :: !actions;
+      actions := RunAlloy :: !actions
   | Some _, Alloy_not_running ->
       (* Alloy configured but not running *)
       actions := EnsureAlloyConfig :: !actions;
