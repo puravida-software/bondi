@@ -3,6 +3,10 @@
 **/*.env
 legacy/
 
+# Editor / IDE
+.vscode/
+.cursor/
+
 # Ocaml standard
 *.annot
 *.cmo
