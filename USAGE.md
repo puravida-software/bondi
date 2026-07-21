@@ -21,7 +21,8 @@ The example service throughout this guide is a web API called `my-api`, publishe
   - [Blue-Green](#blue-green)
 - [3. Cron Jobs](#3-cron-jobs)
 - [4. Alloy (Grafana Cloud Logs)](#4-alloy-grafana-cloud-logs)
-- [5. Status and Troubleshooting](#5-status-and-troubleshooting)
+- [5. Managed Containers](#5-managed-containers)
+- [6. Status and Troubleshooting](#6-status-and-troubleshooting)
 
 ---
 
@@ -314,6 +315,28 @@ Key differences from services:
 - The `schedule` field uses standard cron syntax
 - Cron jobs are deployed with the same `bondi deploy` command, by name and tag
 
+### Reaching other containers from a cron job
+
+By default a cron job's container runs on Docker's default bridge network and cannot reach other Bondi containers by name. Add a `network` field to attach it to a named Docker network:
+
+```yaml
+cron_jobs:
+  - name: daily-backup
+    image: ghcr.io/acme/backup-job
+    schedule: "0 2 * * *"
+    network: bondi-network
+    server:
+      ip_address: "203.0.113.10"
+      ssh:
+        user: root
+        private_key_contents: "{{SSH_PRIVATE_KEY_CONTENTS}}"
+        private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
+```
+
+`bondi-network` is created by `bondi setup` on every server, so it is available without any extra step. A cron job attached to it can reach any other container on that network by container name — for example a [managed container](#5-managed-containers) at `bondi-gateway:4002`.
+
+The field is optional. Omitting it leaves the container on the default bridge, which is the previous behaviour. The name is not validated against the server: if the network does not exist, the cron run fails at container-creation time with a Docker error.
+
 Run `bondi setup` again if this is the first time adding cron jobs (the orchestrator needs to be restarted with cron support).
 
 Then deploy the cron job alongside your service, or on its own:
@@ -415,7 +438,80 @@ To stop collecting logs, remove the `alloy` section from `bondi.yaml` and run `b
 
 ---
 
-## 5. Status and Troubleshooting
+## 5. Managed Containers
+
+Some deployments need a long-running supporting container that is not your service and is not a scheduled job — a broker gateway, a message queue, a cache. Declare these as **managed containers** and Bondi keeps them converged: started at the tag you pinned when they are declared, recreated when the declaration changes, stopped and removed when you delete them from `bondi.yaml`.
+
+Unlike a service, a managed container is never routed by Traefik. It is reachable only from the container network, never from the internet.
+
+Add a `managed_containers` list to your `bondi.yaml`:
+
+```yaml
+managed_containers:
+  - name: gateway
+    image: ghcr.io/acme/ib-gateway
+    tag: "10.48.1e"
+    restart: unless-stopped
+    network: bondi-network
+    ports:
+      - "4002:4002"
+    env_vars:
+      TRADING_MODE: paper
+    secret_env_vars:
+      TWS_PASSWORD: "{{TWS_PASSWORD}}"
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `name` | yes | Identifies the container. Bondi runs it as `bondi-<name>` and keeps its state under `/etc/bondi/<name>` on the server. May contain only letters, digits, `_`, `.` and `-`, and must start with a letter or digit. |
+| `image` | yes | Base image **without a tag**. |
+| `tag` | yes | The exact tag to run. There is no default and no floating tag — you pin the version, and changing it is what triggers a recreate. |
+| `restart` | yes | Docker restart policy: `no`, `on-failure`, `always` or `unless-stopped`. There is no default. |
+| `network` | no | Docker network to join. Use `bondi-network` to be reachable from your service and cron jobs by container name. Any other network must already exist on the server — Bondi creates `bondi-network` and nothing else, and a container declaring a network that is absent fails at container-creation time with a Docker error. |
+| `ports` | no | Published port mappings, each written `"<host>:<container>"`. |
+| `env_vars` | no | Environment variables passed inline. Visible in `docker inspect`. |
+| `secret_env_vars` | no | Environment variables passed by file reference. Not visible in `docker inspect` or in any process listing. |
+
+Managed containers are provisioned by `bondi setup`, not by `bondi deploy`:
+
+```bash
+bondi setup
+```
+
+Managed containers are provisioned on every server Bondi knows about, and a
+server is only known if it is named by a service or by a cron job. A server that
+would host managed containers and nothing else is never contacted — give it a
+service or a cron job for now.
+
+### Secrets
+
+A key listed under `secret_env_vars` is written to `/etc/bondi/<name>/env` on the server — a root-owned file created mode `600` — and passed to Docker as `--env-file`. The value never appears on a command line, so it stays out of `docker inspect`, `ps` output and Bondi's own logs. Values under `env_vars` are passed with `-e` and are visible to anyone who can run `docker inspect`.
+
+Declaring the same key in both maps is rejected rather than resolved by precedence — which value won would not be visible in your config.
+
+Environment keys and values must not contain control characters, and a key must not contain `=`. The env file is one `KEY=VALUE` per line and Docker does not unquote it, so a newline in either half would silently declare variables you never wrote. This means a multi-line credential — a PEM key, for example — cannot be passed this way; mount it as a file instead. A rejected value is reported by its key, never by its content, so a bad credential is not echoed to your terminal.
+
+Rotating a secret is a config change like any other: update the value, run `bondi setup`, and the container is recreated with the new credential.
+
+### Changing a declaration
+
+Bondi stamps each container with a digest of its full declaration. On every `bondi setup` it compares that digest against your config:
+
+- **Declared, not running** — the env file is written and the container is started.
+- **Running, declaration unchanged** — nothing happens. Setup is safe to re-run.
+- **Declaration changed** — including a changed tag, port, env var or secret value — the container is stopped, removed and started again at the new spec.
+
+Because the comparison is against the declaration and not against running status, a managed container that has exited is left alone if its declaration still matches. Restarting it is the restart policy's job, not setup's.
+
+### Removing a managed container
+
+Delete the entry from `managed_containers` and run `bondi setup` again. Bondi stops the container, removes it, and deletes `/etc/bondi/<name>` — so its secrets do not outlive the declaration that created them.
+
+The `bondi-network` Docker network is not removed, by Bondi or by anything else. Other containers may still be attached to it, so tearing it down is left to you: `docker network rm bondi-network` on the server, once nothing needs it.
+
+---
+
+## 6. Status and Troubleshooting
 
 ### Checking status
 
@@ -437,7 +533,10 @@ Infrastructure
   bondi-orchestrator     mlopez1506/bondi-server              0.0.0        running      0          2025-01-15T10:00:00Z
   bondi-traefik          traefik                              v3.6.8       running      0          2025-01-15T10:00:00Z
   bondi-alloy            grafana/alloy                        v1.8.0       running      0          2025-01-15T10:00:00Z
+  bondi-gateway          ghcr.io/acme/ib-gateway              10.48.1e     running      0          2025-01-15T10:05:00Z
 ```
+
+Managed containers appear in the Infrastructure section, discovered on the server by label. A container you have declared in `bondi.yaml` that the server did not report shows as `not found` — that usually means `bondi setup` has not been run since you added it.
 
 For machine-readable output:
 
@@ -492,6 +591,7 @@ cron_jobs:
   - name: daily-backup
     image: ghcr.io/acme/backup-job
     schedule: "0 2 * * *"
+    network: bondi-network
     registry_user: "{{REGISTRY_USER}}"
     registry_pass: "{{REGISTRY_PASS}}"
     env_vars:
@@ -502,6 +602,19 @@ cron_jobs:
         user: root
         private_key_contents: "{{SSH_PRIVATE_KEY_CONTENTS}}"
         private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
+
+managed_containers:
+  - name: gateway
+    image: ghcr.io/acme/ib-gateway
+    tag: "10.48.1e"
+    restart: unless-stopped
+    network: bondi-network
+    ports:
+      - "4002:4002"
+    env_vars:
+      TRADING_MODE: paper
+    secret_env_vars:
+      TWS_PASSWORD: "{{TWS_PASSWORD}}"
 
 alloy:
   grafana_cloud:

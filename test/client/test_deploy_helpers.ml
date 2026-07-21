@@ -49,6 +49,7 @@ let mk_config ?user_service ?cron_jobs () : Config_file.t =
     traefik = None;
     cron_jobs;
     alloy = None;
+    managed_containers = None;
   }
 
 let mk_service name : Config_file.user_service =
@@ -67,11 +68,12 @@ let mk_service name : Config_file.user_service =
     logs = None;
   }
 
-let mk_cron_job name ip : Config_file.cron_job =
+let mk_cron_job ?network name ip : Config_file.cron_job =
   {
     name;
     image = "img";
     schedule = "* * * * *";
+    network;
     env_vars = None;
     registry_user = None;
     registry_pass = None;
@@ -135,6 +137,36 @@ let test_cron_job_to_deploy () =
   check string "image" "img:v1" result.image;
   check string "schedule" "* * * * *" result.schedule
 
+let test_cron_job_to_deploy_carries_network () =
+  let job = mk_cron_job ~network:"bondi-network" "backup" "1.2.3.4" in
+  let result = Deploy.cron_job_to_deploy job ~image:"img:v1" in
+  check (option string) "network reaches the deploy payload"
+    (Some "bondi-network") result.network
+
+let test_cron_job_to_deploy_absent_network () =
+  let job = mk_cron_job "backup" "1.2.3.4" in
+  let result = Deploy.cron_job_to_deploy job ~image:"img:v1" in
+  check (option string) "absent network stays absent" None result.network
+
+(* The server decodes this into its own structurally-duplicate cron_job, so the
+   emitted key is pinned here and the matching decode in test/server. *)
+let test_cron_job_wire_key_is_network () =
+  let job = mk_cron_job ~network:"bondi-network" "backup" "1.2.3.4" in
+  let json =
+    Deploy.deploy_cron_job_to_yojson
+      (Deploy.cron_job_to_deploy job ~image:"img:v1")
+  in
+  match json with
+  | `Assoc fields ->
+      check (option string) "emitted under the \"network\" key"
+        (Some "bondi-network")
+        (match List.assoc_opt "network" fields with
+        | Some (`String s) -> Some s
+        | Some _
+        | None ->
+            None)
+  | _ -> Alcotest.fail "expected a JSON object"
+
 (* deploy_payload logs flag *)
 
 let test_deploy_payload_includes_logs_flag () =
@@ -196,7 +228,15 @@ let () =
           test_case "no cron jobs" `Quick test_cron_jobs_for_server_none;
         ] );
       ( "cron_job_to_deploy",
-        [ test_case "correct field mapping" `Quick test_cron_job_to_deploy ] );
+        [
+          test_case "correct field mapping" `Quick test_cron_job_to_deploy;
+          test_case "carries network" `Quick
+            test_cron_job_to_deploy_carries_network;
+          test_case "absent network" `Quick
+            test_cron_job_to_deploy_absent_network;
+          test_case "wire key is network" `Quick
+            test_cron_job_wire_key_is_network;
+        ] );
       ( "deploy_payload",
         [
           test_case "includes logs flag" `Quick

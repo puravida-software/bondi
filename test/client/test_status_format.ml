@@ -6,14 +6,46 @@ module Config_file = Bondi_client.Config_file
 
 let contains ~needle hay = Bondi_common.String_utils.contains ~needle hay
 
-let mk_config ?user_service ?cron_jobs () : Config_file.t =
+let mk_config ?user_service ?cron_jobs ?managed_containers () : Config_file.t =
   {
     user_service;
     bondi_server = { version = "0.1.0" };
     traefik = None;
     cron_jobs;
     alloy = None;
+    managed_containers;
   }
+
+let mk_managed_container name image tag : Config_file.managed_container =
+  {
+    name;
+    image;
+    tag;
+    restart = "unless-stopped";
+    network = Some "bondi-network";
+    ports = None;
+    env_vars = None;
+    secret_env_vars = None;
+  }
+
+(* The lines of one section: its header, through to the blank line that ends it.
+   Asserting a row is "under Infrastructure" means asserting membership here,
+   not merely that it appears somewhere in the output. *)
+let section_lines ~header output =
+  let rec take = function
+    | [] -> []
+    | "" :: _ -> []
+    | line :: rest -> line :: take rest
+  in
+  let rec find = function
+    | [] -> []
+    | line :: rest when line = header -> line :: take rest
+    | _ :: rest -> find rest
+  in
+  find (String.split_on_char '\n' output)
+
+let section_has ~needle lines =
+  List.exists (fun line -> contains line ~needle) lines
 
 let mk_service name : Config_file.user_service =
   {
@@ -36,6 +68,7 @@ let mk_cron_job name image ip : Config_file.cron_job =
     name;
     image;
     schedule = "0 0 * * *";
+    network = None;
     env_vars = None;
     registry_user = None;
     registry_pass = None;
@@ -78,6 +111,7 @@ let full_status : Status.comprehensive_status =
         orchestrator = Some full_orchestrator;
         traefik = Some full_traefik;
         alloy = None;
+        managed = [];
       };
     errors = [];
   }
@@ -121,6 +155,7 @@ let test_format_table_no_service () =
           orchestrator = Some full_orchestrator;
           traefik = Some full_traefik;
           alloy = None;
+          managed = [];
         };
       errors = [];
     }
@@ -142,6 +177,7 @@ let test_format_table_not_found_service () =
           orchestrator = Some full_orchestrator;
           traefik = Some full_traefik;
           alloy = None;
+          managed = [];
         };
       errors = [];
     }
@@ -166,6 +202,7 @@ let test_format_table_not_found_cron () =
           orchestrator = Some full_orchestrator;
           traefik = Some full_traefik;
           alloy = None;
+          managed = [];
         };
       errors = [];
     }
@@ -191,6 +228,7 @@ let test_format_table_cron_restart_na () =
           orchestrator = Some full_orchestrator;
           traefik = Some full_traefik;
           alloy = None;
+          managed = [];
         };
       errors = [];
     }
@@ -210,6 +248,7 @@ let test_format_table_errors () =
           orchestrator = Some full_orchestrator;
           traefik = Some full_traefik;
           alloy = None;
+          managed = [];
         };
       errors = [ "Failed to read crontab: permission denied" ];
     }
@@ -256,6 +295,7 @@ let test_format_table_with_alloy () =
           orchestrator = Some full_orchestrator;
           traefik = Some full_traefik;
           alloy = Some alloy_component;
+          managed = [];
         };
       errors = [];
     }
@@ -266,6 +306,94 @@ let test_format_table_with_alloy () =
   check bool "has bondi-alloy" true (contains result ~needle:"bondi-alloy");
   check bool "has grafana/alloy" true (contains result ~needle:"grafana/alloy");
   check bool "has v1.8.0 tag" true (contains result ~needle:"v1.8.0")
+
+(* 9. test_status_renders_managed_under_infrastructure — FR-4: a declared and
+   running managed container is a row in the Infrastructure section, not merely
+   a string somewhere in the output. *)
+let mk_status ?(managed = []) () : Status.comprehensive_status =
+  {
+    service = None;
+    cron_jobs = [];
+    infrastructure =
+      {
+        orchestrator = Some full_orchestrator;
+        traefik = Some full_traefik;
+        alloy = None;
+        managed;
+      };
+    errors = [];
+  }
+
+(* The server reports the container's Docker name, which the setup phase builds
+   with [container_name_of]. Expressing it that way rather than as a literal is
+   what makes the found/missing diff fail if either side changes its basis. *)
+let managed_ibgateway =
+  mk_component
+    ~name:(Bondi_common.Managed_container.container_name_of "ibgateway")
+    ~image_name:"ghcr.io/org/ibgateway" ~tag:"10.48.1e" ~status:"running"
+    ~restart_count:(Some 3) ~created_at:(Some "2026-03-05T00:00:00Z")
+
+let test_status_renders_managed_under_infrastructure () =
+  let config =
+    mk_config
+      ~managed_containers:
+        [ mk_managed_container "ibgateway" "ghcr.io/org/ibgateway" "10.48.1e" ]
+      ()
+  in
+  let result =
+    Status.format_table ~config
+      [ ("1.2.3.4", mk_status ~managed:[ managed_ibgateway ] ()) ]
+  in
+  let infrastructure = section_lines ~header:"Infrastructure" result in
+  (* Asserted against the container's own row rather than the section as a
+     whole: "running" also appears on the orchestrator and Traefik rows, so a
+     section-wide search for it would pass without the managed row existing. *)
+  match
+    List.find_opt
+      (fun line -> contains line ~needle:"bondi-ibgateway")
+      infrastructure
+  with
+  | None -> fail "expected a managed container row under Infrastructure"
+  | Some row ->
+      check bool "row carries the image" true
+        (contains row ~needle:"ghcr.io/org/ibgateway");
+      check bool "row carries the pinned tag" true
+        (contains row ~needle:"10.48.1e");
+      check bool "row carries the status" true (contains row ~needle:"running");
+      check bool "not rendered as missing" false
+        (section_has infrastructure ~needle:"not found")
+
+(* 10. test_status_renders_declared_not_running_as_missing — FR-4: a declared
+   container the server did not report is a "not found" row rather than an
+   omission. The found container in the same fixture is the affirmative arm:
+   without it, an implementation that rendered everything as missing would pass. *)
+let test_status_renders_declared_not_running_as_missing () =
+  let config =
+    mk_config
+      ~managed_containers:
+        [
+          mk_managed_container "ibgateway" "ghcr.io/org/ibgateway" "10.48.1e";
+          mk_managed_container "vaultwarden" "ghcr.io/org/vaultwarden" "1.30.1";
+        ]
+      ()
+  in
+  let result =
+    Status.format_table ~config
+      [ ("1.2.3.4", mk_status ~managed:[ managed_ibgateway ] ()) ]
+  in
+  let infrastructure = section_lines ~header:"Infrastructure" result in
+  let missing_row =
+    List.find_opt
+      (fun line -> contains line ~needle:"bondi-vaultwarden")
+      infrastructure
+  in
+  (match missing_row with
+  | None -> fail "expected a row for the undeclared-but-configured container"
+  | Some line ->
+      check bool "declared container reported as not found" true
+        (contains line ~needle:"not found"));
+  check bool "found container still rendered" true
+    (section_has infrastructure ~needle:"10.48.1e")
 
 let () =
   run "Status_format"
@@ -280,6 +408,10 @@ let () =
           test_case "cron restart N/A" `Quick test_format_table_cron_restart_na;
           test_case "errors displayed" `Quick test_format_table_errors;
           test_case "with alloy" `Quick test_format_table_with_alloy;
+          test_case "managed under infrastructure" `Quick
+            test_status_renders_managed_under_infrastructure;
+          test_case "declared not running is missing" `Quick
+            test_status_renders_declared_not_running_as_missing;
         ] );
       ("format_json", [ test_case "json structure" `Quick test_format_json ]);
     ]

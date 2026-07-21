@@ -119,10 +119,12 @@ let run_alloy_fmt river_config =
       let oc = open_out path in
       output_string oc river_config;
       close_out oc;
+      (* [Z] relabels the bind mount for SELinux hosts; without it the
+         container cannot read the file. Ignored where SELinux is absent. *)
       let cmd =
         Printf.sprintf
-          "docker run --rm -v %s:/tmp/config.alloy:ro grafana/alloy:v1.8.0 fmt \
-           --test /tmp/config.alloy 2>&1"
+          "docker run --rm -v %s:/tmp/config.alloy:ro,Z grafana/alloy:v1.8.0 \
+           fmt --test /tmp/config.alloy 2>&1"
           (Filename.quote path)
       in
       let ic = Unix.open_process_in cmd in

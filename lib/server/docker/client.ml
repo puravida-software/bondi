@@ -15,6 +15,7 @@ type container = {
   names : string list; [@key "Names"]
   state : string option; [@default None] [@key "State"]
   status : string option; [@default None] [@key "Status"]
+  labels : string_map option; [@default None] [@key "Labels"]
 }
 [@@deriving yojson { strict = false }]
 

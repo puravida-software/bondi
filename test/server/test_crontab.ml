@@ -64,20 +64,47 @@ let test_parse_bondi_section_without_markers () =
   check (list string) "all lines outside" lines outside;
   check (list (pair string string)) "no bondi entries" [] bondi
 
-let mk_cron_job ~name ~image ~schedule : Bondi_server__Strategy__Simple.cron_job
-    =
+let mk_cron_job ?network ~name ~image ~schedule () :
+    Bondi_server__Strategy__Simple.cron_job =
   {
     name;
     image;
     schedule;
+    network;
     env_vars = None;
     registry_user = None;
     registry_pass = None;
   }
 
+(* The crontab line is written by Crontab.run_payload and parsed back by
+   Run.run_payload; the round trip is what pins the two in sync. *)
+let network_of_cron_line line =
+  match Crontab.json_from_cron_line line with
+  | None -> Alcotest.fail "no JSON payload in cron line"
+  | Some json -> (
+      match Bondi_server__Run.run_payload_of_yojson json with
+      | Error msg -> Alcotest.fail ("run payload rejected the cron line: " ^ msg)
+      | Ok (payload : Bondi_server__Run.run_payload) -> payload.network)
+
+let test_cron_line_preserves_network () =
+  let job =
+    mk_cron_job ~network:"bondi-network" ~name:"backup" ~image:"myimg:v1"
+      ~schedule:"0 * * * *" ()
+  in
+  check (option string) "network survives write and parse"
+    (Some "bondi-network")
+    (network_of_cron_line (Crontab.entry_of_cron_job job))
+
+let test_cron_line_absent_network_round_trips () =
+  let job =
+    mk_cron_job ~name:"backup" ~image:"myimg:v1" ~schedule:"0 * * * *" ()
+  in
+  check (option string) "absent network stays absent" None
+    (network_of_cron_line (Crontab.entry_of_cron_job job))
+
 let test_entry_of_cron_job () =
   let job =
-    mk_cron_job ~name:"backup" ~image:"myimg:v1" ~schedule:"0 * * * *"
+    mk_cron_job ~name:"backup" ~image:"myimg:v1" ~schedule:"0 * * * *" ()
   in
   let entry = Crontab.entry_of_cron_job job in
   check bool "starts with schedule" true
@@ -90,8 +117,8 @@ let test_entry_of_cron_job () =
 let test_generate_bondi_entries () =
   let jobs =
     [
-      mk_cron_job ~name:"a" ~image:"img:v1" ~schedule:"0 * * * *";
-      mk_cron_job ~name:"b" ~image:"img:v2" ~schedule:"30 * * * *";
+      mk_cron_job ~name:"a" ~image:"img:v1" ~schedule:"0 * * * *" ();
+      mk_cron_job ~name:"b" ~image:"img:v2" ~schedule:"30 * * * *" ();
     ]
   in
   let entries = Crontab.generate_bondi_entries jobs in
@@ -177,7 +204,12 @@ let () =
             test_parse_bondi_section_without_markers;
         ] );
       ( "entry_of_cron_job",
-        [ test_case "produces valid entry" `Quick test_entry_of_cron_job ] );
+        [
+          test_case "produces valid entry" `Quick test_entry_of_cron_job;
+          test_case "preserves network" `Quick test_cron_line_preserves_network;
+          test_case "absent network round trips" `Quick
+            test_cron_line_absent_network_round_trips;
+        ] );
       ( "generate_bondi_entries",
         [
           test_case "includes markers and entries" `Quick

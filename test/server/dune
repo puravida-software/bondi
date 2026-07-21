@@ -26,4 +26,4 @@
   test_docker_client
   test_blue_green_plan
   test_alloy_config)
- (libraries alcotest bondi.server server_test_helpers))
+ (libraries alcotest bondi.common bondi.server server_test_helpers))

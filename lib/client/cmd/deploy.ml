@@ -3,6 +3,7 @@ type deploy_cron_job = {
   name : string;
   image : string;
   schedule : string;
+  network : string option; [@default None]
   env_vars : Config_file.string_map option; [@default None]
   registry_user : string option; [@default None]
   registry_pass : string option; [@default None]
@@ -71,6 +72,7 @@ let cron_job_to_deploy (j : Config_file.cron_job) ~image : deploy_cron_job =
     name = j.name;
     image;
     schedule = j.schedule;
+    network = j.network;
     env_vars = j.env_vars;
     registry_user = j.registry_user;
     registry_pass = j.registry_pass;

@@ -1,7 +1,6 @@
 open Json_helpers
 
 let ( let* ) = Result.bind
-let default_network_name = "bondi-network"
 let traefik_name = "bondi-traefik"
 
 (* ------------------------------------------------------------------------- *)
@@ -12,6 +11,7 @@ type cron_job = {
   name : string;
   image : string;
   schedule : string;
+  network : string option; [@default None]
   env_vars : string_map option; [@default None]
   registry_user : string option; [@default None]
   registry_pass : string option; [@default None]
@@ -67,7 +67,7 @@ let default_networking_config : Docker.Client.networking_config =
   let endpoint : Docker.Client.endpoint_config =
     { aliases = None; ipv4_address = None }
   in
-  { endpoints_config = Some [ (default_network_name, endpoint) ] }
+  { endpoints_config = Some [ (Bondi_common.Defaults.network_name, endpoint) ] }
 
 let env_vars_to_list env_vars =
   List.map (fun (key, value) -> key ^ "=" ^ value) env_vars
@@ -185,7 +185,8 @@ let plan (input : deploy_input) (context : deploy_context) :
   let* () =
     if should_run_traefik input then (
       actions :=
-        CreateNetwork { network_name = default_network_name } :: !actions;
+        CreateNetwork { network_name = Bondi_common.Defaults.network_name }
+        :: !actions;
       let need_traefik_deploy =
         match context.current_traefik with
         | None -> true
@@ -207,7 +208,7 @@ let plan (input : deploy_input) (context : deploy_context) :
             | Ok (image_name, _image_tag) ->
                 let traefik_config : Docker.Traefik.config =
                   {
-                    network_name = default_network_name;
+                    network_name = Bondi_common.Defaults.network_name;
                     domain_name;
                     traefik_image = Some image;
                     acme_email;

@@ -30,7 +30,7 @@ The CLI:
 
 ## Usage (WIP)
 
-For a step-by-step walkthrough covering services, deployment strategies, cron jobs, and Alloy, see the **[Usage Guide](USAGE.md)**.
+For a step-by-step walkthrough covering services, deployment strategies, cron jobs, Alloy, and managed containers, see the **[Usage Guide](USAGE.md)**.
 
 1. Install the CLI (Homebrew)
 
@@ -71,6 +71,10 @@ Multiple targets (service and cron):
 6. Check the status of the deployed workload
 
 ```bondi status```
+
+### Managed containers
+
+Beyond your service and its cron jobs, `bondi.yaml` can declare long-running supporting containers — a broker gateway, a queue, a cache — under `managed_containers`. `bondi setup` keeps them converged: started at the tag you pinned, recreated when the declaration changes, and stopped, removed and cleaned up when you delete them from the config. Secrets are passed by file reference rather than on the command line, so they stay out of `docker inspect`. See the [Usage Guide](USAGE.md#5-managed-containers).
 
 ## Available Commands
 
@@ -115,7 +119,7 @@ Use cases:
 - [ ] Allow multiple server workflows to be used
 - [ ] Keep X amount of previous Docker images
 - [ ] Remove old bondi-orchestrator containers on the server
-- [ ] Automated cleanup of orphaned cron temp containers (see PRD 0003)
+- [ ] Automated cleanup of orphaned cron temp containers
 
 Solve:
 - [ ] What to do if deploying the same version again?
