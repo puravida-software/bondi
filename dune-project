@@ -57,6 +57,22 @@
   (base64
    (>= 3.5.2))
   (cmdliner
-   (>= 2.1.0)))
+   (>= 2.1.0))
+  (ocamlformat
+   (and
+    (= 0.28.1)
+    :with-dev-setup))
+  (odoc
+   (and
+    (>= 3.1.0)
+    :with-dev-setup))
+  (opam-dune-lint
+   (and
+    (>= 0.6)
+    :with-dev-setup))
+  (ocaml-lsp-server
+   (and
+    (>= 1.23.1)
+    :with-dev-setup)))
  (tags
   ("add topics" "to describe" your project)))

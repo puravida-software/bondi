@@ -95,6 +95,7 @@ let test_cron_plan_with_cron_jobs () =
       Simple.name = "backup";
       image = "backup:v1";
       schedule = "0 0 * * *";
+      network = None;
       env_vars = None;
       registry_user = None;
       registry_pass = None;
@@ -107,6 +108,32 @@ let test_cron_plan_with_cron_jobs () =
     "includes PullCronImages and UpsertCrontab"
     [ "PullCronImages"; "UpsertCrontab(1)" ]
     (List.map action_string actions)
+
+(* The client emits this shape from its own deploy_cron_job type; the two are
+   structural duplicates, so the wire key is pinned on both sides. *)
+let test_cron_job_decodes_network_from_wire () =
+  let json =
+    Yojson.Safe.from_string
+      {|{"name":"backup","image":"backup:v1","schedule":"0 0 * * *","network":"bondi-network"}|}
+  in
+  match Simple.cron_job_of_yojson json with
+  | Error msg -> Alcotest.fail ("cron job rejected: " ^ msg)
+  | Ok (job : Simple.cron_job) ->
+      Alcotest.check
+        (Alcotest.option Alcotest.string)
+        "network decoded from the wire" (Some "bondi-network") job.network
+
+let test_cron_job_decodes_absent_network () =
+  let json =
+    Yojson.Safe.from_string
+      {|{"name":"backup","image":"backup:v1","schedule":"0 0 * * *"}|}
+  in
+  match Simple.cron_job_of_yojson json with
+  | Error msg -> Alcotest.fail ("cron job rejected: " ^ msg)
+  | Ok (job : Simple.cron_job) ->
+      Alcotest.check
+        (Alcotest.option Alcotest.string)
+        "absent network decodes to None" None job.network
 
 let test_cron_plan_no_cron_jobs () =
   let actions = Deploy.cron_plan minimal_input in
@@ -227,6 +254,13 @@ let () =
             test_cron_plan_empty_cron_jobs;
           Alcotest.test_case "with cron jobs" `Quick
             test_cron_plan_with_cron_jobs;
+        ] );
+      ( "cron job wire shape",
+        [
+          Alcotest.test_case "decodes network" `Quick
+            test_cron_job_decodes_network_from_wire;
+          Alcotest.test_case "decodes absent network" `Quick
+            test_cron_job_decodes_absent_network;
         ] );
       ( "response",
         [

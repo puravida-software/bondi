@@ -632,6 +632,184 @@ alloy:
             (Bondi_common.String_utils.contains ~needle:"invalid_mode" msg)
       | Ok _ -> fail "expected error for invalid collect mode")
 
+let managed_yaml body =
+  {|bondi_server:
+  version: 0.1.0
+
+managed_containers:
+|} ^ body
+
+let read_managed yaml =
+  with_temp_config yaml (fun () ->
+      match Config_file.read () with
+      | Error message -> Error message
+      | Ok config -> Config_file.managed_containers config)
+
+let check_rejected ~needle yaml =
+  match read_managed yaml with
+  | Ok _ -> fail "expected the entry to be rejected"
+  | Error message ->
+      check bool
+        (Printf.sprintf "error names %S, got: %s" needle message)
+        true
+        (Bondi_common.String_utils.contains ~needle message)
+
+let test_managed_containers_parse () =
+  Unix.putenv "TWS_PASSWORD" "hunter2";
+  let yaml =
+    managed_yaml
+      {|  - name: ib-gateway
+    image: ghcr.io/gnzsnz/ib-gateway
+    tag: "10.48.1e"
+    restart: unless-stopped
+    network: bondi-network
+    ports:
+      - "4001:4003"
+      - "5900:5900"
+    env_vars:
+      TRADING_MODE: paper
+    secret_env_vars:
+      TWS_PASSWORD: "{{TWS_PASSWORD}}"
+|}
+  in
+  match read_managed yaml with
+  | Error message -> fail message
+  | Ok [] -> fail "expected one managed container"
+  | Ok (_ :: _ :: _) -> fail "expected exactly one managed container"
+  | Ok [ spec ] ->
+      let module M = Bondi_common.Managed_container in
+      check string "name" "ib-gateway" (M.name spec);
+      check string "image" "ghcr.io/gnzsnz/ib-gateway" (M.image spec);
+      check string "tag" "10.48.1e" (M.tag spec);
+      check bool "restart is unless-stopped" true
+        (M.restart spec = M.Unless_stopped);
+      check (option string) "network" (Some "bondi-network") (M.network spec);
+      check bool "ports" true
+        (M.ports spec
+        = [
+            { M.host = 4001; container = 4003 };
+            { M.host = 5900; container = 5900 };
+          ]);
+      check
+        (list (pair string string))
+        "plain env"
+        [ ("TRADING_MODE", "paper") ]
+        (M.plain_env spec);
+      check (option string) "secret env file" (Some "TWS_PASSWORD=hunter2\n")
+        (M.secret_env_file_contents spec)
+
+let test_managed_containers_absent_parses () =
+  let yaml = {|bondi_server:
+  version: 0.1.0
+|} in
+  match read_managed yaml with
+  | Error message -> fail message
+  | Ok specs -> check int "no managed containers" 0 (List.length specs)
+
+let test_managed_container_requires_image () =
+  check_rejected ~needle:"image"
+    (managed_yaml
+       {|  - name: ib-gateway
+    tag: "10.48.1e"
+    restart: always
+|})
+
+let test_managed_container_requires_tag () =
+  check_rejected ~needle:"tag"
+    (managed_yaml
+       {|  - name: ib-gateway
+    image: ghcr.io/gnzsnz/ib-gateway
+    restart: always
+|})
+
+let test_managed_container_invalid_restart_policy_rejected () =
+  check_rejected ~needle:"sometimes"
+    (managed_yaml
+       {|  - name: ib-gateway
+    image: ghcr.io/gnzsnz/ib-gateway
+    tag: "10.48.1e"
+    restart: sometimes
+|})
+
+let test_managed_container_invalid_port_rejected () =
+  check_rejected ~needle:"4001-4003"
+    (managed_yaml
+       {|  - name: ib-gateway
+    image: ghcr.io/gnzsnz/ib-gateway
+    tag: "10.48.1e"
+    restart: always
+    ports:
+      - "4001-4003"
+|})
+
+let test_managed_container_unsafe_name_rejected () =
+  check_rejected ~needle:"../etc/shadow"
+    (managed_yaml
+       {|  - name: "../etc/shadow"
+    image: ghcr.io/gnzsnz/ib-gateway
+    tag: "10.48.1e"
+    restart: always
+|})
+
+let test_managed_container_duplicate_env_key_rejected () =
+  check_rejected ~needle:"TWS_PASSWORD"
+    (managed_yaml
+       {|  - name: ib-gateway
+    image: ghcr.io/gnzsnz/ib-gateway
+    tag: "10.48.1e"
+    restart: always
+    env_vars:
+      TWS_PASSWORD: placeholder
+    secret_env_vars:
+      TWS_PASSWORD: real-secret
+|})
+
+(* One fixture, two jobs: the declared-network job is the affirmative arm for
+   the absent-network job's [None] assertion. *)
+let cron_network_yaml =
+  {|bondi_server:
+  version: 0.1.0
+
+cron_jobs:
+  - name: joined-job
+    image: ghcr.io/org/joined
+    schedule: "0 * * * *"
+    network: bondi-network
+    server:
+      ip_address: 1.2.3.4
+  - name: unjoined-job
+    image: ghcr.io/org/unjoined
+    schedule: "5 * * * *"
+    server:
+      ip_address: 1.2.3.4
+|}
+
+let cron_jobs_of_fixture () =
+  match Config_file.read () with
+  | Error message -> fail message
+  | Ok config -> (
+      match config.cron_jobs with
+      | None -> fail "expected cron_jobs"
+      | Some jobs -> jobs)
+
+let test_cron_job_network_parses () =
+  with_temp_config cron_network_yaml (fun () ->
+      match cron_jobs_of_fixture () with
+      | job :: _ ->
+          check string "cron job name" "joined-job" job.name;
+          check (option string) "cron job network" (Some "bondi-network")
+            job.network
+      | [] -> fail "expected two cron jobs")
+
+let test_cron_job_network_absent_parses () =
+  with_temp_config cron_network_yaml (fun () ->
+      match cron_jobs_of_fixture () with
+      | _ :: job :: _ ->
+          check string "cron job name" "unjoined-job" job.name;
+          check (option string) "cron job network defaults to None" None
+            job.network
+      | _ -> fail "expected two cron jobs")
+
 let () =
   run "Config_file"
     [
@@ -641,6 +819,10 @@ let () =
           test_case "reads config with cron jobs" `Quick
             test_read_config_with_cron_jobs;
           test_case "reads cron-only config" `Quick test_read_config_cron_only;
+          test_case "cron job network parses" `Quick
+            test_cron_job_network_parses;
+          test_case "cron job network absent parses" `Quick
+            test_cron_job_network_absent_parses;
           test_case "parses service with drain_grace_period" `Quick
             test_parse_service_with_drain_grace_period;
           test_case "parses service without drain_grace_period" `Quick
@@ -663,5 +845,24 @@ let () =
           test_case "alloy collect default" `Quick test_alloy_collect_default;
           test_case "alloy labels parse" `Quick test_alloy_labels_parse;
           test_case "alloy collect invalid" `Quick test_alloy_collect_invalid;
+        ] );
+      ( "managed_containers",
+        [
+          test_case "managed containers parse" `Quick
+            test_managed_containers_parse;
+          test_case "managed containers absent parses" `Quick
+            test_managed_containers_absent_parses;
+          test_case "managed container requires image" `Quick
+            test_managed_container_requires_image;
+          test_case "managed container requires tag" `Quick
+            test_managed_container_requires_tag;
+          test_case "managed container invalid restart policy rejected" `Quick
+            test_managed_container_invalid_restart_policy_rejected;
+          test_case "managed container invalid port rejected" `Quick
+            test_managed_container_invalid_port_rejected;
+          test_case "managed container unsafe name rejected" `Quick
+            test_managed_container_unsafe_name_rejected;
+          test_case "managed container duplicate env key rejected" `Quick
+            test_managed_container_duplicate_env_key_rejected;
         ] );
     ]

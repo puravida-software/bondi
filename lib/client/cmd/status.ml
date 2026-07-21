@@ -16,6 +16,7 @@ type infrastructure_status = {
   orchestrator : component_status option; [@default None]
   traefik : component_status option; [@default None]
   alloy : component_status option; [@default None]
+  managed : component_status list; [@default []]
 }
 [@@deriving yojson]
 (** Infrastructure components. *)
@@ -93,8 +94,34 @@ let cron_jobs_section ~(config_cron_names : string list)
       in
       [ "Cron Jobs"; table_header ] @ found_rows @ missing_rows @ [ "" ]
 
+(** Render the managed container rows of the infrastructure section: the
+    containers the server reported, followed by a "not found" row for each one
+    declared in [bondi.yaml] that it did not. Mirrors the cron section's
+    found/missing diff. *)
+let managed_rows ~(config_managed_names : string list)
+    (status : comprehensive_status) =
+  let found_names =
+    List.fold_left
+      (fun s (c : component_status) -> StringSet.add c.name s)
+      StringSet.empty status.infrastructure.managed
+  in
+  let found_rows =
+    List.map
+      (fun (c : component_status) -> format_row c)
+      status.infrastructure.managed
+  in
+  let missing_rows =
+    List.filter_map
+      (fun name ->
+        if StringSet.mem name found_names then None
+        else Some (not_found_row name))
+      config_managed_names
+  in
+  found_rows @ missing_rows
+
 (** Render the infrastructure section lines. *)
-let infrastructure_section (status : comprehensive_status) =
+let infrastructure_section ~(config_managed_names : string list)
+    (status : comprehensive_status) =
   let orch_row =
     match status.infrastructure.orchestrator with
     | Some c -> format_row c
@@ -110,7 +137,10 @@ let infrastructure_section (status : comprehensive_status) =
     | Some c -> [ format_row c ]
     | None -> []
   in
-  [ "Infrastructure"; table_header; orch_row; traefik_row ] @ alloy_row @ [ "" ]
+  [ "Infrastructure"; table_header; orch_row; traefik_row ]
+  @ alloy_row
+  @ managed_rows ~config_managed_names status
+  @ [ "" ]
 
 (** Render the warnings section lines. Returns empty list if no errors. *)
 let warnings_section (status : comprehensive_status) =
@@ -129,13 +159,24 @@ let format_table ~(config : Config_file.t)
     | Some jobs -> List.map (fun (j : Config_file.cron_job) -> j.name) jobs
     | None -> []
   in
+  (* Declared names are matched against the server's reported container names,
+     which carry the [bondi-] prefix the setup phase gives them. *)
+  let config_managed_names =
+    match config.managed_containers with
+    | Some containers ->
+        List.map
+          (fun (m : Config_file.managed_container) ->
+            Bondi_common.Managed_container.container_name_of m.name)
+          containers
+    | None -> []
+  in
   let lines =
     List.concat_map
       (fun (ip, status) ->
         [ Printf.sprintf "Server: %s" ip; "" ]
         @ service_section ~config status
         @ cron_jobs_section ~config_cron_names status
-        @ infrastructure_section status
+        @ infrastructure_section ~config_managed_names status
         @ warnings_section status)
       results
   in

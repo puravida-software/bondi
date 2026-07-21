@@ -29,6 +29,10 @@ depends: [
   "uri" {>= "4.4.0"}
   "base64" {>= "3.5.2"}
   "cmdliner" {>= "2.1.0"}
+  "ocamlformat" {= "0.28.1" & with-dev-setup}
+  "odoc" {>= "3.1.0" & with-dev-setup}
+  "opam-dune-lint" {>= "0.6" & with-dev-setup}
+  "ocaml-lsp-server" {>= "1.23.1" & with-dev-setup}
   "odoc" {with-doc}
 ]
 build: [

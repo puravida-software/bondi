@@ -74,9 +74,8 @@ jobs:
     steps:
       - name: Checkout tree
         uses: actions/checkout@v6
+      - uses: extractions/setup-just@v3
+        with:
+          just-version: '1.46.0'
       - name: Check all dependencies have lower bounds
-        run: |
-          awk '/^depends:/,/^\]/' bondi.opam \
-            | grep -E '^\s+"[a-z]' \
-            | grep -v -e '>=' -e 'with-doc' \
-            | { if read -r line; then echo "::error::Dependencies missing lower bounds:"; echo "$line"; cat; exit 1; fi; }
+        run: just lint-dep-bounds

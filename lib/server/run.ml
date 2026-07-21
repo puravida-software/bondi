@@ -8,6 +8,7 @@ let ( let* ) = Result.bind
 type run_payload = {
   job : string;
   image : string;
+  network : string option; [@default None]
   env_vars : string_map option; [@default None]
 }
 [@@deriving yojson]
@@ -18,6 +19,15 @@ type run_response = { exit_code : int; warning : string option [@default None] }
 let env_vars_to_list = function
   | None -> None
   | Some env -> Some (List.map (fun (k, v) -> k ^ "=" ^ v) env)
+
+let networking_conf_of_network :
+    string option -> Docker.Client.networking_config option = function
+  | None -> None
+  | Some network ->
+      let endpoint : Docker.Client.endpoint_config =
+        { aliases = None; ipv4_address = None }
+      in
+      Some { endpoints_config = Some [ (network, endpoint) ] }
 
 let parse_image image = Strategy.Simple.require_image_and_tag image
 
@@ -49,16 +59,8 @@ let combine_warnings w1 w2 =
       Some w
   | Some a, Some b -> Some (a ^ "; " ^ b)
 
-let run ~client ~net body =
-  let* payload =
-    match Yojson.Safe.from_string body with
-    | exception Yojson.Json_error msg -> Error ("invalid JSON: " ^ msg)
-    | json ->
-        run_payload_of_yojson json
-        |> Result.map_error (fun msg -> "invalid run payload: " ^ msg)
-  in
-  let* image_name, tag = parse_image payload.image in
-  let full_image = image_name ^ ":" ^ tag in
+let run_opts ~container_name ~full_image payload :
+    Docker.Client.run_image_options =
   let config : Docker.Client.container_config =
     {
       image = Some full_image;
@@ -77,10 +79,25 @@ let run ~client ~net body =
       exposed_ports = None;
     }
   in
-  let container_name = temp_container_name payload.job in
-  let opts : Docker.Client.run_image_options =
-    { container_name; config; host_config = None; networking_conf = None }
+  {
+    container_name;
+    config;
+    host_config = None;
+    networking_conf = networking_conf_of_network payload.network;
+  }
+
+let run ~client ~net body =
+  let* payload =
+    match Yojson.Safe.from_string body with
+    | exception Yojson.Json_error msg -> Error ("invalid JSON: " ^ msg)
+    | json ->
+        run_payload_of_yojson json
+        |> Result.map_error (fun msg -> "invalid run payload: " ^ msg)
   in
+  let* image_name, tag = parse_image payload.image in
+  let full_image = image_name ^ ":" ^ tag in
+  let container_name = temp_container_name payload.job in
+  let opts = run_opts ~container_name ~full_image payload in
   let* container_id = Docker.Client.run_image_with_opts client ~net opts in
   let* exit_code = Docker.Client.wait_container client ~net ~container_id in
   let w1 = best_effort_remove_old ~client ~net ~job:payload.job in

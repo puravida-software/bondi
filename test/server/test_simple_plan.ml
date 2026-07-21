@@ -10,6 +10,7 @@ let mock_container ~id ~image =
     names = [ "/container-name" ];
     state = Some "running";
     status = Some "Up";
+    labels = None;
   }
 
 let minimal_input =

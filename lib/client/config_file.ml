@@ -39,6 +39,7 @@ type cron_job = {
   name : string;
   image : string; (* Base image without tag *)
   schedule : string;
+  network : string option; [@default None]
   env_vars : string_map option; [@default None]
   registry_user : string option; [@default None]
   registry_pass : string option; [@default None]
@@ -61,14 +62,62 @@ type alloy = {
 }
 [@@deriving yojson]
 
+type managed_container = {
+  name : string;
+  image : string; (* Base image without tag *)
+  tag : string;
+  restart : string;
+  network : string option; [@default None]
+  ports : string list option; [@default None]
+  env_vars : string_map option; [@default None]
+  secret_env_vars : string_map option; [@default None]
+}
+[@@deriving yojson]
+
 type t = {
   user_service : user_service option; [@key "service"] [@default None]
   bondi_server : bondi_server; [@key "bondi_server"]
   traefik : traefik option; [@key "traefik"] [@default None]
   cron_jobs : cron_job list option; [@key "cron_jobs"] [@default None]
   alloy : alloy option; [@key "alloy"] [@default None]
+  managed_containers : managed_container list option;
+      [@key "managed_containers"] [@default None]
 }
 [@@deriving yojson]
+
+module Managed_container = Bondi_common.Managed_container
+
+(* Plain and secret values become one env list distinguished by constructor;
+   a key declared in both maps is rejected by [Managed_container.create]. *)
+let env_of_managed_container entry =
+  let tagged constructor = function
+    | None -> []
+    | Some vars -> List.map (fun (key, value) -> (key, constructor value)) vars
+  in
+  tagged (fun value -> Managed_container.Plain value) entry.env_vars
+  @ tagged (fun value -> Managed_container.Secret value) entry.secret_env_vars
+
+let spec_of_managed_container entry =
+  let ( let* ) = Result.bind in
+  let* restart = Managed_container.restart_policy_of_string entry.restart in
+  let* ports =
+    Managed_container.ports_of_strings (Option.value entry.ports ~default:[])
+  in
+  Managed_container.create ~name:entry.name ~image:entry.image ~tag:entry.tag
+    ~restart ~network:entry.network ~ports
+    ~env:(env_of_managed_container entry)
+
+let managed_containers config =
+  let ( let* ) = Result.bind in
+  let collect acc entry =
+    let* specs = acc in
+    let* spec = spec_of_managed_container entry in
+    Ok (spec :: specs)
+  in
+  List.fold_left collect (Ok [])
+    (Option.value config.managed_containers ~default:[])
+  |> Result.map List.rev
+  |> Result.map_error Managed_container.error_to_string
 
 (* Returns all servers: from user_service and from each cron job's server. Deduplicated by ip_address. *)
 let servers config =
@@ -142,6 +191,7 @@ let ensure_cron_jobs_key = ensure_optional_key "cron_jobs"
 let ensure_service_key = ensure_optional_key "service"
 let ensure_traefik_key = ensure_optional_key "traefik"
 let ensure_alloy_key = ensure_optional_key "alloy"
+let ensure_managed_containers_key = ensure_optional_key "managed_containers"
 
 let validate_alloy_collect config =
   match config.alloy with
@@ -170,9 +220,12 @@ let read () =
             |> ensure_service_key
             |> ensure_traefik_key
             |> ensure_alloy_key
+            |> ensure_managed_containers_key
           in
           let* config =
             of_yojson json
             |> Result.map_error (fun msg -> "invalid bondi.yaml: " ^ msg)
           in
-          validate_alloy_collect config)
+          let* config = validate_alloy_collect config in
+          let* _ = managed_containers config in
+          Ok config)

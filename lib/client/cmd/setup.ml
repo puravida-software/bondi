@@ -12,10 +12,32 @@ let read_all ic =
   | End_of_file -> ());
   Buffer.contents buffer
 
-let run_command cmd =
+(* [input] is written to the command's standard input rather than embedded in
+   the command itself, so that a payload carrying credentials never appears in
+   argv on either machine. Nothing drains the command's output while the write
+   is in flight, so callers must keep [input] small enough to fit the pipe
+   buffer; an env file is a few hundred bytes. *)
+let run_command_with_input cmd input =
   let in_chan, out_chan, err_chan =
     Unix.open_process_full cmd (Unix.environment ())
   in
+  (* Writing to a command that has already exited raises SIGPIPE, which by
+     default terminates this process before the exit status below can report
+     anything. Ignoring it for the duration of the write is what turns that
+     into the Sys_error the handler expects. Restored afterwards so the
+     disposition is not changed program-wide. *)
+  let previous_sigpipe = Sys.signal Sys.sigpipe Sys.Signal_ignore in
+  Fun.protect
+    ~finally:(fun () -> Sys.set_signal Sys.sigpipe previous_sigpipe)
+    (fun () ->
+      (* The command may exit before reading its input, which closes the pipe.
+         That is reported by the exit status below, so the write failing is not
+         itself an error worth surfacing. *)
+      try
+        output_string out_chan input;
+        flush out_chan
+      with
+      | Sys_error _ -> ());
   close_out_noerr out_chan;
   let stdout = read_all in_chan in
   let stderr = read_all err_chan in
@@ -29,6 +51,8 @@ let run_command cmd =
   | Unix.WSTOPPED signal ->
       Error
         (Printf.sprintf "command stopped (%d): %s" signal (String.trim stderr))
+
+let run_command cmd = run_command_with_input cmd ""
 
 let with_temp_key contents f =
   let path = Filename.temp_file "bondi-key-" ".pem" in
@@ -44,16 +68,19 @@ let with_temp_key contents f =
       Unix.chmod path 0o600;
       f path)
 
-let remote_run ~user ~host ~key_path cmd =
+let ssh_command ~user ~host ~key_path cmd =
   let destination = user ^ "@" ^ host in
-  let ssh_cmd =
-    Printf.sprintf
-      "ssh -i %s -o BatchMode=yes -o StrictHostKeyChecking=accept-new %s -- %s"
-      (Filename.quote key_path)
-      (Filename.quote destination)
-      (Filename.quote cmd)
-  in
-  run_command ssh_cmd
+  Printf.sprintf
+    "ssh -i %s -o BatchMode=yes -o StrictHostKeyChecking=accept-new %s -- %s"
+    (Filename.quote key_path)
+    (Filename.quote destination)
+    (Filename.quote cmd)
+
+let remote_run ~user ~host ~key_path cmd =
+  run_command (ssh_command ~user ~host ~key_path cmd)
+
+let remote_run_with_input ~user ~host ~key_path ~input cmd =
+  run_command_with_input (ssh_command ~user ~host ~key_path cmd) input
 
 let get_docker_version ~user ~host ~key_path =
   remote_run ~user ~host ~key_path "docker --version"
@@ -89,28 +116,82 @@ let get_running_version ~user ~host ~key_path =
 (* Types                                                                     *)
 (* ------------------------------------------------------------------------- *)
 
+module Managed_container = Bondi_common.Managed_container
+
 type alloy_state = Alloy_not_running | Alloy_running of { image : string }
+
+(* Observed state of one managed container. Derived from the container's
+   existence and its spec-hash label only, never from whether it is currently
+   running: a container performing a scheduled self-restart still exists and
+   still carries a matching hash, so it converges to no action (FR-5). *)
+type managed_state =
+  | Managed_absent
+  | Managed_present of { spec_hash : string }
+
+(* The result of looking for managed containers, as distinct from what was
+   found. A failed [docker ps] and a server with no managed containers are not
+   the same fact: reading the first as the second makes the plan create
+   containers that already exist. *)
+type managed_observation =
+  | Managed_unobserved of string
+  | Managed_observed of (string * managed_state) list
 
 type setup_context = {
   docker_status : [ `Installed of string | `NotInstalled of string ];
   acme_file_exists : bool;
   running_version : string option;
   alloy_state : alloy_state;
+  managed : managed_observation;
 }
 
 type action =
   | EnsureDocker
   | EnsureAcmeFile
+  | EnsureNetwork of string
   | StopOrchestrator
   | RunServer
   | EnsureAlloyConfig
   | RunAlloy
   | StopAlloy
   | RemoveAlloy
+  | WriteManagedEnv of Managed_container.t
+  | RunManaged of Managed_container.t
+  | StopManaged of string
+  | RemoveManaged of string
+  | CleanManagedConfig of string
 
 (* ------------------------------------------------------------------------- *)
 (* Phase 1: Gather context (read-only)                                       *)
 (* ------------------------------------------------------------------------- *)
+
+(* Managed containers are discovered by label rather than by name: the declared
+   set is not known to the server, and [-a] is what lets a self-restarting
+   container be observed rather than read as absent (FR-5). *)
+let managed_ps_command =
+  let label_key, label_value = Managed_container.type_label in
+  Printf.sprintf
+    "ps -a --filter label=%s=%s --format '{{.Label \"bondi.name\"}}\t{{.Label \
+     \"bondi.spec-hash\"}}'"
+    label_key label_value
+
+let managed_of_ps_output output =
+  output
+  |> String.split_on_char '\n'
+  |> List.filter_map (fun line ->
+      match String.split_on_char '\t' (String.trim line) with
+      | [ name; spec_hash ] ->
+          let name = String.trim name in
+          (* The name is read from a label Bondi did not necessarily write, and
+             it becomes the config directory that withdrawal deletes
+             recursively. One that [create] would have rejected cannot have
+             come from a Bondi-declared container, so it is not observed at
+             all. *)
+          if not (Managed_container.is_valid_name name) then None
+          else Some (name, Managed_present { spec_hash = String.trim spec_hash })
+      | []
+      | [ _ ]
+      | _ :: _ :: _ :: _ ->
+          None)
 
 let gather_context ~user ~host ~key_path : (setup_context, string) result =
   let docker_status =
@@ -157,7 +238,17 @@ let gather_context ~user ~host ~key_path : (setup_context, string) result =
             | _ -> Alloy_not_running)
         | Error _ -> Alloy_not_running)
   in
-  Ok { docker_status; acme_file_exists; running_version; alloy_state }
+  let managed =
+    match docker_status with
+    (* No Docker means no containers, which is an observation rather than a
+       failure to observe: a first setup must still plan the declared ones. *)
+    | `NotInstalled _ -> Managed_observed []
+    | `Installed _ -> (
+        match run_remote_docker ~user ~host ~key_path managed_ps_command with
+        | Ok output -> Managed_observed (managed_of_ps_output output)
+        | Error err -> Managed_unobserved err)
+  in
+  Ok { docker_status; acme_file_exists; running_version; alloy_state; managed }
 
 (* ------------------------------------------------------------------------- *)
 (* Phase 2: Plan (pure)                                                      *)
@@ -191,34 +282,91 @@ let needs_orchestrator_restart (config : Config_file.t) (ctx : setup_context) :
 let alloy_desired_image (alloy : Config_file.alloy) =
   Option.value alloy.image ~default:Bondi_common.Defaults.alloy_image
 
-let plan (config : Config_file.t) (ctx : setup_context) : action list =
-  let actions = ref [] in
-  (* Always ensure Docker *)
-  actions := EnsureDocker :: !actions;
+let managed_state_of observed name =
+  match List.assoc_opt name observed with
+  | None -> Managed_absent
+  | Some state -> state
+
+(* A declared container converges to running at its declared spec. Drift is any
+   difference in the spec digest, which covers every declared field, so an
+   edited port or rotated credential recreates the container just as a new tag
+   does. *)
+let managed_convergence_for observed spec =
+  let name = Managed_container.name spec in
+  let start = [ WriteManagedEnv spec; RunManaged spec ] in
+  match managed_state_of observed name with
+  | Managed_absent -> start
+  | Managed_present { spec_hash } ->
+      if spec_hash = Managed_container.spec_hash spec then []
+      else [ StopManaged name; RemoveManaged name ] @ start
+
+(* A container withdrawn from configuration converges to stopped, removed, and
+   its config directory — which holds its secrets — deleted. *)
+let managed_removals ~(specs : Managed_container.t list) observed =
+  let declared = List.map Managed_container.name specs in
+  observed
+  |> List.filter (fun (name, _state) -> not (List.mem name declared))
+  |> List.concat_map (fun (name, _state) ->
+      [ StopManaged name; RemoveManaged name; CleanManagedConfig name ])
+
+let plan (config : Config_file.t) ~(specs : Managed_container.t list)
+    (ctx : setup_context) : action list =
   (* ACME only when we have user services (Traefik will be used) *)
-  if has_user_services config then actions := EnsureAcmeFile :: !actions;
+  let acme = if has_user_services config then [ EnsureAcmeFile ] else [] in
   (* Server setup - skip entirely if already up-to-date *)
-  if not (should_skip_server config ctx) then (
-    if needs_orchestrator_restart config ctx then
-      actions := StopOrchestrator :: !actions;
-    actions := RunServer :: !actions);
-  (* Alloy actions *)
-  (match (config.alloy, ctx.alloy_state) with
-  | None, Alloy_running _ ->
-      (* Alloy removed from config but still running *)
-      actions := StopAlloy :: !actions;
-      actions := RemoveAlloy :: !actions
-  | Some _, Alloy_running _ ->
-      actions := StopAlloy :: !actions;
-      actions := RemoveAlloy :: !actions;
-      actions := EnsureAlloyConfig :: !actions;
-      actions := RunAlloy :: !actions
-  | Some _, Alloy_not_running ->
-      (* Alloy configured but not running *)
-      actions := EnsureAlloyConfig :: !actions;
-      actions := RunAlloy :: !actions
-  | None, Alloy_not_running -> ());
-  List.rev !actions
+  let server =
+    if should_skip_server config ctx then []
+    else if needs_orchestrator_restart config ctx then
+      [ StopOrchestrator; RunServer ]
+    else [ RunServer ]
+  in
+  let alloy =
+    match (config.alloy, ctx.alloy_state) with
+    (* Alloy removed from config but still running *)
+    | None, Alloy_running _ -> [ StopAlloy; RemoveAlloy ]
+    | Some _, Alloy_running _ ->
+        [ StopAlloy; RemoveAlloy; EnsureAlloyConfig; RunAlloy ]
+    (* Alloy configured but not running *)
+    | Some _, Alloy_not_running -> [ EnsureAlloyConfig; RunAlloy ]
+    | None, Alloy_not_running -> []
+  in
+  let managed =
+    match ctx.managed with
+    (* Nothing is planned against an observation that failed; [plan_for_config]
+       is where that becomes an error rather than a silent no-op. *)
+    | Managed_unobserved _ -> []
+    | Managed_observed observed ->
+        List.concat_map (managed_convergence_for observed) specs
+        @ managed_removals ~specs observed
+  in
+  List.concat
+    [
+      (* Docker first, then the shared network before anything joins it *)
+      [ EnsureDocker; EnsureNetwork Bondi_common.Defaults.network_name ];
+      acme;
+      server;
+      alloy;
+      managed;
+    ]
+
+(* [plan] is pure and total over already-validated specs; this is the one place
+   the declared containers are read out of the configuration, so an invalid
+   declaration surfaces here rather than inside the plan. *)
+let plan_for_config (config : Config_file.t) (ctx : setup_context) =
+  let* specs = Config_file.managed_containers config in
+  match (ctx.managed, specs) with
+  (* Converging a declared container against an observation that never happened
+     would plan a run for one that may already exist. With nothing declared
+     there is nothing to converge, so the failed lookup is immaterial. *)
+  | Managed_unobserved message, _ :: _ ->
+      Error
+        (Printf.sprintf
+           "could not list managed containers on the server, so the declared \
+            ones cannot be converged: %s"
+           message)
+  | Managed_unobserved _, []
+  | Managed_observed _, _ ->
+      Ok (plan config ~specs ctx)
 
 (* ------------------------------------------------------------------------- *)
 (* Alloy River config generation (delegates to Bondi_common.Alloy_river)     *)
@@ -326,6 +474,19 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
               Ok ()
         in
         run rest
+    | EnsureNetwork network_name :: rest ->
+        let cmd =
+          Printf.sprintf
+            "docker network inspect %s > /dev/null 2>&1 || docker network \
+             create %s"
+            (Filename.quote network_name)
+            (Filename.quote network_name)
+        in
+        let* _ = remote_run ~user ~host ~key_path cmd in
+        print_endline
+          (Printf.sprintf "Network %s is present on server %s" network_name
+             ip_address);
+        run rest
     | StopOrchestrator :: rest ->
         let* _ =
           run_remote_docker ~user ~host ~key_path "stop bondi-orchestrator"
@@ -422,6 +583,69 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
           (Printf.sprintf
              "Removed bondi-alloy container and config on server %s" ip_address);
         run rest
+    | WriteManagedEnv spec :: rest ->
+        let env_path = Managed_container.env_file_path spec in
+        (* umask 077 makes the file mode 600 as it is created, rather than
+           creating it readable and narrowing it afterwards, and the contents
+           arrive on stdin so they never reach argv. The file is written even
+           when the spec declares no secrets, so that a credential withdrawn
+           from the configuration is truncated rather than left behind. *)
+        let write_cmd =
+          Printf.sprintf "sudo sh -c %s"
+            (Filename.quote
+               (Printf.sprintf "umask 077; mkdir -p %s; cat > %s"
+                  (Filename.quote (Managed_container.config_dir spec))
+                  (Filename.quote env_path)))
+        in
+        let input =
+          Option.value
+            (Managed_container.secret_env_file_contents spec)
+            ~default:""
+        in
+        let* _ = remote_run_with_input ~user ~host ~key_path ~input write_cmd in
+        print_endline
+          (Printf.sprintf "Wrote secret environment file on server %s: %s"
+             ip_address env_path);
+        run rest
+    | RunManaged spec :: rest ->
+        let args = Managed_container.run_args spec |> List.map Filename.quote in
+        let* output =
+          run_remote_docker ~user ~host ~key_path (String.concat " " args)
+        in
+        print_endline
+          (Printf.sprintf "%s container started on server %s: %s"
+             (Managed_container.container_name spec)
+             ip_address (String.trim output));
+        run rest
+    | StopManaged name :: rest ->
+        let container = Managed_container.container_name_of name in
+        let* _ =
+          run_remote_docker ~user ~host ~key_path
+            ("stop " ^ Filename.quote container)
+        in
+        print_endline
+          (Printf.sprintf "Stopped %s container on server %s" container
+             ip_address);
+        run rest
+    | RemoveManaged name :: rest ->
+        let container = Managed_container.container_name_of name in
+        let* _ =
+          run_remote_docker ~user ~host ~key_path
+            ("rm " ^ Filename.quote container)
+        in
+        print_endline
+          (Printf.sprintf "Removed %s container on server %s" container
+             ip_address);
+        run rest
+    | CleanManagedConfig name :: rest ->
+        let dir = Managed_container.config_dir_of name in
+        let* _ =
+          remote_run ~user ~host ~key_path ("sudo rm -rf " ^ Filename.quote dir)
+        in
+        print_endline
+          (Printf.sprintf "Removed config directory on server %s: %s" ip_address
+             dir);
+        run rest
   in
   run actions
 
@@ -442,7 +666,7 @@ let setup_server config server =
           let user = ssh_config.user in
           let host = ip_address in
           let* context = gather_context ~user ~host ~key_path in
-          let actions = plan config context in
+          let* actions = plan_for_config config context in
           (* Log skip/restart reason when we have a running server *)
           (match (context.running_version, actions) with
           | None, _ -> ()

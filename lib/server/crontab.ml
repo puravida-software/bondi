@@ -18,12 +18,13 @@ let bondi_end_marker = "# END BONDI CRON"
 type run_payload = {
   job : string;
   image : string;
+  network : string option; [@default None]
   env_vars : string_map option; [@default None]
 }
 [@@deriving yojson]
 
 let run_payload_of_cron_job (c : Strategy.Simple.cron_job) : run_payload =
-  { job = c.name; image = c.image; env_vars = c.env_vars }
+  { job = c.name; image = c.image; network = c.network; env_vars = c.env_vars }
 
 (* Escape single quotes for shell: ' -> '\'' *)
 let escape_for_shell s = String.concat "'\\''" (String.split_on_char '\'' s)

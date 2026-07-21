@@ -13,6 +13,7 @@ type infrastructure_status = {
   orchestrator : component_status option; [@default None]
   traefik : component_status option; [@default None]
   alloy : component_status option; [@default None]
+  managed : component_status list; [@default []]
 }
 [@@deriving yojson, show, eq]
 (** Infrastructure components. *)
@@ -38,6 +39,9 @@ type status_context = {
   cron_error : string option;
   alloy_inspection :
     (Docker.Client.container * Docker.Client.inspect_response) option;
+  managed_inspections :
+    (Docker.Client.container * Docker.Client.inspect_response) list;
+  managed_error : string option;
 }
 (** Gathered state from Docker and crontab — input to the pure plan phase. *)
 
@@ -119,6 +123,18 @@ let extract_component inspection =
           in
           (component, Option.to_list err))
 
+(** Select the managed containers from a Docker listing. Discovery is by label
+    because the server never reads [bondi.yaml] and so cannot know the declared
+    names. *)
+let managed_containers_of (containers : Docker.Client.container list) =
+  let label_key, label_value = Bondi_common.Managed_container.type_label in
+  List.filter
+    (fun (container : Docker.Client.container) ->
+      match container.labels with
+      | None -> false
+      | Some labels -> List.assoc_opt label_key labels = Some label_value)
+    containers
+
 (** Pure: build a comprehensive status response from gathered context. *)
 let plan ~(service_name : string option) (ctx : status_context) :
     comprehensive_status =
@@ -151,13 +167,24 @@ let plan ~(service_name : string option) (ctx : status_context) :
         component)
       ctx.scheduled_cron_jobs
   in
+  let managed =
+    List.filter_map
+      (fun inspection ->
+        let component, errs = extract_component (Some inspection) in
+        add_errors errs;
+        component)
+      ctx.managed_inspections
+  in
   (match ctx.cron_error with
+  | Some e -> add_errors [ e ]
+  | None -> ());
+  (match ctx.managed_error with
   | Some e -> add_errors [ e ]
   | None -> ());
   {
     service;
     cron_jobs;
-    infrastructure = { orchestrator; traefik; alloy };
+    infrastructure = { orchestrator; traefik; alloy; managed };
     errors = !errors;
   }
 
@@ -194,6 +221,28 @@ let gather ~client ~net ~(service_name : string option) : status_context =
   let alloy_inspection =
     inspect_by_name client ~net ~container_name:"bondi-alloy"
   in
+  (* A failed listing is reported rather than rendered as an empty set: the
+     client shows anything it does not hear about as "not found", which reads
+     as "setup has not run" when the real cause is an unreachable Docker. *)
+  let managed_inspections, managed_error =
+    match Docker.Client.list_containers client ~net ~all:true () with
+    | Error msg ->
+        ([], Some (Printf.sprintf "failed to list managed containers: %s" msg))
+    | Ok containers ->
+        ( List.filter_map
+            (fun (container : Docker.Client.container) ->
+              match
+                Docker.Client.inspect_container client ~net
+                  ~container_id:container.id
+              with
+              | Ok inspect -> Some (container, inspect)
+              | Error msg ->
+                  Dream.log "failed to inspect managed container %s: %s"
+                    container.id msg;
+                  None)
+            (managed_containers_of containers),
+          None )
+  in
   let scheduled_cron_jobs, cron_error =
     match Crontab.list_scheduled_jobs () with
     | Ok jobs -> (jobs, None)
@@ -229,6 +278,8 @@ let gather ~client ~net ~(service_name : string option) : status_context =
     cron_container_inspections;
     cron_error;
     alloy_inspection;
+    managed_inspections;
+    managed_error;
   }
 
 let route ~client ~net =

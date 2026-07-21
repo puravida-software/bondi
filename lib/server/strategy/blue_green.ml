@@ -261,7 +261,7 @@ let deploy ~clock ~client ~net ~(input : Simple.deploy_input) :
       temp_container_name;
       config = service_cfg;
       networking_conf = Simple.default_networking_config;
-      network_name = Simple.default_network_name;
+      network_name = Bondi_common.Defaults.network_name;
       poll_interval;
       health_timeout;
       drain_grace_period;

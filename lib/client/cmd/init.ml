@@ -37,12 +37,32 @@ traefik:
 #     env_vars: {}
 #     # registry_user: "{{REGISTRY_USER}}"
 #     # registry_pass: "{{REGISTRY_PASS}}"
+#     # Join a network to reach a managed container by name. The network must
+#     # already exist unless it is bondi-network, which bondi setup creates.
+#     network: bondi-network
 #     server:
 #       ip_address: "55.55.55.55"
 #       ssh:
 #         user: root
 #         private_key_contents: "{{SSH_PRIVATE_KEY_CONTENTS}}"
 #         private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
+
+# Optional: long-running supporting containers that are neither your service
+# nor a scheduled job. Never routed by Traefik. Provisioned by `bondi setup`.
+# image, tag and restart are required; there are no defaults.
+# managed_containers:
+#   - name: gateway
+#     image: ghcr.io/org/image
+#     tag: "1.2.3"
+#     restart: unless-stopped
+#     network: bondi-network
+#     ports:
+#       - "4002:4002"
+#     env_vars:
+#       TRADING_MODE: paper
+#     # Written to a root-owned mode-600 file, never passed on a command line
+#     secret_env_vars:
+#       SOME_PASSWORD: "{{SOME_PASSWORD}}"
 
 # Optional: Grafana Alloy log collection (ships container logs to Grafana Cloud)
 # alloy:
