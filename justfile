@@ -4,13 +4,33 @@ import "hurl_tests/hurl.just"
 
 IMAGE_NAME := "mlopez1506/bondi-server"
 
-default: build test fmt lint
+default: build test fmt lint build-server-ci
 
 # Assumes bondi.yaml has a service named "bondi"
 docker-all TAG: (build-server TAG) (tag-server TAG) (push-server TAG) (update-bondi-version TAG)
 
 build-server TAG:
     docker build --build-arg VERSION={{ TAG }} -t {{ IMAGE_NAME }} .
+
+# Build the server Docker image the way release-dry-run CI does: verifies the
+# Dockerfile and that every dependency resolves from a clean base image — the
+# regression class that plain `dune build` cannot catch. Requires Docker.
+# Uses the CI-computed version when commitizen (cz) is present; otherwise a dev
+# placeholder, since the version is only embedded at runtime and does not affect
+# what this step verifies.
+build-server-ci:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if command -v cz >/dev/null 2>&1; then
+        VERSION=$(just next-version)
+    else
+        VERSION=0.0.0-dev
+    fi
+    if [ -z "$VERSION" ]; then
+        echo "error: could not determine a version for the server image build" >&2
+        exit 1
+    fi
+    just build-server "$VERSION"
 
 tag-server TAG:
     docker tag {{ IMAGE_NAME }}:latest {{ IMAGE_NAME }}:{{ TAG }}
