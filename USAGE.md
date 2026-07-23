@@ -366,6 +366,74 @@ cron_jobs:
         private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
 ```
 
+### Alerting on job outcomes
+
+When a cron job run finishes, Bondi classifies it into one of three severities — `success`, `failure`, or `critical` — and POSTs an alert to the sink URLs you configured for that severity. A run that never started (image pull failed, container never came up) is treated as a `failure` so a job that never ran is never silent.
+
+Classification is driven entirely by the container's exit code, through two optional per-cron-job fields.
+
+#### `exit_code_severities` — mapping exit codes to severities
+
+By default `0` is `success` and every non-zero code is `failure`. To raise specific codes to `critical` (or otherwise override the defaults), list them under the severity they should map to:
+
+```yaml
+cron_jobs:
+  - name: daily-backup
+    image: ghcr.io/acme/backup-job
+    schedule: "0 2 * * *"
+    exit_code_severities:
+      critical: [2, 3]
+    server:
+      ip_address: "203.0.113.10"
+      ssh:
+        user: root
+        private_key_contents: "{{SSH_PRIVATE_KEY_CONTENTS}}"
+        private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
+```
+
+- The keys are limited to `success`, `failure`, and `critical` — any other key is a config error.
+- Codes you do not list keep the defaults (`0` → `success`, non-zero → `failure`).
+- Listing the same exit code under two severities is a config error rather than a silent precedence rule.
+- Bondi assigns no meaning to any exit code — what a given code signifies is entirely up to the job that produces it.
+
+The whole map is optional; omit it and the defaults apply.
+
+#### `alert_sinks` — where each severity is delivered
+
+Each alerting severity routes to a set of sink URLs. Bondi POSTs to every URL in the matched severity's set independently:
+
+```yaml
+cron_jobs:
+  - name: daily-backup
+    image: ghcr.io/acme/backup-job
+    schedule: "0 2 * * *"
+    exit_code_severities:
+      critical: [2, 3]
+    alert_sinks:
+      critical:
+        - "https://events.pagerduty.com/{{PAGERDUTY_ROUTING_KEY}}"
+        - "https://alerts.example.com/record"
+      failure:
+        - "https://alerts.example.com/record"
+    server:
+      ip_address: "203.0.113.10"
+      ssh:
+        user: root
+        private_key_contents: "{{SSH_PRIVATE_KEY_CONTENTS}}"
+        private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
+```
+
+- Only `failure` and `critical` take sinks — `success` never alerts.
+- A severity with no configured sink emits nothing; there is no implied fallback target.
+- **Sink URLs must use `https://`.** A plaintext `http://` or unparseable URL is rejected when `bondi.yaml` is read, not at deploy time.
+- Sink URLs often embed credentials (webhook tokens, routing keys). Treat them like `env_vars` secrets and supply them through `{{...}}` template variables rather than hard-coding them.
+
+Bondi POSTs one generic JSON payload per alert, carrying the job name, severity, exit code, and timestamp — nothing sink-specific and no secret material. A consumer that needs a different shape adapts on its own ingest side.
+
+Delivery is best-effort and runs after the run's outcome is recorded: a sink that is down, slow, or erroring never changes that outcome or crashes the orchestrator. Each attempt is bounded by a short timeout, so a slow sink can at most delay the run's HTTP acknowledgement. Every delivery failure — a transport error, a timeout, or a non-2xx response from the sink — is logged (by host only, so a credential-bearing URL is not written to the logs).
+
+Both fields ride in the crontab payload alongside `env_vars`, so run `bondi setup` after adding them (the orchestrator picks up the new config), then deploy the cron job as usual.
+
 ---
 
 ## 4. Alloy (Grafana Cloud Logs)
@@ -442,7 +510,7 @@ To stop collecting logs, remove the `alloy` section from `bondi.yaml` and run `b
 
 Some deployments need a long-running supporting container that is not your service and is not a scheduled job — a broker gateway, a message queue, a cache. Declare these as **managed containers** and Bondi keeps them converged: started at the tag you pinned when they are declared, recreated when the declaration changes, stopped and removed when you delete them from `bondi.yaml`.
 
-Unlike a service, a managed container is never routed by Traefik. It is reachable only from the container network, never from the internet.
+Unlike a service, a managed container is never routed by Traefik — no domain, no TLS, no automatic public route. Reach it from your service and cron jobs over the shared network by container name (for example `bondi-gateway:4002`). Publishing a host port with `ports:` is a separate, explicit choice: it binds on the host like any `docker run -p`, so on a public-facing server that port is reachable from the internet unless you firewall it. Prefer the shared network, and publish a port only when something off that network must reach the container.
 
 Add a `managed_containers` list to your `bondi.yaml`:
 
@@ -468,7 +536,7 @@ managed_containers:
 | `tag` | yes | The exact tag to run. There is no default and no floating tag — you pin the version, and changing it is what triggers a recreate. |
 | `restart` | yes | Docker restart policy: `no`, `on-failure`, `always` or `unless-stopped`. There is no default. |
 | `network` | no | Docker network to join. Use `bondi-network` to be reachable from your service and cron jobs by container name. Any other network must already exist on the server — Bondi creates `bondi-network` and nothing else, and a container declaring a network that is absent fails at container-creation time with a Docker error. |
-| `ports` | no | Published port mappings, each written `"<host>:<container>"`. |
+| `ports` | no | Published port mappings, each written `"<host>:<container>"`. Each binds on all host interfaces (`0.0.0.0`), so on a public-facing server a published port is internet-reachable unless firewalled — omit this and use the shared network for container-to-container access. |
 | `env_vars` | no | Environment variables passed inline. Visible in `docker inspect`. |
 | `secret_env_vars` | no | Environment variables passed by file reference. Not visible in `docker inspect` or in any process listing. |
 
@@ -596,6 +664,13 @@ cron_jobs:
     registry_pass: "{{REGISTRY_PASS}}"
     env_vars:
       BUCKET: "s3://my-backups"
+    exit_code_severities:
+      critical: [2, 3]
+    alert_sinks:
+      critical:
+        - "https://events.pagerduty.com/{{PAGERDUTY_ROUTING_KEY}}"
+      failure:
+        - "https://alerts.example.com/record"
     server:
       ip_address: "203.0.113.10"
       ssh:

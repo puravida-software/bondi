@@ -23,3 +23,11 @@ run-run:
     --error-format=long \
     --variable host=${HURL_HOST} \
     hurl_tests/run.hurl
+
+# Gated: not part of the default hurl-tests bundle. Requires a full server
+# deployment and reaches a real external https host to exercise outbound TLS.
+run-alert-tls:
+    hurl \
+    --error-format=long \
+    --variable host=${HURL_HOST} \
+    hurl_tests/alert_tls.hurl

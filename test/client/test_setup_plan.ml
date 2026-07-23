@@ -272,6 +272,8 @@ let test_plan_cron_jobs_force_restart () =
       Config_file.env_vars = None;
       Config_file.registry_user = None;
       Config_file.registry_pass = None;
+      Config_file.alert_sinks = None;
+      Config_file.exit_code_severities = None;
       Config_file.server = minimal_server;
     }
   in
@@ -322,6 +324,8 @@ let test_plan_cron_only_no_acme () =
       Config_file.env_vars = None;
       Config_file.registry_user = None;
       Config_file.registry_pass = None;
+      Config_file.alert_sinks = None;
+      Config_file.exit_code_severities = None;
       Config_file.server = minimal_server;
     }
   in

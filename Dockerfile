@@ -39,19 +39,22 @@ COPY --chown=opam:opam .opam-switch-export* ./
 # repository configuration when the cache is empty. The download cache is sufficient
 # for speeding up package downloads.
 # If .opam-switch-export exists and is valid, import it to reuse packages from CI
-# Otherwise, install normally (for local builds or if export failed)
+# Otherwise, install normally (for local builds or if export failed).
+# The base image bundles a frozen opam-repository mirror, so the default remote is
+# re-pointed at upstream and refreshed before installing — otherwise recently
+# published dependency versions (e.g. tls-eio 2.1.1) cannot be resolved.
 RUN --mount=type=cache,target=/home/opam/.opam/download-cache,uid=1000,gid=1000 \
     eval $(opam env) && \
+    opam repository set-url default git+https://github.com/ocaml/opam-repository.git && \
+    opam update && \
     if [ -f .opam-switch-export ] && [ -s .opam-switch-export ]; then \
         echo "Importing opam switch from CI to reuse installed packages..." && \
         opam switch import .opam-switch-export --yes && \
         echo "Successfully imported opam switch from CI" || \
         (echo "Switch import failed, falling back to normal install" && \
-         opam update && \
          opam install -y --deps-only -t . -j 4); \
     else \
         echo "No valid opam switch export found, installing normally..." && \
-        opam update && \
         opam install -y --deps-only -t . -j 4; \
     fi && \
     eval $(opam env)

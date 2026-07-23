@@ -99,6 +99,8 @@ let test_cron_plan_with_cron_jobs () =
       env_vars = None;
       registry_user = None;
       registry_pass = None;
+      alert_sinks = None;
+      exit_code_severities = None;
     }
   in
   let input = { minimal_input with cron_jobs = Some [ cron ] } in

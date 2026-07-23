@@ -9,6 +9,10 @@
   eio_main
   lwt_eio
   cohttp-eio
+  tls-eio
+  tls
+  ca-certs
+  domain-name
   base64
   yojson
   uri

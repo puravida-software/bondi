@@ -1,7 +1,19 @@
 open Json_helpers
+module Alert = Bondi_common.Alert
 
 let ( let* ) = Result.bind
 let traefik_name = "bondi-traefik"
+
+(* [exit_code_severities] wraps [Alert.severity_map] only to map its
+   [severity_map_error] to the string error [ppx_deriving_yojson] requires;
+   [Alert.sinks] already reports a string error and is used directly. *)
+type exit_code_severities = Alert.severity_map
+
+let exit_code_severities_of_yojson json =
+  Alert.severity_map_of_yojson json
+  |> Result.map_error Alert.severity_map_error_to_string
+
+let exit_code_severities_to_yojson = Alert.severity_map_to_yojson
 
 (* ------------------------------------------------------------------------- *)
 (* Types                                                                     *)
@@ -15,6 +27,8 @@ type cron_job = {
   env_vars : string_map option; [@default None]
   registry_user : string option; [@default None]
   registry_pass : string option; [@default None]
+  alert_sinks : Alert.sinks option; [@default None]
+  exit_code_severities : exit_code_severities option; [@default None]
 }
 [@@deriving yojson]
 

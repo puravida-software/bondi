@@ -15,7 +15,8 @@
   test_run
   test_docker_client
   test_blue_green_plan
-  test_alloy_config)
+  test_alloy_config
+  test_alert_delivery)
  (modules
   test_env
   test_simple_plan
@@ -25,5 +26,6 @@
   test_run
   test_docker_client
   test_blue_green_plan
-  test_alloy_config)
- (libraries alcotest bondi.common bondi.server server_test_helpers))
+  test_alloy_config
+  test_alert_delivery)
+ (libraries alcotest bondi.common bondi.server eio.mock server_test_helpers))
