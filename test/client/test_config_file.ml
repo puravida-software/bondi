@@ -810,6 +810,110 @@ let test_cron_job_network_absent_parses () =
             job.network
       | _ -> fail "expected two cron jobs")
 
+module Alert = Bondi_common.Alert
+
+(* One fixture, two jobs: the alerting job is the affirmative arm for the quiet
+   job's [None] assertions, proving the absence is the field being unset rather
+   than the fixture failing to parse. *)
+let cron_alerts_yaml =
+  {|bondi_server:
+  version: 0.1.0
+
+cron_jobs:
+  - name: alerting-job
+    image: ghcr.io/org/alerting
+    schedule: "0 * * * *"
+    alert_sinks:
+      critical:
+        - https://pager.example.com/hook
+        - https://record.example.com/hook
+      failure:
+        - https://dashboard.example.com/hook
+    exit_code_severities:
+      critical:
+        - 70
+      success:
+        - 2
+    server:
+      ip_address: 1.2.3.4
+  - name: quiet-job
+    image: ghcr.io/org/quiet
+    schedule: "5 * * * *"
+    server:
+      ip_address: 1.2.3.4
+|}
+
+let test_config_parses_alert_sinks_and_severities () =
+  with_temp_config cron_alerts_yaml (fun () ->
+      match cron_jobs_of_fixture () with
+      | job :: _ -> (
+          check string "cron job name" "alerting-job" job.name;
+          (match job.alert_sinks with
+          | None -> fail "expected alert_sinks"
+          | Some sinks -> (
+              let Alert.{ critical; failure } = sinks in
+              (match critical with
+              | [ a; b ] ->
+                  check string "critical sink 0"
+                    "https://pager.example.com/hook" (Alert.sink_url a);
+                  check string "critical sink 1"
+                    "https://record.example.com/hook" (Alert.sink_url b)
+              | _ -> fail "expected two critical sinks");
+              match failure with
+              | [ f ] ->
+                  check string "failure sink"
+                    "https://dashboard.example.com/hook" (Alert.sink_url f)
+              | _ -> fail "expected one failure sink"));
+          (* Observe the abstract severity_map through its classifier: 70 is
+             the configured critical, 2 is a non-zero code overridden to
+             success, and unlisted codes fall to the defaults. *)
+          match job.exit_code_severities with
+          | None -> fail "expected exit_code_severities"
+          | Some map ->
+              check bool "code 70 is critical" true
+                (Alert.severity_of_exit_code map 70 = Alert.Critical);
+              check bool "code 2 overridden to success" true
+                (Alert.severity_of_exit_code map 2 = Alert.Success);
+              check bool "code 0 defaults to success" true
+                (Alert.severity_of_exit_code map 0 = Alert.Success);
+              check bool "code 1 defaults to failure" true
+                (Alert.severity_of_exit_code map 1 = Alert.Failure))
+      | [] -> fail "expected two cron jobs")
+
+let test_config_new_fields_absent () =
+  with_temp_config cron_alerts_yaml (fun () ->
+      match cron_jobs_of_fixture () with
+      | _ :: job :: _ ->
+          check string "cron job name" "quiet-job" job.name;
+          check bool "alert_sinks defaults to None" true (job.alert_sinks = None);
+          check bool "exit_code_severities defaults to None" true
+            (job.exit_code_severities = None)
+      | _ -> fail "expected two cron jobs")
+
+let test_config_rejects_non_https_sink () =
+  let yaml =
+    {|bondi_server:
+  version: 0.1.0
+
+cron_jobs:
+  - name: insecure-job
+    image: ghcr.io/org/insecure
+    schedule: "0 * * * *"
+    alert_sinks:
+      critical:
+        - http://insecure.example.com/hook
+    server:
+      ip_address: 1.2.3.4
+|}
+  in
+  with_temp_config yaml (fun () ->
+      match Config_file.read () with
+      | Ok _ -> fail "expected a non-https sink to be rejected"
+      | Error message ->
+          check bool "error names the rejected url" true
+            (Bondi_common.String_utils.contains
+               ~needle:"http://insecure.example.com/hook" message))
+
 let () =
   run "Config_file"
     [
@@ -864,5 +968,14 @@ let () =
             test_managed_container_unsafe_name_rejected;
           test_case "managed container duplicate env key rejected" `Quick
             test_managed_container_duplicate_env_key_rejected;
+        ] );
+      ( "alerts",
+        [
+          test_case "parses alert_sinks and exit_code_severities" `Quick
+            test_config_parses_alert_sinks_and_severities;
+          test_case "new alert fields absent parse to None" `Quick
+            test_config_new_fields_absent;
+          test_case "rejects non-https sink" `Quick
+            test_config_rejects_non_https_sink;
         ] );
     ]

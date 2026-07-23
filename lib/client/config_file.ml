@@ -35,6 +35,22 @@ type bondi_server = { version : string } [@@deriving yojson]
 type traefik = { domain_name : string; image : string; acme_email : string }
 [@@deriving yojson]
 
+module Alert = Bondi_common.Alert
+
+(* Both alert fields reuse the [Alert] codecs so the config record holds
+   validated, illegal-state-free values (a sink is https by construction, a
+   severity map has no ambiguous code). [Alert.sinks] is used directly because
+   [Alert.sinks_of_yojson] already reports a string error the derived record can
+   carry; [severity_map_of_yojson] reports a [severity_map_error], which it
+   cannot, so this wrapper maps it to its message. *)
+type exit_code_severities = Alert.severity_map
+
+let exit_code_severities_of_yojson json =
+  Alert.severity_map_of_yojson json
+  |> Result.map_error Alert.severity_map_error_to_string
+
+let exit_code_severities_to_yojson = Alert.severity_map_to_yojson
+
 type cron_job = {
   name : string;
   image : string; (* Base image without tag *)
@@ -43,6 +59,8 @@ type cron_job = {
   env_vars : string_map option; [@default None]
   registry_user : string option; [@default None]
   registry_pass : string option; [@default None]
+  alert_sinks : Alert.sinks option; [@default None]
+  exit_code_severities : exit_code_severities option; [@default None]
   server : server;
 }
 [@@deriving yojson]

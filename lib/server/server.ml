@@ -1,4 +1,4 @@
-let start ~clock ~client ~net (config : Server_config.t) : unit Lwt.t =
+let start ~clock ~client ~net ~deliver (config : Server_config.t) : unit Lwt.t =
   Dream.serve ~interface:"0.0.0.0" ~port:config.port
   @@ Dream.logger
   @@ Dream.router
@@ -10,7 +10,7 @@ let start ~clock ~client ~net (config : Server_config.t) : unit Lwt.t =
                  Status.route ~client ~net;
                  Health.route;
                  Deploy.route ~clock ~net;
-                 Run.route ~client ~net;
+                 Run.route ~clock ~client ~net ~deliver;
                ];
            ];
        ]

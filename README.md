@@ -76,6 +76,10 @@ Multiple targets (service and cron):
 
 Beyond your service and its cron jobs, `bondi.yaml` can declare long-running supporting containers — a broker gateway, a queue, a cache — under `managed_containers`. `bondi setup` keeps them converged: started at the tag you pinned, recreated when the declaration changes, and stopped, removed and cleaned up when you delete them from the config. Secrets are passed by file reference rather than on the command line, so they stay out of `docker inspect`. See the [Usage Guide](USAGE.md#5-managed-containers).
 
+### Alerting on cron job outcomes
+
+A cron job can classify each run's exit code into a `success`, `failure`, or `critical` severity and POST a generic alert to per-severity `https` sink URLs — a paging endpoint for `critical`, a dashboard for `failure`. Defaults are `0` → success and non-zero → failure; specific codes can be raised to `critical`. Delivery is best-effort and never changes the job's outcome. A run that never started counts as a failure, so a job is never silently skipped. See the [Usage Guide](USAGE.md#alerting-on-job-outcomes).
+
 ## Available Commands
 
 - `bondi init` - Initialize a new Bondi project

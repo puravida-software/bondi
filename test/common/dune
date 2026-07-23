@@ -4,5 +4,6 @@
   test_string_utils
   test_defaults
   test_alloy_river
-  test_managed_container)
+  test_managed_container
+  test_alert)
  (libraries alcotest bondi.common))

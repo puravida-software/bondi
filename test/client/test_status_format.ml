@@ -72,6 +72,8 @@ let mk_cron_job name image ip : Config_file.cron_job =
     env_vars = None;
     registry_user = None;
     registry_pass = None;
+    alert_sinks = None;
+    exit_code_severities = None;
     server = { ip_address = ip; ssh = None; port = None };
   }
 

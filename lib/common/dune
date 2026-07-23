@@ -1,4 +1,4 @@
 (library
  (name bondi_common)
  (public_name bondi.common)
- (libraries yojson))
+ (libraries yojson uri domain-name))

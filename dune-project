@@ -38,6 +38,14 @@
    (>= 6.2.1))
   (cohttp-eio
    (>= 6.2.1))
+  (tls-eio
+   (>= 2.1.1))
+  (tls
+   (>= 2.1.1))
+  (ca-certs
+   (>= 1.0.3))
+  (domain-name
+   (>= 0.5.0))
   (eio
    (>= 1.3))
   (eio_main

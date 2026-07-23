@@ -3,6 +3,7 @@
    Job specs are inlined in the curl -d argument. *)
 
 open Json_helpers
+module Alert = Bondi_common.Alert
 
 let ( let* ) = Result.bind
 
@@ -20,11 +21,21 @@ type run_payload = {
   image : string;
   network : string option; [@default None]
   env_vars : string_map option; [@default None]
+  alert_sinks : Alert.sinks option; [@default None]
+  exit_code_severities : Strategy.Simple.exit_code_severities option;
+      [@default None]
 }
 [@@deriving yojson]
 
 let run_payload_of_cron_job (c : Strategy.Simple.cron_job) : run_payload =
-  { job = c.name; image = c.image; network = c.network; env_vars = c.env_vars }
+  {
+    job = c.name;
+    image = c.image;
+    network = c.network;
+    env_vars = c.env_vars;
+    alert_sinks = c.alert_sinks;
+    exit_code_severities = c.exit_code_severities;
+  }
 
 (* Escape single quotes for shell: ' -> '\'' *)
 let escape_for_shell s = String.concat "'\\''" (String.split_on_char '\'' s)

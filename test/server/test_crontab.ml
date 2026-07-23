@@ -1,5 +1,6 @@
 open Alcotest
 module Crontab = Bondi_server__Crontab
+module Alert = Bondi_common.Alert
 
 let test_escape_for_shell_no_quotes () =
   check string "no quotes unchanged" "hello world"
@@ -64,8 +65,8 @@ let test_parse_bondi_section_without_markers () =
   check (list string) "all lines outside" lines outside;
   check (list (pair string string)) "no bondi entries" [] bondi
 
-let mk_cron_job ?network ~name ~image ~schedule () :
-    Bondi_server__Strategy__Simple.cron_job =
+let mk_cron_job ?network ?alert_sinks ?exit_code_severities ~name ~image
+    ~schedule () : Bondi_server__Strategy__Simple.cron_job =
   {
     name;
     image;
@@ -74,6 +75,8 @@ let mk_cron_job ?network ~name ~image ~schedule () :
     env_vars = None;
     registry_user = None;
     registry_pass = None;
+    alert_sinks;
+    exit_code_severities;
   }
 
 (* The crontab line is written by Crontab.run_payload and parsed back by
@@ -101,6 +104,65 @@ let test_cron_line_absent_network_round_trips () =
   in
   check (option string) "absent network stays absent" None
     (network_of_cron_line (Crontab.entry_of_cron_job job))
+
+(* The alert fields are written by Crontab.run_payload and parsed back by
+   Run.run_payload; the round trip is what pins the two records in sync. *)
+let alert_config_of_cron_line line =
+  match Crontab.json_from_cron_line line with
+  | None -> Alcotest.fail "no JSON payload in cron line"
+  | Some json -> (
+      match Bondi_server__Run.run_payload_of_yojson json with
+      | Error msg -> Alcotest.fail ("run payload rejected the cron line: " ^ msg)
+      | Ok (payload : Bondi_server__Run.run_payload) ->
+          (payload.alert_sinks, payload.exit_code_severities))
+
+let test_cron_alert_config_round_trip () =
+  let sinks =
+    match
+      Alert.sinks_of_yojson
+        (Yojson.Safe.from_string
+           {|{"critical":["https://pager.example.com/hook","https://record.example.com/hook"],"failure":["https://dash.example.com/hook"]}|})
+    with
+    | Ok s -> s
+    | Error msg -> fail ("bad sinks fixture: " ^ msg)
+  in
+  let severities =
+    match
+      Alert.severity_map_of_yojson
+        (Yojson.Safe.from_string {|{"critical":[70]}|})
+    with
+    | Ok m -> m
+    | Error _ -> fail "bad severity_map fixture"
+  in
+  let job =
+    mk_cron_job ~alert_sinks:sinks ~exit_code_severities:severities
+      ~name:"backup" ~image:"myimg:v1" ~schedule:"0 * * * *" ()
+  in
+  let alert_sinks, exit_code_severities =
+    alert_config_of_cron_line (Crontab.entry_of_cron_job job)
+  in
+  (match alert_sinks with
+  | None -> fail "alert_sinks did not survive the round trip"
+  | Some Alert.{ critical; failure } -> (
+      (match critical with
+      | [ a; b ] ->
+          check string "critical sink 0" "https://pager.example.com/hook"
+            (Alert.sink_url a);
+          check string "critical sink 1" "https://record.example.com/hook"
+            (Alert.sink_url b)
+      | _ -> fail "expected two critical sinks after round trip");
+      match failure with
+      | [ f ] ->
+          check string "failure sink" "https://dash.example.com/hook"
+            (Alert.sink_url f)
+      | _ -> fail "expected one failure sink after round trip"));
+  match exit_code_severities with
+  | None -> fail "exit_code_severities did not survive the round trip"
+  | Some map ->
+      check bool "code 70 is critical after round trip" true
+        (Alert.severity_of_exit_code map 70 = Alert.Critical);
+      check bool "code 1 defaults to failure after round trip" true
+        (Alert.severity_of_exit_code map 1 = Alert.Failure)
 
 let test_entry_of_cron_job () =
   let job =
@@ -209,6 +271,8 @@ let () =
           test_case "preserves network" `Quick test_cron_line_preserves_network;
           test_case "absent network round trips" `Quick
             test_cron_line_absent_network_round_trips;
+          test_case "preserves alert config" `Quick
+            test_cron_alert_config_round_trip;
         ] );
       ( "generate_bondi_entries",
         [
