@@ -148,6 +148,7 @@ type action =
   | EnsureDocker
   | EnsureAcmeFile
   | EnsureNetwork of string
+  | RequireCronCurl
   | StopOrchestrator
   | RunServer
   | EnsureAlloyConfig
@@ -339,10 +340,23 @@ let plan (config : Config_file.t) ~(specs : Managed_container.t list)
         List.concat_map (managed_convergence_for observed) specs
         @ managed_removals ~specs observed
   in
+  (* A host that runs no cron jobs never sees a bondi crontab line, so it owes
+     no curl version. One that does gets checked here, before the orchestrator
+     starts: the emitted command uses --fail-with-body, and an older curl
+     rejects it as unknown, which would fail every scheduled job at its next
+     tick instead of failing this command once. *)
+  let cron_curl =
+    match config.cron_jobs with
+    | Some (_ :: _) -> [ RequireCronCurl ]
+    | Some []
+    | None ->
+        []
+  in
   List.concat
     [
       (* Docker first, then the shared network before anything joins it *)
       [ EnsureDocker; EnsureNetwork Bondi_common.Defaults.network_name ];
+      cron_curl;
       acme;
       server;
       alloy;
@@ -486,6 +500,30 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
         print_endline
           (Printf.sprintf "Network %s is present on server %s" network_name
              ip_address);
+        run rest
+    | RequireCronCurl :: rest ->
+        (* The version comparison is a pure decision in [Curl_version]; this arm
+           only obtains the host's answer and reports the verdict. A curl that
+           cannot be run at all is indistinguishable here from one too old, and
+           both are rejections, so the SSH error text is passed through as the
+           output to be judged. *)
+        let output =
+          match remote_run ~user ~host ~key_path "curl --version" with
+          | Ok output -> output
+          | Error err -> err
+        in
+        let* () =
+          Curl_version.supports_fail_with_body output
+          |> Result.map_error (fun msg ->
+              Printf.sprintf "server %s: %s" ip_address msg)
+        in
+        print_endline
+          (Printf.sprintf "curl on server %s supports the crontab command: %s"
+             ip_address
+             (String.trim
+                (match String.split_on_char '\n' output with
+                | [] -> output
+                | line :: _ -> line)));
         run rest
     | StopOrchestrator :: rest ->
         let* _ =

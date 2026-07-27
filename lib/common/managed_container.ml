@@ -19,6 +19,7 @@ type error =
   | Empty_tag
   | Invalid_restart_policy of string
   | Invalid_port of string
+  | Unmanaged_network of string
   | Duplicate_env_key of string
   | Invalid_env_key of string
   | Invalid_env_value of string
@@ -42,6 +43,12 @@ let error_to_string = function
         "invalid managed container port: %S, expected \"<host>:<container>\" \
          with both between 1 and 65535"
         value
+  | Unmanaged_network value ->
+      Printf.sprintf
+        "managed container declares network %S, which bondi does not manage. \
+         bondi manages only %S: declare that instead, and attach the \
+         containers this one must reach to it too"
+        value Defaults.network_name
   | Duplicate_env_key key ->
       Printf.sprintf
         "managed container declares the environment key %S more than once" key
@@ -87,6 +94,18 @@ let validate_name value =
 
 let validate_non_empty error value =
   if String.length value = 0 then Error error else Ok value
+
+(* Bondi creates the shared network and no other, so any other declared name is
+   either a typo — leaving the container on an empty network it can reach
+   nothing through — or a network Bondi must assume exists and cannot verify.
+   Both are failures discovered long after the declaration, so the name is
+   rejected at construction. A cron job's network is checked the same way, on
+   the same constant, for the same reason. *)
+let validate_network = function
+  | None -> Ok None
+  | Some network ->
+      if String.equal network Defaults.network_name then Ok (Some network)
+      else Error (Unmanaged_network network)
 
 let rec first_duplicate_key seen = function
   | [] -> None
@@ -135,6 +154,7 @@ let create ~name ~image ~tag ~restart ~network ~ports ~env =
   let* name = validate_name name in
   let* image = validate_non_empty Empty_image image in
   let* tag = validate_non_empty Empty_tag tag in
+  let* network = validate_network network in
   let* env = validate_env env in
   Ok { name; image; tag; restart; network; ports; env }
 

@@ -20,6 +20,7 @@ what reaches argv from what reaches stdin.
   > cat >> "$SSH_STDIN_LOG"
   > case "$1" in
   >   'docker --version') echo 'Docker version 27.0.0, build deadbeef' ;;
+  >   'curl --version') echo 'curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0' ;;
   >   *'label=bondi.type=managed'*)
   >     if [ -n "$MANAGED_PS_FAILS" ]; then exit 7; fi
   >     cat "$MANAGED_PS" ;;
@@ -67,6 +68,7 @@ A declared managed container that the server does not have.
   Processing server: 10.0.0.1
   Docker is already installed on server 10.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 10.0.0.1
+  curl on server 10.0.0.1 supports the crontab command: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
   bondi-orchestrator container started on server 10.0.0.1: 
   Wrote secret environment file on server 10.0.0.1: /etc/bondi/gateway/env
   bondi-gateway container started on server 10.0.0.1: 
@@ -130,6 +132,7 @@ directory — which holds its secrets — deleted.
   Processing server: 10.0.0.1
   Docker is already installed on server 10.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 10.0.0.1
+  curl on server 10.0.0.1 supports the crontab command: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
   bondi-orchestrator container started on server 10.0.0.1: 
   Stopped bondi-gateway container on server 10.0.0.1
   Removed bondi-gateway container on server 10.0.0.1
@@ -209,6 +212,7 @@ converge, so the lookup does not matter.
   Processing server: 10.0.0.1
   Docker is already installed on server 10.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 10.0.0.1
+  curl on server 10.0.0.1 supports the crontab command: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
   bondi-orchestrator container started on server 10.0.0.1: 
   $ unset MANAGED_PS_FAILS
 
@@ -247,6 +251,7 @@ old one on disk under a container that no longer references it.
   Processing server: 10.0.0.1
   Docker is already installed on server 10.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 10.0.0.1
+  curl on server 10.0.0.1 supports the crontab command: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
   bondi-orchestrator container started on server 10.0.0.1: 
   Wrote secret environment file on server 10.0.0.1: /etc/bondi/gateway/env
   bondi-gateway container started on server 10.0.0.1: 
@@ -318,6 +323,7 @@ started.
   Processing server: 10.0.0.1
   Docker is already installed on server 10.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 10.0.0.1
+  curl on server 10.0.0.1 supports the crontab command: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
   bondi-orchestrator container started on server 10.0.0.1: 
   $ grep -c 'bondi-gateway' ssh-argv.log
   0

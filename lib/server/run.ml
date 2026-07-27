@@ -21,7 +21,7 @@ type run_response = { exit_code : int; warning : string option [@default None] }
 [@@deriving yojson]
 
 (* Classify how the run ended: a completed container yields its exit code, an
-   orchestrator-level failure before/at start yields [Start_failed] (FR-2). *)
+   orchestrator-level failure before/at start yields [Start_failed]. *)
 let outcome_of_result : (int, string) result -> Alert.outcome = function
   | Ok exit_code -> Alert.Exited exit_code
   | Error msg -> Alert.Start_failed msg
@@ -98,7 +98,7 @@ let run_opts ~container_name ~full_image payload :
 
 (* Plan the alert for a run outcome, purely. An unconfigured job falls to the
    default map and an unconfigured sink set is empty, so [Alert.plan] emits
-   nothing rather than any implied target (NFR-2). Split from [dispatch_alert] so
+   nothing rather than any implied target. Split from [dispatch_alert] so
    the defaulting and routing are testable without a clock or a deliverer. *)
 let plan_for_payload payload outcome ~timestamp =
   let severity_map =
@@ -119,39 +119,96 @@ let dispatch_alert ~deliver ~payload ~outcome =
   | Some ({ targets; payload = alert_payload } : Alert.dispatch) ->
       deliver ~targets ~payload:alert_payload
 
+type run_error = Invalid_request of string | Orchestrator_failure of string
+
+let run_error_message = function
+  | Invalid_request msg
+  | Orchestrator_failure msg ->
+      msg
+
+(* The failure class alone picks the status, so the Dream handler carries no
+   decision of its own. [Invalid_request] is a caller-supplied value that
+   failed a precondition and answers 400, matching what /deploy already returns
+   for a body it cannot decode; [Orchestrator_failure] is a fault on Bondi's
+   side of the call and answers 500. Neither is 404, which described neither. *)
+let status_of_run_error : run_error -> Dream.status = function
+  | Invalid_request _ -> `Bad_Request
+  | Orchestrator_failure _ -> `Internal_Server_Error
+
+(* The rejected body's keys are named; its values never are. A run payload
+   carries env_vars and sink URLs that may embed credentials, and this message
+   is returned over HTTP and mailed by cron. Without the key list the ppx's
+   message names only the type that failed, which cannot distinguish a
+   misspelled field from a missing one — the two most likely ways a
+   hand-edited crontab line goes wrong. *)
+let decode_payload body =
+  match Yojson.Safe.from_string body with
+  | exception Yojson.Json_error msg ->
+      Error (Invalid_request ("invalid JSON: " ^ msg))
+  | json ->
+      run_payload_of_yojson json
+      |> Result.map_error (fun msg ->
+          Invalid_request
+            (Printf.sprintf "invalid run payload: %s (keys received: %s)" msg
+               (String.concat ", " (top_level_keys json))))
+
+(* Decode the body and require a tagged image before anything is started. A body
+   that does not decode names no job and carries no sinks, so it cannot alert —
+   the crontab command's non-zero exit is its only failure channel. A
+   payload that did decode knows both, so an untagged image dispatches here
+   rather than short-circuiting past the dispatch point at the end of [run]. *)
+let prepare ~deliver body : (run_payload * string, run_error) result =
+  let* payload = decode_payload body in
+  match parse_image payload.image with
+  | Error msg ->
+      dispatch_alert ~deliver ~payload ~outcome:(outcome_of_result (Error msg));
+      Error (Invalid_request msg)
+  | Ok (image_name, tag) -> Ok (payload, image_name ^ ":" ^ tag)
+
+(* Classify the container lifecycle result: a Docker-level failure is Bondi's
+   fault, not the caller's. *)
+let response_of_run_result ~warning :
+    (int, string) result -> (run_response, run_error) result = function
+  | Ok exit_code -> Ok { exit_code; warning }
+  | Error msg -> Error (Orchestrator_failure msg)
+
+(* Whether the post-run cleanup happens, and what it reported. Cleanup runs only
+   when the container both started and finished: removing the previous container
+   before a failed run has been reported would destroy the only record of what
+   ran last, and renaming a container that never started has nothing to rename.
+   Taking [cleanup] as a parameter keeps that decision pure and testable, with
+   the Docker calls it needs supplied by [run]. *)
+let warning_of_run ~cleanup ~started ~run_result =
+  match (started, run_result) with
+  | Ok container_id, Ok _ -> cleanup container_id
+  | Ok _, Error _
+  | Error _, Ok _
+  | Error _, Error _ ->
+      None
+
 let run ~client ~net ~deliver body =
-  let* payload =
-    match Yojson.Safe.from_string body with
-    | exception Yojson.Json_error msg -> Error ("invalid JSON: " ^ msg)
-    | json ->
-        run_payload_of_yojson json
-        |> Result.map_error (fun msg -> "invalid run payload: " ^ msg)
-  in
-  let* image_name, tag = parse_image payload.image in
-  let full_image = image_name ^ ":" ^ tag in
+  let* payload, full_image = prepare ~deliver body in
   let container_name = temp_container_name payload.job in
   let opts = run_opts ~container_name ~full_image payload in
   (* Capture either the container's exit code or an orchestrator-start error;
-     both classify into an outcome so a job that never ran still alerts (FR-2). *)
+     both classify into an outcome so a job that never ran still alerts. *)
   let started = Docker.Client.run_image_with_opts client ~net opts in
   let run_result =
     let* container_id = started in
     Docker.Client.wait_container client ~net ~container_id
   in
-  let response =
-    match (started, run_result) with
-    | Ok container_id, Ok exit_code ->
+  let warning =
+    warning_of_run ~started ~run_result ~cleanup:(fun container_id ->
         let w1 = best_effort_remove_old ~client ~net ~job:payload.job in
         let w2 =
           best_effort_rename ~client ~net ~container_id ~job:payload.job
         in
-        Ok { exit_code; warning = combine_warnings w1 w2 }
-    | Error msg, _ -> Error msg
-    | _, Error msg -> Error msg
+        combine_warnings w1 w2)
   in
+  let response = response_of_run_result ~warning run_result in
   (* Delivery is a bounded, best-effort side channel run after the outcome is
      recorded and the container is cleaned up: it cannot change the returned
-     outcome (FR-6), though being synchronous it may delay this response by up to
+     outcome, though being synchronous it may delay this response by up to
      one per-sink timeout. *)
   dispatch_alert ~deliver ~payload ~outcome:(outcome_of_result run_result);
   response
@@ -163,4 +220,6 @@ let route ~clock ~client ~net ~deliver =
   match run ~client ~net ~deliver:post_alert body with
   | Ok response ->
       response |> run_response_to_yojson |> Yojson.Safe.to_string |> Dream.json
-  | Error msg -> Dream.respond ~status:`Not_Found ("Run failed: " ^ msg)
+  | Error err ->
+      Dream.respond ~status:(status_of_run_error err)
+        ("Run failed: " ^ run_error_message err)

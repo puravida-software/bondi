@@ -7,6 +7,8 @@ type deploy_cron_job = {
   env_vars : Config_file.string_map option; [@default None]
   registry_user : string option; [@default None]
   registry_pass : string option; [@default None]
+  alert_sinks : Bondi_common.Alert.sinks option; [@default None]
+  exit_code_severities : Config_file.exit_code_severities option; [@default None]
 }
 [@@deriving yojson]
 
@@ -76,6 +78,8 @@ let cron_job_to_deploy (j : Config_file.cron_job) ~image : deploy_cron_job =
     env_vars = j.env_vars;
     registry_user = j.registry_user;
     registry_pass = j.registry_pass;
+    alert_sinks = j.alert_sinks;
+    exit_code_severities = j.exit_code_severities;
   }
 
 let cron_jobs_for_server ip_address

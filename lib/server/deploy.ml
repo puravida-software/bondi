@@ -82,25 +82,98 @@ let tag_from_image image =
 (* ------------------------------------------------------------------------- *)
 
 type deploy_action =
+  | EnsureCronNetwork
   | PullCronImages of Simple.cron_job list
   | UpsertCrontab of Simple.cron_job list option
+
+type deploy_error = Invalid_request of string | Orchestrator_failure of string
+
+let deploy_error_message = function
+  | Invalid_request msg
+  | Orchestrator_failure msg ->
+      msg
+
+(* The failure class alone picks the status, so the Dream handler carries no
+   decision of its own. [Invalid_request] is a value the caller wrote that
+   failed a precondition and answers 400, matching what this endpoint already
+   returns for a body it cannot decode; [Orchestrator_failure] is a fault on
+   Bondi's side of the call and answers 500. The sibling /run endpoint
+   classifies the same way. *)
+let status_of_deploy_error : deploy_error -> Dream.status = function
+  | Invalid_request _ -> `Bad_Request
+  | Orchestrator_failure _ -> `Internal_Server_Error
+
+let ( let* ) = Result.bind
 
 (* ------------------------------------------------------------------------- *)
 (* Phase 1: Plan (pure)                                                      *)
 (* ------------------------------------------------------------------------- *)
 
-let cron_plan (input : Simple.deploy_input) : deploy_action list =
+(* Bondi ensures only the network it owns. Creating a network under any other
+   declared name would succeed and hand the job an empty network it can reach
+   nothing through — a failure discovered only at run time — so an unmanaged
+   name is rejected here, in the plan, naming what was declared. Measured: a
+   container on a separately created bridge network cannot resolve a peer on
+   another one (getent exits 2, no address) while the same lookup from within
+   the peer's network resolves. The ensure is idempotent and carries the one
+   name it can carry, so any number of jobs declaring it plan a single action.
+
+   The check is config-based, not Docker-based: this function receives the
+   declared cron jobs and nothing else, and compares against a single accepted
+   constant. It cannot observe which networks exist on the server, so a network
+   the operator creates by hand stays invisible to it and the next deploy fails
+   identically. Every remedy the message offers must therefore be one the
+   operator can apply in bondi.yaml — a "docker network create" suggestion here
+   reads as actionable and is a dead end.
+
+   Every offending job is named in one message. The whole declared set is in
+   hand and the check is pure, so stopping at the first would make the operator
+   rediscover the next bad name on a later deploy. *)
+let cron_network_action (jobs : Simple.cron_job list) :
+    (deploy_action list, deploy_error) result =
+  let shared = Bondi_common.Defaults.network_name in
+  let declares_shared (job : Simple.cron_job) =
+    match job.network with
+    | None -> false
+    | Some network -> String.equal network shared
+  in
+  let unmanaged =
+    List.filter_map
+      (fun (job : Simple.cron_job) ->
+        match job.network with
+        | None -> None
+        | Some network ->
+            if String.equal network shared then None
+            else Some (Printf.sprintf "%s declares %s" job.name network))
+      jobs
+  in
+  match unmanaged with
+  | [] ->
+      Ok
+        (if List.exists declares_shared jobs then [ EnsureCronNetwork ] else [])
+  | offenders ->
+      Error
+        (Invalid_request
+           (Printf.sprintf
+              "cron jobs declare networks bondi does not manage (%s). bondi \
+               manages only %s: declare that instead, and attach the \
+               containers these jobs must reach to %s too"
+              (String.concat ", " offenders)
+              shared shared))
+
+let cron_plan (input : Simple.deploy_input) :
+    (deploy_action list, deploy_error) result =
   match input.cron_jobs with
   | None
   | Some [] ->
-      []
-  | Some jobs -> [ PullCronImages jobs; UpsertCrontab (Some jobs) ]
+      Ok []
+  | Some jobs ->
+      let* network_actions = cron_network_action jobs in
+      Ok (network_actions @ [ PullCronImages jobs; UpsertCrontab (Some jobs) ])
 
 (* ------------------------------------------------------------------------- *)
 (* Phase 2: Interpreter                                                      *)
 (* ------------------------------------------------------------------------- *)
-
-let ( let* ) = Result.bind
 
 let interpret ~client ~net (actions : deploy_action list) :
     (unit, string) result =
@@ -117,6 +190,12 @@ let interpret ~client ~net (actions : deploy_action list) :
   in
   let rec run = function
     | [] -> Ok ()
+    | EnsureCronNetwork :: rest ->
+        let* () =
+          Docker.Client.create_network_if_not_exists client ~net
+            ~network_name:Bondi_common.Defaults.network_name
+        in
+        run rest
     | PullCronImages jobs :: rest ->
         let* () = pull_cron_images jobs in
         run rest
@@ -198,22 +277,34 @@ let deploy_workload ~clock ~client ~net ~strategy input =
   | Blue_green -> Strategy.Blue_green.deploy ~clock ~client ~net ~input
   | Simple -> Simple.deploy ~clock ~client ~net input
 
+(* Everything below the plan is Bondi acting on the caller's behalf, so a
+   failure there is Bondi's fault by construction. [cron_plan] is the one step
+   that can fail on what the caller wrote, and it classifies its own error. *)
+let orchestrator_step result =
+  Result.map_error (fun m -> Orchestrator_failure m) result
+
 let run_deploy ~clock ~net input =
   Lwt_eio.run_eio @@ fun () ->
   let client = Docker.Client.create ?registry_auth:(registry_auth input) () in
+  (* The cron plan is pure and depends only on [input], so it runs before any
+     workload is touched: a rejected network declaration must not be discovered
+     after the service has already moved to a new tag. *)
+  let* actions = cron_plan input in
   match input.Simple.service_name with
   | None ->
       (* Cron-only deploy: skip main image pull and workload deployment *)
-      let* () = interpret ~client ~net (cron_plan input) in
+      let* () = orchestrator_step (interpret ~client ~net actions) in
       Ok
         (build_response ~strategy:Simple ~strategy_reason:"cron-only deploy"
            input)
   | Some _ ->
       let* strategy, strategy_reason =
-        select_strategy_and_prepare ~client ~net input
+        orchestrator_step (select_strategy_and_prepare ~client ~net input)
       in
-      let* () = deploy_workload ~clock ~client ~net ~strategy input in
-      let* () = interpret ~client ~net (cron_plan input) in
+      let* () =
+        orchestrator_step (deploy_workload ~clock ~client ~net ~strategy input)
+      in
+      let* () = orchestrator_step (interpret ~client ~net actions) in
       Ok (build_response ~strategy ~strategy_reason input)
 
 let route ~clock ~net =
@@ -231,8 +322,9 @@ let route ~clock ~net =
               |> deploy_response_to_yojson
               |> Yojson.Safe.to_string
               |> Dream.json
-          | Error msg ->
-              Dream.respond ~status:`Internal_Server_Error
-                ("Error deploying: " ^ msg))
+          | Error err ->
+              Dream.respond
+                ~status:(status_of_deploy_error err)
+                ("Error deploying: " ^ deploy_error_message err))
         (fun exn ->
           Dream.respond ~status:`Internal_Server_Error (Printexc.to_string exn))

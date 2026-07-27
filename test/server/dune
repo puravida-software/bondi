@@ -28,4 +28,12 @@
   test_blue_green_plan
   test_alloy_config
   test_alert_delivery)
- (libraries alcotest bondi.common bondi.server eio.mock server_test_helpers))
+ (libraries
+  alcotest
+  bondi.client
+  bondi.common
+  bondi.server
+  dream
+  eio.mock
+  server_test_helpers
+  yojson))

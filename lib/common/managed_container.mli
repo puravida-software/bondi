@@ -37,6 +37,10 @@ type error =
   | Empty_tag
   | Invalid_restart_policy of string
   | Invalid_port of string
+  | Unmanaged_network of string
+      (** Carries the declared network name. Bondi creates only the shared
+          network, so any other name is a container that would be unreachable or
+          a deploy that would fail at container-creation time. *)
   | Duplicate_env_key of string
   | Invalid_env_key of string
   | Invalid_env_value of string
@@ -78,6 +82,12 @@ val create :
 
     [image] and [tag] must be non-empty. A managed container is never started
     from an implied or defaulted image.
+
+    [network] must be either absent or the shared network Bondi manages. Bondi
+    creates that one and no other, so a different name would leave the container
+    on a network it cannot reach anything through, or fail at container-creation
+    time — a surprise discovered long after the declaration was written. A cron
+    job's network is validated against the same constant.
 
     [env] must not declare the same key twice. A duplicate is rejected rather
     than resolved by precedence: the losing value may be a credential, and which

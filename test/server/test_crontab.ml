@@ -176,6 +176,27 @@ let test_entry_of_cron_job () =
   check bool "contains job name" true
     (Bondi_common.String_utils.contains ~needle:"backup" entry)
 
+(* Cron only learns a run failed if the command exits non-zero, and the operator
+   only learns why if the server's message survives. Measured against curl
+   8.5.0: [curl -s] exits 0 on a 400 and prints nothing; [curl -fsS] exits 22
+   but -f discards the response body, so the message reads only "curl: (22) The
+   requested URL returned error: 400"; [curl -sS --fail-with-body] exits 22 and
+   prints the server's own text after it. A refused connection exits 7 in every
+   case. The flags sit before -X so nothing ahead of the payload can introduce
+   the "-d '" the parse anchors on. *)
+let test_crontab_entry_fails_on_http_error () =
+  let job =
+    mk_cron_job ~name:"backup" ~image:"myimg:v1" ~schedule:"0 * * * *" ()
+  in
+  let entry = Crontab.entry_of_cron_job job in
+  check bool "curl runs with the failing flags ahead of the payload" true
+    (Bondi_common.String_utils.contains
+       ~needle:"/usr/bin/curl -sS --fail-with-body -X POST" entry);
+  (* -f alone would satisfy the exit-code half while discarding the body that
+     carries the reason, so its absence is asserted rather than implied. *)
+  check bool "the body-discarding -f form is not what is emitted" false
+    (Bondi_common.String_utils.contains ~needle:"-fsS" entry)
+
 let test_generate_bondi_entries () =
   let jobs =
     [
@@ -241,6 +262,29 @@ let test_parse_scheduled_jobs_empty () =
     "empty input" []
     (Crontab.parse_scheduled_jobs [])
 
+(* The server reads its own crontab back. This is the "after" arm — the
+   line comes from [entry_of_cron_job] rather than a literal, so it cannot drift
+   from what is actually emitted. The hand-written [curl -s] fixtures above are
+   the "before" arm: [upsert] leaves entries for jobs absent from a deploy
+   untouched, so pre-hardening lines outlive this change and must still parse. *)
+let test_crontab_parse_reads_hardened_line () =
+  let job =
+    mk_cron_job ~name:"backup" ~image:"ghcr.io/org/backup:v2.1.0"
+      ~schedule:"0 * * * *" ()
+  in
+  let line = Crontab.entry_of_cron_job job in
+  check (option string) "job name from hardened line" (Some "backup")
+    (Crontab.job_name_from_cron_line line);
+  check (option string) "image from hardened line"
+    (Some "ghcr.io/org/backup:v2.1.0")
+    (Crontab.image_from_cron_line line);
+  check
+    (list scheduled_job_testable)
+    "scheduled jobs from hardened line"
+    [ { name = "backup"; image = "ghcr.io/org/backup:v2.1.0" } ]
+    (Crontab.parse_scheduled_jobs
+       [ "# BEGIN BONDI CRON"; line; "# END BONDI CRON" ])
+
 let () =
   run "Crontab"
     [
@@ -273,6 +317,8 @@ let () =
             test_cron_line_absent_network_round_trips;
           test_case "preserves alert config" `Quick
             test_cron_alert_config_round_trip;
+          test_case "fails on http error" `Quick
+            test_crontab_entry_fails_on_http_error;
         ] );
       ( "generate_bondi_entries",
         [
@@ -287,5 +333,7 @@ let () =
           test_case "parse scheduled jobs" `Quick test_parse_scheduled_jobs;
           test_case "parse scheduled jobs empty" `Quick
             test_parse_scheduled_jobs_empty;
+          test_case "parse reads hardened line" `Quick
+            test_crontab_parse_reads_hardened_line;
         ] );
     ]

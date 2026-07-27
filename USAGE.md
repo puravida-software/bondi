@@ -23,6 +23,7 @@ The example service throughout this guide is a web API called `my-api`, publishe
 - [4. Alloy (Grafana Cloud Logs)](#4-alloy-grafana-cloud-logs)
 - [5. Managed Containers](#5-managed-containers)
 - [6. Status and Troubleshooting](#6-status-and-troubleshooting)
+- [7. Upgrading Bondi](#7-upgrading-bondi)
 
 ---
 
@@ -35,6 +36,7 @@ Before you start, you need:
 - **A Docker image** for your service, pushed to a registry (Docker Hub, GHCR, etc.)
 - **DNS records** — an `A` (or `AAAA`) record pointing your domain to the server IP
 - **Firewall rules** — inbound ports `80/tcp` and `443/tcp` must be open (Traefik handles TLS)
+- **`curl` 7.76 or later on the server**, if you use [cron jobs](#3-cron-jobs) — the crontab line Bondi writes uses `--fail-with-body`, so that a failed run both exits non-zero and carries the reason into cron's mail. `bondi setup` checks this and stops with the version it found if the server's curl is older. Debian 12 and Ubuntu 22.04 or later are fine; Debian 11 and Ubuntu 20.04 are not.
 
 Install the CLI:
 
@@ -317,7 +319,7 @@ Key differences from services:
 
 ### Reaching other containers from a cron job
 
-By default a cron job's container runs on Docker's default bridge network and cannot reach other Bondi containers by name. Add a `network` field to attach it to a named Docker network:
+By default a cron job's container runs on Docker's default bridge network and cannot reach other Bondi containers by name. Add `network: bondi-network` to attach it to Bondi's shared network:
 
 ```yaml
 cron_jobs:
@@ -333,9 +335,21 @@ cron_jobs:
         private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
 ```
 
-`bondi-network` is created by `bondi setup` on every server, so it is available without any extra step. A cron job attached to it can reach any other container on that network by container name — for example a [managed container](#5-managed-containers) at `bondi-gateway:4002`.
+`bondi-network` is created by `bondi setup`, and `bondi deploy` also ensures it exists before writing the crontab — so a job on the shared network works even on a server that has only ever been deployed to. A cron job attached to it can reach any other container on that network by container name — for example a [managed container](#5-managed-containers) at `bondi-gateway:4002`.
 
-The field is optional. Omitting it leaves the container on the default bridge, which is the previous behaviour. The name is not validated against the server: if the network does not exist, the cron run fails at container-creation time with a Docker error.
+The field is optional. Omitting it leaves the container on the default bridge, which is the previous behaviour.
+
+`bondi-network` is the only value the field accepts. Bondi creates that network and no other, so a cron job declaring a different name is rejected when you deploy, rather than failing later at container-creation time:
+
+```
+Non-OK response from server 203.0.113.10: Error deploying: cron jobs declare networks bondi does not manage (daily-backup declares my-other-network). bondi manages only bondi-network: declare that instead, and attach the containers these jobs must reach to bondi-network too
+```
+
+Every offending job is named in one message, so a config with several mistakes takes one deploy to find them all rather than one each.
+
+The check is on the declared name alone — Bondi never asks the server which networks exist — so creating `my-other-network` on the server yourself does not clear the error. Change the declaration instead.
+
+The check runs before anything is deployed. A combined `bondi deploy my-api:v2.0.0 daily-backup:v1.0.0` that fails this way leaves both the service and the crontab exactly as they were, so correcting the network and re-running is the whole remedy.
 
 Run `bondi setup` again if this is the first time adding cron jobs (the orchestrator needs to be restarted with cron support).
 
@@ -365,6 +379,23 @@ cron_jobs:
         private_key_contents: "{{SSH_PRIVATE_KEY_CONTENTS}}"
         private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
 ```
+
+### When a run fails
+
+Bondi reports a failed run through two independent channels.
+
+The first is cron itself. The crontab line Bondi writes exits non-zero when the run cannot be started or the server rejects the request, so the failure lands in cron's own record and in the mail cron sends to the account owning the crontab. The server's explanation is included rather than swallowed:
+
+```
+curl: (22) The requested URL returned error: 400
+Run failed: invalid run payload: Run.run_payload (keys received: job, imag)
+```
+
+This channel needs no configuration and is the only one that works when the failure happens before the server can know which job it was — a refused connection, or a request the server cannot decode. A rejected body is reported by the keys that arrived, never by their values, so an environment variable or a sink URL carrying a credential is not echoed into your mail spool.
+
+The second channel is alerting, below, which needs sinks configured and fires once the server knows which job ran.
+
+If a cron job you deployed before upgrading Bondi still fails silently, its crontab line predates this behaviour — re-deploy that job once to replace it.
 
 ### Alerting on job outcomes
 
@@ -535,7 +566,7 @@ managed_containers:
 | `image` | yes | Base image **without a tag**. |
 | `tag` | yes | The exact tag to run. There is no default and no floating tag — you pin the version, and changing it is what triggers a recreate. |
 | `restart` | yes | Docker restart policy: `no`, `on-failure`, `always` or `unless-stopped`. There is no default. |
-| `network` | no | Docker network to join. Use `bondi-network` to be reachable from your service and cron jobs by container name. Any other network must already exist on the server — Bondi creates `bondi-network` and nothing else, and a container declaring a network that is absent fails at container-creation time with a Docker error. |
+| `network` | no | Docker network to join. `bondi-network` is the only value the field accepts — use it to be reachable from your service and cron jobs by container name. Bondi creates that network and no other, so any other name is rejected when `bondi.yaml` is read, before any server is contacted. Omit the field to leave the container on the default bridge. |
 | `ports` | no | Published port mappings, each written `"<host>:<container>"`. Each binds on all host interfaces (`0.0.0.0`), so on a public-facing server a published port is internet-reachable unless firewalled — omit this and use the shared network for container-to-container access. |
 | `env_vars` | no | Environment variables passed inline. Visible in `docker inspect`. |
 | `secret_env_vars` | no | Environment variables passed by file reference. Not visible in `docker inspect` or in any process listing. |
@@ -700,3 +731,61 @@ alloy:
   labels:
     env: production
 ```
+
+---
+
+## 7. Upgrading Bondi
+
+Bondi rejects any configuration or deploy payload carrying a field it does not recognise. That makes the upgrade order a requirement rather than a recommendation, and the hazard runs in both directions:
+
+- **Old CLI, new config.** A `bondi.yaml` using a field your installed CLI predates is rejected when the file is read, before any server is contacted:
+
+  ```
+  Error reading configuration: invalid bondi.yaml: Config_file.cron_job
+  ```
+
+- **New CLI, old orchestrator.** A CLI that sends a field the orchestrator on the server predates has the deploy rejected with a 400:
+
+  ```
+  Non-OK response from server 203.0.113.10: Bad request: invalid deploy payload: Simple.cron_job
+  ```
+
+Neither case half-applies your change, but neither message names the offending field either, so an upgrade taken out of order costs you a puzzle. A misspelled field is rejected the same way and reads identically: strictness is deliberate, because a tolerated `alertSinks` would ship the job with alerting silently disabled.
+
+Upgrade in this order:
+
+1. **Release and tag** the Bondi version you intend to run, so both the CLI and the orchestrator image exist at that version.
+
+2. **Update the installed CLI:**
+
+   ```bash
+   brew upgrade bondi
+   ```
+
+3. **Update the orchestrator on every server.** Set `bondi_server.version` in `bondi.yaml` to the new version, then:
+
+   ```bash
+   bondi setup
+   ```
+
+   `bondi setup` is what replaces the orchestrator container, so this step is what makes the server able to accept the new fields. `bondi deploy` never upgrades the orchestrator.
+
+4. **Only now add configuration using the new fields**, and deploy:
+
+   ```bash
+   bondi deploy my-api:v2.0.0 daily-backup:v1.0.0
+   ```
+
+Step 3 before step 4 is the part that is easy to get wrong, because step 3 looks like it only bumps a version string.
+
+### Before the first deploy after an upgrade
+
+- Check that every cron job's `network` is either absent or exactly `bondi-network`, and the same for every managed container's `network`. Any other value now fails before anything is deployed instead of failing at run time — see [Reaching other containers from a cron job](#reaching-other-containers-from-a-cron-job).
+
+- **Re-deploy every cron job once.** A deploy only rewrites the crontab lines for the jobs named in it; lines for other jobs are carried over from the existing crontab untouched. A job that is not re-deployed keeps its old command and stays silent when it fails, however new the orchestrator is. Name them all in one deploy:
+
+  ```bash
+  bondi deploy daily-backup:v1.0.0 nightly-report:v1.0.0
+  ```
+
+  This is also what applies the failure reporting described in [When a run fails](#when-a-run-fails) to jobs that predate the upgrade.
