@@ -31,3 +31,12 @@ let string_map_of_yojson json =
   | _ -> Error "expected object for string_map"
 
 let string_map_to_yojson map = assoc_of_list (fun value -> `String value) map
+
+(* The keys of a JSON object, in document order, for describing a payload a
+   decoder rejected. Values are never returned: the caller puts the result in
+   an error message that may travel over HTTP, and a value may be a credential.
+   A non-object has no keys rather than being an error, because the caller is
+   already reporting a failure and has nothing to do with a second one. *)
+let top_level_keys = function
+  | `Assoc fields -> List.map fst fields
+  | _ -> []

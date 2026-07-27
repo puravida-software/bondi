@@ -54,6 +54,45 @@ let test_create_rejects_empty_fields () =
   rejects "empty image" M.Empty_image (spec ~image:"" ());
   rejects "empty tag" M.Empty_tag (spec ~tag:"" ())
 
+(* Bondi creates [bondi-network] and no other, so a container declaring a
+   different name would be handed an empty network it can reach nothing
+   through, or fail at container-creation time with a Docker error — the same
+   silent-then-obscure failure a cron job declaring one is rejected for. The
+   rejection happens here, in the smart constructor, so the two declarations of
+   the same field cannot diverge. *)
+let test_create_rejects_an_unmanaged_network () =
+  rejects "a network bondi does not manage"
+    (M.Unmanaged_network "other-network")
+    (spec ~network:(Some "other-network") ());
+  rejects "a typo of the managed network" (M.Unmanaged_network "bondi-netwrok")
+    (spec ~network:(Some "bondi-netwrok") ())
+
+(* The affirmative arms: the one accepted name, and the absence of the field.
+   Without these a constructor that rejected every network would pass above. *)
+let test_create_accepts_the_managed_network_and_none () =
+  (match spec ~network:(Some Bondi_common.Defaults.network_name) () with
+  | Ok built ->
+      check (option string) "the managed network survives"
+        (Some Bondi_common.Defaults.network_name) (M.network built)
+  | Error e ->
+      fail ("the managed network must be accepted: " ^ M.error_to_string e));
+  match spec ~network:None () with
+  | Ok built ->
+      check (option string) "declaring no network stays absent" None
+        (M.network built)
+  | Error e -> fail ("no network must be accepted: " ^ M.error_to_string e)
+
+(* The message must name what was declared and what is accepted; an operator
+   reading only "invalid network" cannot tell which of the two it was. *)
+let test_unmanaged_network_message_names_both () =
+  let msg = M.error_to_string (M.Unmanaged_network "other-network") in
+  List.iter
+    (fun needle ->
+      check bool
+        (Printf.sprintf "the message names %s: %s" needle msg)
+        true (contains ~needle msg))
+    [ "other-network"; Bondi_common.Defaults.network_name ]
+
 let test_create_accepts_conventional_names () =
   let accepts name =
     match spec ~name () with
@@ -131,8 +170,9 @@ let test_spec_hash_covers_every_field () =
   differs "image" (built ~image:"ghcr.io/acme/ib-gateway" ());
   differs "tag" (built ~tag:"10.45.1h" ());
   differs "restart" (built ~restart:M.Always ());
+  (* Only [Some bondi-network] and [None] are constructible, so withdrawing the
+     field is the only mutation this arm can make. *)
   differs "network" (built ~network:None ());
-  differs "network value" (built ~network:(Some "other-network") ());
   differs "ports" (built ~ports:[ { M.host = 4001; container = 4002 } ] ());
   differs "port count" (built ~ports:[] ());
   differs "plain env value"
@@ -428,6 +468,12 @@ let () =
             test_create_rejects_empty_fields;
           test_case "accepts conventional names" `Quick
             test_create_accepts_conventional_names;
+          test_case "rejects an unmanaged network" `Quick
+            test_create_rejects_an_unmanaged_network;
+          test_case "accepts the managed network and none" `Quick
+            test_create_accepts_the_managed_network_and_none;
+          test_case "unmanaged network message names both" `Quick
+            test_unmanaged_network_message_names_both;
           test_case "accessors return declared values" `Quick
             test_accessors_return_declared_values;
           test_case "rejects duplicate env keys" `Quick

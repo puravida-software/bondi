@@ -1,6 +1,7 @@
 open Alcotest
 module Deploy = Bondi_client.Cmd.Deploy
 module Config_file = Bondi_client.Config_file
+module Alert = Bondi_common.Alert
 
 let result_testable ok_t =
   testable
@@ -68,7 +69,8 @@ let mk_service name : Config_file.user_service =
     logs = None;
   }
 
-let mk_cron_job ?network name ip : Config_file.cron_job =
+let mk_cron_job ?network ?alert_sinks ?exit_code_severities name ip :
+    Config_file.cron_job =
   {
     name;
     image = "img";
@@ -77,8 +79,8 @@ let mk_cron_job ?network name ip : Config_file.cron_job =
     env_vars = None;
     registry_user = None;
     registry_pass = None;
-    alert_sinks = None;
-    exit_code_severities = None;
+    alert_sinks;
+    exit_code_severities;
     server = { ip_address = ip; ssh = None; port = None };
   }
 
@@ -149,6 +151,113 @@ let test_cron_job_to_deploy_absent_network () =
   let job = mk_cron_job "backup" "1.2.3.4" in
   let result = Deploy.cron_job_to_deploy job ~image:"img:v1" in
   check (option string) "absent network stays absent" None result.network
+
+let alerting_sinks () =
+  match
+    Alert.sinks_of_yojson
+      (Yojson.Safe.from_string
+         {|{"critical":["https://pager.example.com/hook"],"failure":["https://dash.example.com/hook"]}|})
+  with
+  | Ok s -> s
+  | Error msg -> Alcotest.fail ("bad sinks fixture: " ^ msg)
+
+let alerting_severities () =
+  match
+    Alert.severity_map_of_yojson (Yojson.Safe.from_string {|{"critical":[70]}|})
+  with
+  | Ok m -> m
+  | Error e ->
+      Alcotest.fail
+        ("bad severity fixture: " ^ Alert.severity_map_error_to_string e)
+
+let alerting_cron_job () =
+  mk_cron_job ~alert_sinks:(alerting_sinks ())
+    ~exit_code_severities:(alerting_severities ()) "backup" "1.2.3.4"
+
+let test_cron_job_to_deploy_carries_alert_sinks () =
+  let result =
+    Deploy.cron_job_to_deploy (alerting_cron_job ()) ~image:"img:v1"
+  in
+  match result.alert_sinks with
+  | None -> Alcotest.fail "alert_sinks did not reach the deploy payload"
+  | Some Alert.{ critical; failure } ->
+      check (list string) "critical sinks"
+        [ "https://pager.example.com/hook" ]
+        (List.map Alert.sink_url critical);
+      check (list string) "failure sinks"
+        [ "https://dash.example.com/hook" ]
+        (List.map Alert.sink_url failure)
+
+(* Observed through the classifier because the map is abstract: 70 is the
+   configured critical override, and the defaults still apply to the codes the
+   map does not mention. Asserting the slot holds a working severity map is what
+   catches the map landing in the wrong field. *)
+let test_cron_job_to_deploy_carries_exit_code_severities () =
+  let result =
+    Deploy.cron_job_to_deploy (alerting_cron_job ()) ~image:"img:v1"
+  in
+  match result.exit_code_severities with
+  | None ->
+      Alcotest.fail "exit_code_severities did not reach the deploy payload"
+  | Some map ->
+      check bool "code 70 is critical" true
+        (Alert.severity_of_exit_code map 70 = Alert.Critical);
+      check bool "code 1 defaults to failure" true
+        (Alert.severity_of_exit_code map 1 = Alert.Failure);
+      check bool "code 0 defaults to success" true
+        (Alert.severity_of_exit_code map 0 = Alert.Success)
+
+(* The server decodes by string key, so these two key names are the contract the
+   matching decode in test/server asserts against. *)
+let test_deploy_wire_keys_for_alert_config () =
+  let json =
+    Deploy.deploy_cron_job_to_yojson
+      (Deploy.cron_job_to_deploy (alerting_cron_job ()) ~image:"img:v1")
+  in
+  match json with
+  | `Assoc fields ->
+      check bool "emits the \"alert_sinks\" key" true
+        (List.mem_assoc "alert_sinks" fields);
+      check bool "emits the \"exit_code_severities\" key" true
+        (List.mem_assoc "exit_code_severities" fields);
+      check (option string) "critical sink survives encoding"
+        (Some "https://pager.example.com/hook")
+        (match List.assoc_opt "alert_sinks" fields with
+        | Some (`Assoc sink_fields) -> (
+            match List.assoc_opt "critical" sink_fields with
+            | Some (`List [ `String url ]) -> Some url
+            | Some _
+            | None ->
+                None)
+        | Some _
+        | None ->
+            None);
+      check (option string) "critical exit codes survive encoding" (Some "[70]")
+        (match List.assoc_opt "exit_code_severities" fields with
+        | Some (`Assoc severity_fields) ->
+            Option.map Yojson.Safe.to_string
+              (List.assoc_opt "critical" severity_fields)
+        | Some _
+        | None ->
+            None)
+  | _ -> Alcotest.fail "expected a JSON object"
+
+(* A job with no alert config must emit no key at all, not a null: the payload
+   bytes stay identical to what a pre-alerting server already accepts. *)
+let test_deploy_wire_omits_alert_fields_when_unconfigured () =
+  let json =
+    Deploy.deploy_cron_job_to_yojson
+      (Deploy.cron_job_to_deploy
+         (mk_cron_job "backup" "1.2.3.4")
+         ~image:"img:v1")
+  in
+  match json with
+  | `Assoc fields ->
+      check bool "omits the \"alert_sinks\" key" false
+        (List.mem_assoc "alert_sinks" fields);
+      check bool "omits the \"exit_code_severities\" key" false
+        (List.mem_assoc "exit_code_severities" fields)
+  | _ -> Alcotest.fail "expected a JSON object"
 
 (* The server decodes this into its own structurally-duplicate cron_job, so the
    emitted key is pinned here and the matching decode in test/server. *)
@@ -238,6 +347,14 @@ let () =
             test_cron_job_to_deploy_absent_network;
           test_case "wire key is network" `Quick
             test_cron_job_wire_key_is_network;
+          test_case "carries alert_sinks" `Quick
+            test_cron_job_to_deploy_carries_alert_sinks;
+          test_case "carries exit_code_severities" `Quick
+            test_cron_job_to_deploy_carries_exit_code_severities;
+          test_case "wire keys for alert config" `Quick
+            test_deploy_wire_keys_for_alert_config;
+          test_case "omits alert fields when unconfigured" `Quick
+            test_deploy_wire_omits_alert_fields_when_unconfigured;
         ] );
       ( "deploy_payload",
         [

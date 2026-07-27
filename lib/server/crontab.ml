@@ -113,13 +113,27 @@ let parse_bondi_section lines =
 
 let string_of_lines lines = String.concat "\n" lines ^ "\n"
 
+(* These flags are what make a failed run both visible and explicable to cron.
+   Plain -s exits 0 on a non-2xx response, so cron records a success and the
+   missed run disappears; --fail-with-body supplies the non-zero exit and,
+   unlike -f, keeps the response body, so the server's own message — which names
+   the job and why it was rejected — lands in cron's mail instead of a bare
+   "returned error: 400". -S restores the error line that -s suppresses.
+
+   --fail-with-body requires curl 7.76.0 on the host running cron; [bondi setup]
+   verifies that before writing any of these lines, because an older curl
+   rejects the option as unknown and would fail every scheduled job at once.
+
+   The flags precede -X because the parse anchors on the first "-d '" — nothing
+   added ahead of the payload may introduce that sequence. *)
 let entry_of_cron_job (c : Strategy.Simple.cron_job) =
   let payload = run_payload_of_cron_job c in
   let json_str = run_payload_to_yojson payload |> Yojson.Safe.to_string in
   let escaped = escape_for_shell json_str in
   Printf.sprintf
-    "%s /usr/bin/curl -s -X POST http://localhost:3030/api/v1/run -H \
-     \"Content-Type: application/json\" -d '%s'"
+    "%s /usr/bin/curl -sS --fail-with-body -X POST \
+     http://localhost:3030/api/v1/run -H \"Content-Type: application/json\" -d \
+     '%s'"
     c.schedule escaped
 
 let generate_bondi_entries cron_jobs =

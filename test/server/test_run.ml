@@ -145,6 +145,174 @@ let test_plan_for_payload_critical_map_targets_critical_sinks () =
         [ "https://page.example.com/x" ]
         (List.map Alert.sink_url dispatch.Alert.targets)
 
+(* The pre-start half of [/run]. [Run.prepare] is the seam these exercise
+   because everything past it needs a Docker client and an Eio net; the two
+   status cases assert the failure classifier, which is what [route] reads. *)
+
+let alerting_sinks_json =
+  `Assoc
+    [
+      ("critical", `List [ `String "https://page.example.com/x" ]);
+      ("failure", `List [ `String "https://sink.example.com/x" ]);
+    ]
+
+let run_body ?alert_sinks ~image () =
+  let fields =
+    [ ("job", `String "nightly"); ("image", `String image) ]
+    @
+    match alert_sinks with
+    | None -> []
+    | Some sinks -> [ ("alert_sinks", sinks) ]
+  in
+  Yojson.Safe.to_string (`Assoc fields)
+
+let recording_deliver dispatched ~targets ~payload:_ =
+  dispatched := !dispatched @ [ List.map Alert.sink_url targets ]
+
+let prepare_must_fail ~deliver body =
+  match Run.prepare ~deliver body with
+  | Ok _ -> Alcotest.fail ("prepare accepted a body it must reject: " ^ body)
+  | Error err -> err
+
+(* Without this the dispatch tests are vacuous in the same direction: a fixture
+   the decoder rejected would also dispatch nothing, and the absence arm would
+   pass for the wrong reason. *)
+let check_untagged_image_failure err =
+  Alcotest.(check bool)
+    "the failure is the untagged image, not an earlier rejection" true
+    (Bondi_common.String_utils.contains ~needle:"has no tag"
+       (Run.run_error_message err))
+
+let test_prepare_accepts_a_tagged_image () =
+  let dispatched = ref [] in
+  match
+    Run.prepare
+      ~deliver:(recording_deliver dispatched)
+      (run_body ~alert_sinks:alerting_sinks_json ~image:"myapp:v1" ())
+  with
+  | Error err ->
+      Alcotest.fail
+        ("prepare rejected a valid body: " ^ Run.run_error_message err)
+  | Ok (payload, full_image) ->
+      Alcotest.(check string) "the tagged image survives" "myapp:v1" full_image;
+      Alcotest.(check string) "the job name survives" "nightly" payload.Run.job;
+      Alcotest.(check (list (list string)))
+        "a run that is about to start dispatches nothing" [] !dispatched
+
+let test_run_dispatches_alert_on_image_parse_failure () =
+  let dispatched = ref [] in
+  let body = run_body ~alert_sinks:alerting_sinks_json ~image:"myapp" () in
+  check_untagged_image_failure
+    (prepare_must_fail ~deliver:(recording_deliver dispatched) body);
+  (* Only the failure sink: a job that never started routes to [Failure], so a
+     dispatch reaching the critical sink would be a mis-route, not a pass. *)
+  Alcotest.(check (list (list string)))
+    "one alert, routed to the configured failure sink"
+    [ [ "https://sink.example.com/x" ] ]
+    !dispatched
+
+let test_run_dispatches_no_alert_when_unconfigured () =
+  let dispatched = ref [] in
+  let body = run_body ~image:"myapp" () in
+  check_untagged_image_failure
+    (prepare_must_fail ~deliver:(recording_deliver dispatched) body);
+  Alcotest.(check (list (list string)))
+    "the same failure with no sinks configured dispatches nothing" []
+    !dispatched
+
+let test_run_status_for_malformed_body () =
+  let dispatched = ref [] in
+  let err =
+    prepare_must_fail ~deliver:(recording_deliver dispatched) "{\"job\": "
+  in
+  Alcotest.(check int)
+    "a malformed body answers a client error, not 404" 400
+    (Dream.status_to_int (Run.status_of_run_error err));
+  Alcotest.(check (list (list string)))
+    "a body that names no job has no sinks to alert to" [] !dispatched
+
+(* The ppx names only the type that failed, so on its own the message cannot
+   tell a misspelled key from a missing one. The keys that arrived are named to
+   close that gap; their values never are, because a run payload carries
+   env_vars and sink URLs that may embed credentials and this message is
+   returned over HTTP and mailed by cron. *)
+let test_run_decode_error_names_keys_not_values () =
+  let dispatched = ref [] in
+  let body =
+    Yojson.Safe.to_string
+      (`Assoc
+         [
+           ("job", `String "nightly");
+           ("imag", `String "myapp:v1");
+           ("env_vars", `Assoc [ ("TOKEN", `String "s3cr3t") ]);
+         ])
+  in
+  let msg =
+    Run.run_error_message
+      (prepare_must_fail ~deliver:(recording_deliver dispatched) body)
+  in
+  List.iter
+    (fun needle ->
+      Alcotest.(check bool)
+        (Printf.sprintf "the message names the key %s: %s" needle msg)
+        true
+        (Bondi_common.String_utils.contains ~needle msg))
+    [ "job"; "imag"; "env_vars" ];
+  Alcotest.(check bool)
+    ("no value from the rejected body is echoed: " ^ msg)
+    false
+    (Bondi_common.String_utils.contains ~needle:"s3cr3t" msg)
+
+(* Cleanup runs only when the container both started and finished. Removing the
+   previous container before a failed run has been reported would destroy the
+   only copy of what ran last, and renaming a container that never started has
+   nothing to rename — so both failure arms skip it and carry no warning. *)
+let warning_with ~started ~run_result =
+  let cleaned = ref false in
+  let warning =
+    Run.warning_of_run ~started ~run_result ~cleanup:(fun _container_id ->
+        cleaned := true;
+        Some "cleanup ran")
+  in
+  (!cleaned, warning)
+
+let test_warning_runs_cleanup_when_the_run_completed () =
+  let cleaned, warning =
+    warning_with ~started:(Ok "abc123") ~run_result:(Ok 0)
+  in
+  Alcotest.(check bool) "a completed run cleans up" true cleaned;
+  Alcotest.(check (option string))
+    "and carries whatever the cleanup reported" (Some "cleanup ran") warning
+
+let test_warning_skips_cleanup_when_the_wait_failed () =
+  let cleaned, warning =
+    warning_with ~started:(Ok "abc123") ~run_result:(Error "wait failed")
+  in
+  Alcotest.(check bool)
+    "a run that never finished does not clean up" false cleaned;
+  Alcotest.(check (option string)) "and carries no warning" None warning
+
+let test_warning_skips_cleanup_when_the_start_failed () =
+  let cleaned, warning =
+    warning_with ~started:(Error "no such image")
+      ~run_result:(Error "no such image")
+  in
+  Alcotest.(check bool)
+    "a run that never started does not clean up" false cleaned;
+  Alcotest.(check (option string)) "and carries no warning" None warning
+
+let test_run_status_for_orchestrator_failure () =
+  match
+    Run.response_of_run_result ~warning:None
+      (Error "docker http 500: internal server error")
+  with
+  | Ok _ ->
+      Alcotest.fail "a Docker-level failure must not answer as a run result"
+  | Error err ->
+      Alcotest.(check int)
+        "an orchestrator fault answers a server error, not 404" 500
+        (Dream.status_to_int (Run.status_of_run_error err))
+
 let test_run_outcome_from_exit_code () =
   Alcotest.check outcome_testable "completed run classifies as Exited n"
     (Alert.Exited 137)
@@ -206,6 +374,33 @@ let () =
             test_plan_for_payload_success_dispatches_nothing;
           Alcotest.test_case "critical map targets critical sinks" `Quick
             test_plan_for_payload_critical_map_targets_critical_sinks;
+        ] );
+      ( "prepare",
+        [
+          Alcotest.test_case "accepts a tagged image" `Quick
+            test_prepare_accepts_a_tagged_image;
+          Alcotest.test_case "dispatches an alert on image parse failure" `Quick
+            test_run_dispatches_alert_on_image_parse_failure;
+          Alcotest.test_case "dispatches no alert when unconfigured" `Quick
+            test_run_dispatches_no_alert_when_unconfigured;
+          Alcotest.test_case "decode error names keys, not values" `Quick
+            test_run_decode_error_names_keys_not_values;
+        ] );
+      ( "run failure status",
+        [
+          Alcotest.test_case "malformed body" `Quick
+            test_run_status_for_malformed_body;
+          Alcotest.test_case "orchestrator failure" `Quick
+            test_run_status_for_orchestrator_failure;
+        ] );
+      ( "warning_of_run",
+        [
+          Alcotest.test_case "cleans up after a completed run" `Quick
+            test_warning_runs_cleanup_when_the_run_completed;
+          Alcotest.test_case "skips cleanup when the wait failed" `Quick
+            test_warning_skips_cleanup_when_the_wait_failed;
+          Alcotest.test_case "skips cleanup when the start failed" `Quick
+            test_warning_skips_cleanup_when_the_start_failed;
         ] );
       ( "combine_warnings",
         [

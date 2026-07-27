@@ -11,6 +11,7 @@ let action_string = function
   | Setup.EnsureDocker -> "EnsureDocker"
   | Setup.EnsureAcmeFile -> "EnsureAcmeFile"
   | Setup.EnsureNetwork name -> "EnsureNetwork " ^ name
+  | Setup.RequireCronCurl -> "RequireCronCurl"
   | Setup.StopOrchestrator -> "StopOrchestrator"
   | Setup.RunServer -> "RunServer"
   | Setup.EnsureAlloyConfig -> "EnsureAlloyConfig"
@@ -31,6 +32,7 @@ let is_ensure_network = function
   | Setup.EnsureNetwork _ -> true
   | Setup.EnsureDocker
   | Setup.EnsureAcmeFile
+  | Setup.RequireCronCurl
   | Setup.StopOrchestrator
   | Setup.RunServer
   | Setup.EnsureAlloyConfig
@@ -54,6 +56,7 @@ let joins_network = function
   | Setup.EnsureDocker
   | Setup.EnsureAcmeFile
   | Setup.EnsureNetwork _
+  | Setup.RequireCronCurl
   | Setup.StopOrchestrator
   | Setup.EnsureAlloyConfig
   | Setup.StopAlloy
@@ -76,6 +79,7 @@ let is_managed = function
   | Setup.EnsureDocker
   | Setup.EnsureAcmeFile
   | Setup.EnsureNetwork _
+  | Setup.RequireCronCurl
   | Setup.StopOrchestrator
   | Setup.RunServer
   | Setup.EnsureAlloyConfig
@@ -341,8 +345,70 @@ let test_plan_cron_only_no_acme () =
     (List.mem Setup.EnsureAcmeFile actions)
     false;
   check_actions
-    ~expected:[ "EnsureDocker"; "EnsureNetwork bondi-network"; "RunServer" ]
+    ~expected:
+      [
+        "EnsureDocker";
+        "EnsureNetwork bondi-network";
+        "RequireCronCurl";
+        "RunServer";
+      ]
     actions
+
+(* The crontab command the orchestrator writes uses --fail-with-body, which an
+   older curl rejects as an unknown option. Verifying the host's curl at setup
+   turns that into one loud failure here rather than every scheduled job
+   failing at its next tick. The check precedes RunServer, so an unusable host
+   never gets an orchestrator that would write lines it cannot run. *)
+let test_plan_requires_curl_when_cron_jobs_declared () =
+  let cron_job =
+    {
+      Config_file.name = "backup";
+      Config_file.image = "backup:v1";
+      Config_file.schedule = "0 0 * * *";
+      Config_file.network = None;
+      Config_file.env_vars = None;
+      Config_file.registry_user = None;
+      Config_file.registry_pass = None;
+      Config_file.alert_sinks = None;
+      Config_file.exit_code_severities = None;
+      Config_file.server = minimal_server;
+    }
+  in
+  let config =
+    make_config ~user_service:None ~cron_jobs:(Some [ cron_job ])
+      ~version:"1.0.0" ()
+  in
+  let context =
+    ctx ~running_version:None ~docker_installed:true ~acme_exists:false ()
+  in
+  let actions = plan config context in
+  let index_of target =
+    let rec find i = function
+      | [] -> None
+      | action :: rest -> if action = target then Some i else find (i + 1) rest
+    in
+    find 0 actions
+  in
+  match (index_of Setup.RequireCronCurl, index_of Setup.RunServer) with
+  | None, _ -> fail "a config declaring cron jobs must verify the host's curl"
+  | _, None -> fail "the plan must still run the server"
+  | Some curl, Some server ->
+      check bool "the curl check precedes RunServer" true (curl < server)
+
+(* The affirmative arm above with the cron jobs removed: a host that runs no
+   cron jobs never sees a bondi crontab line, so requiring a curl version of it
+   would be a prerequisite it does not owe. *)
+let test_plan_omits_curl_check_without_cron_jobs () =
+  let config =
+    make_config ~user_service:(Some minimal_user_service) ~cron_jobs:None
+      ~version:"1.0.0" ()
+  in
+  let context =
+    ctx ~running_version:None ~docker_installed:true ~acme_exists:true ()
+  in
+  check bool "no curl requirement without cron jobs"
+    (List.mem Setup.RequireCronCurl (plan config context))
+    false
 
 let test_setup_plans_ensure_network () =
   let config =
@@ -848,6 +914,13 @@ let () =
             test_plan_cron_jobs_force_restart;
         ] );
       ("order", [ test_case "action order" `Quick test_plan_action_order ]);
+      ( "cron curl",
+        [
+          test_case "required when cron jobs are declared" `Quick
+            test_plan_requires_curl_when_cron_jobs_declared;
+          test_case "omitted without cron jobs" `Quick
+            test_plan_omits_curl_check_without_cron_jobs;
+        ] );
       ( "network",
         [
           test_case "planned for the shared network" `Quick

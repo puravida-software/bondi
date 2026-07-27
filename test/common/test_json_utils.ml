@@ -65,6 +65,24 @@ let test_encode_decodes_via_string () =
     (list (pair string string))
     "encode produces parseable JSON" input result
 
+(* Used to describe a payload a decoder rejected. Only the keys are returned:
+   the caller attaches them to an error message that may be surfaced over HTTP,
+   and the values may be credentials. *)
+let test_top_level_keys_of_object () =
+  let json =
+    `Assoc
+      [
+        ("job", `String "nightly");
+        ("env_vars", `Assoc [ ("TOKEN", `String "s3cr3t") ]);
+      ]
+  in
+  check (list string) "keys in document order, no nesting" [ "job"; "env_vars" ]
+    (Json_utils.top_level_keys json)
+
+let test_top_level_keys_of_non_object () =
+  check (list string) "a JSON value that is not an object has no keys" []
+    (Json_utils.top_level_keys (`List [ `String "a" ]))
+
 let () =
   run "Json_helpers"
     [
@@ -87,5 +105,10 @@ let () =
         [
           test_case "produces parseable JSON" `Quick
             test_encode_decodes_via_string;
+        ] );
+      ( "top_level_keys",
+        [
+          test_case "object" `Quick test_top_level_keys_of_object;
+          test_case "non-object" `Quick test_top_level_keys_of_non_object;
         ] );
     ]
