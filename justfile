@@ -6,14 +6,29 @@ IMAGE_NAME := "mlopez1506/bondi-server"
 
 default: build test fmt lint build-server-ci
 
+# Verification sits before the push for the same reason it does in the release
+# workflow: nothing reaches the registry that has not been shown to run.
 # Assumes bondi.yaml has a service named "bondi"
-docker-all TAG: (build-server TAG) (tag-server TAG) (push-server TAG) (update-bondi-version TAG)
+docker-all TAG: (build-server TAG) (tag-server TAG) (verify-server-image TAG) (verify-server-image-negative TAG) (push-server TAG) (update-bondi-version TAG)
 
 build-server TAG:
-    docker build --build-arg VERSION={{ TAG }} -t {{ IMAGE_NAME }} .
+    docker build --load --build-arg VERSION={{ TAG }} -t {{ IMAGE_NAME }} .
 
-# Build the server Docker image the way release-dry-run CI does: verifies the
-# Dockerfile and that every dependency resolves from a clean base image — the
+# Prove the image can run, not just that it built. Both assertions run against
+# the image in the local daemon — the one that gets pushed — so a check can
+# never pass on a different artifact from the one published. Requires Docker.
+verify-server-image TAG:
+    ./scripts/verify-server-image.sh {{ IMAGE_NAME }}:{{ TAG }}
+
+# Prove the verification above can fail, by removing a library the binary
+# actually links and asserting it is rejected. A check that cannot fail is not
+# a check.
+verify-server-image-negative TAG:
+    ./scripts/verify-server-image-negative.sh {{ IMAGE_NAME }}:{{ TAG }}
+
+# Build the server Docker image the way release-dry-run CI does, then prove the
+# result runs: verifies the Dockerfile, that every dependency resolves from a
+# clean base image, and that the packaged binary starts and serves — the
 # regression class that plain `dune build` cannot catch. Requires Docker.
 # Uses the CI-computed version when commitizen (cz) is present; otherwise a dev
 # placeholder, since the version is only embedded at runtime and does not affect
@@ -31,6 +46,8 @@ build-server-ci:
         exit 1
     fi
     just build-server "$VERSION"
+    just verify-server-image latest
+    just verify-server-image-negative latest
 
 tag-server TAG:
     docker tag {{ IMAGE_NAME }}:latest {{ IMAGE_NAME }}:{{ TAG }}

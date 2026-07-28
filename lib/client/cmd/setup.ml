@@ -88,30 +88,6 @@ let get_docker_version ~user ~host ~key_path =
 let run_remote_docker ~user ~host ~key_path cmd =
   remote_run ~user ~host ~key_path ("docker " ^ cmd)
 
-let get_running_version ~user ~host ~key_path =
-  match
-    run_remote_docker ~user ~host ~key_path
-      "ps --filter name=^/bondi-orchestrator$ --format '{{.Image}}'"
-  with
-  | Error _ as err -> err
-  | Ok output ->
-      let image =
-        output
-        |> String.split_on_char '\n'
-        |> List.find_opt (fun line -> String.trim line <> "")
-        |> Option.value ~default:""
-        |> String.trim
-      in
-      let prefix = "mlopez1506/bondi-server:" in
-      if image = "" then Ok None
-      else if Bondi_common.String_utils.starts_with ~prefix image then
-        let version =
-          String.sub image (String.length prefix)
-            (String.length image - String.length prefix)
-        in
-        Ok (Some (String.trim version))
-      else Ok (Some image)
-
 (* ------------------------------------------------------------------------- *)
 (* Types                                                                     *)
 (* ------------------------------------------------------------------------- *)
@@ -119,6 +95,17 @@ let get_running_version ~user ~host ~key_path =
 module Managed_container = Bondi_common.Managed_container
 
 type alloy_state = Alloy_not_running | Alloy_running of { image : string }
+
+(* The orchestrator container is observed as three distinct facts rather than as
+   a [string option] of the running version. A container that exists but is not
+   running is neither "nothing there" nor "the right version is up": read as the
+   first, the plan starts a container whose name is already taken; read as the
+   second, setup skips the restart and leaves the host with nothing serving.
+   Both were reachable while presence and version were separate fields. *)
+type orchestrator_state =
+  | Orchestrator_absent
+  | Orchestrator_not_running
+  | Orchestrator_running of { version : string }
 
 (* Observed state of one managed container. Derived from the container's
    existence and its spec-hash label only, never from whether it is currently
@@ -139,7 +126,7 @@ type managed_observation =
 type setup_context = {
   docker_status : [ `Installed of string | `NotInstalled of string ];
   acme_file_exists : bool;
-  running_version : string option;
+  orchestrator : orchestrator_state;
   alloy_state : alloy_state;
   managed : managed_observation;
 }
@@ -150,6 +137,7 @@ type action =
   | EnsureNetwork of string
   | RequireCronCurl
   | StopOrchestrator
+  | RemoveOrchestrator
   | RunServer
   | EnsureAlloyConfig
   | RunAlloy
@@ -164,6 +152,50 @@ type action =
 (* ------------------------------------------------------------------------- *)
 (* Phase 1: Gather context (read-only)                                       *)
 (* ------------------------------------------------------------------------- *)
+
+(* [-a] rather than plain [ps]: since the orchestrator stopped running with
+   --rm, a container that died on startup is still on the host, and a plain [ps]
+   cannot see it. *)
+let orchestrator_ps_command =
+  "ps -a --filter name=^/bondi-orchestrator$ --format '{{.State}}\t{{.Image}}'"
+
+let orchestrator_version_of_image image =
+  let prefix = "mlopez1506/bondi-server:" in
+  if Bondi_common.String_utils.starts_with ~prefix image then
+    String.sub image (String.length prefix)
+      (String.length image - String.length prefix)
+  else
+    (* A fork or a locally built image is still the orchestrator by name. The
+       whole image is reported so the version-mismatch message names something
+       the operator can recognise. *)
+    image
+
+let orchestrator_state_of_ps_output output =
+  let line =
+    output
+    |> String.split_on_char '\n'
+    |> List.find_opt (fun line -> String.trim line <> "")
+  in
+  match line with
+  | None -> Orchestrator_absent
+  | Some line -> (
+      match String.split_on_char '\t' (String.trim line) with
+      | [ state; image ] -> (
+          match String.trim state with
+          | "running" ->
+              Orchestrator_running
+                { version = orchestrator_version_of_image (String.trim image) }
+          (* "created", "restarting", "paused", "exited", "removing" and "dead".
+             None of them is serving, and every one of them holds the container
+             name, so all converge to the same plan: remove it, then run. *)
+          | _ -> Orchestrator_not_running)
+      (* A line that does not parse still means a container by that name exists.
+         Replacing it is the safe reading; treating it as absent would plan a
+         run that collides with it. *)
+      | []
+      | [ _ ]
+      | _ :: _ :: _ :: _ ->
+          Orchestrator_not_running)
 
 (* Managed containers are discovered by label rather than by name: the declared
    set is not known to the server, and [-a] is what lets a self-restarting
@@ -211,13 +243,15 @@ let gather_context ~user ~host ~key_path : (setup_context, string) result =
     | Ok _ -> true
     | Error _ -> false
   in
-  let running_version =
+  let orchestrator =
     match docker_status with
-    | `NotInstalled _ -> None
+    | `NotInstalled _ -> Orchestrator_absent
     | `Installed _ -> (
-        match get_running_version ~user ~host ~key_path with
-        | Ok v -> v
-        | Error _ -> None)
+        match
+          run_remote_docker ~user ~host ~key_path orchestrator_ps_command
+        with
+        | Ok output -> orchestrator_state_of_ps_output output
+        | Error _ -> Orchestrator_absent)
   in
   let alloy_state =
     match docker_status with
@@ -249,7 +283,7 @@ let gather_context ~user ~host ~key_path : (setup_context, string) result =
         | Ok output -> Managed_observed (managed_of_ps_output output)
         | Error err -> Managed_unobserved err)
   in
-  Ok { docker_status; acme_file_exists; running_version; alloy_state; managed }
+  Ok { docker_status; acme_file_exists; orchestrator; alloy_state; managed }
 
 (* ------------------------------------------------------------------------- *)
 (* Phase 2: Plan (pure)                                                      *)
@@ -258,27 +292,27 @@ let gather_context ~user ~host ~key_path : (setup_context, string) result =
 let has_user_services (config : Config_file.t) =
   Option.is_some config.user_service
 
-let should_skip_server (config : Config_file.t) (ctx : setup_context) : bool =
-  let has_cron_jobs =
-    match config.cron_jobs with
-    | Some jobs when jobs <> [] -> true
-    | _ -> false
-  in
-  match ctx.running_version with
-  | None -> false
-  | Some v -> v = config.bondi_server.version && not has_cron_jobs
+let has_cron_jobs (config : Config_file.t) : bool =
+  match config.cron_jobs with
+  | Some (_ :: _) -> true
+  | Some []
+  | None ->
+      false
 
-let needs_orchestrator_restart (config : Config_file.t) (ctx : setup_context) :
-    bool =
-  match ctx.running_version with
-  | None -> false
-  | Some v ->
-      let has_cron_jobs =
-        match config.cron_jobs with
-        | Some jobs when jobs <> [] -> true
-        | _ -> false
-      in
-      v <> config.bondi_server.version || has_cron_jobs
+(* Converge on "the declared version is serving". Every state that is not that
+   ends in [RunServer], and every state that leaves a container behind removes
+   it first: [docker run] refuses a name that is already taken, and without the
+   removal an orchestrator that died on startup would make the next [bondi
+   setup] — the command an operator reaches for to recover — fail too. *)
+let orchestrator_actions (config : Config_file.t) (ctx : setup_context) :
+    action list =
+  match ctx.orchestrator with
+  | Orchestrator_absent -> [ RunServer ]
+  | Orchestrator_not_running -> [ RemoveOrchestrator; RunServer ]
+  | Orchestrator_running { version } ->
+      if version = config.bondi_server.version && not (has_cron_jobs config)
+      then []
+      else [ StopOrchestrator; RemoveOrchestrator; RunServer ]
 
 let alloy_desired_image (alloy : Config_file.alloy) =
   Option.value alloy.image ~default:Bondi_common.Defaults.alloy_image
@@ -315,12 +349,7 @@ let plan (config : Config_file.t) ~(specs : Managed_container.t list)
   (* ACME only when we have user services (Traefik will be used) *)
   let acme = if has_user_services config then [ EnsureAcmeFile ] else [] in
   (* Server setup - skip entirely if already up-to-date *)
-  let server =
-    if should_skip_server config ctx then []
-    else if needs_orchestrator_restart config ctx then
-      [ StopOrchestrator; RunServer ]
-    else [ RunServer ]
-  in
+  let server = orchestrator_actions config ctx in
   let alloy =
     match (config.alloy, ctx.alloy_state) with
     (* Alloy removed from config but still running *)
@@ -533,6 +562,23 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
           (Printf.sprintf "Stopped bondi-orchestrator container on server %s"
              ip_address);
         run rest
+    | RemoveOrchestrator :: rest ->
+        (* Asserts the outcome rather than the command's exit status: an
+           orchestrator started by an older Bondi ran with --rm, so [docker
+           stop] has already deleted it and [docker rm] would report "no such
+           container" on a host that is in exactly the state wanted. What
+           matters is that no container holds the name afterwards. *)
+        let cmd =
+          "docker rm --force bondi-orchestrator > /dev/null 2>&1; docker ps -a \
+           --filter name=^/bondi-orchestrator$ --format '{{.Names}}' | grep -q \
+           . && { echo 'bondi-orchestrator could not be removed' >&2; exit 1; \
+           } || true"
+        in
+        let* _ = remote_run ~user ~host ~key_path cmd in
+        print_endline
+          (Printf.sprintf "Removed bondi-orchestrator container on server %s"
+             ip_address);
+        run rest
     | RunServer :: rest ->
         let volume_mounts, user_flag =
           match config.cron_jobs with
@@ -541,20 +587,47 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
                 " --user root" )
           | _ -> ("", "")
         in
+        let image = "mlopez1506/bondi-server:" ^ config.bondi_server.version in
+        (* No --rm: a container that dies on startup erases itself under it,
+           leaving no container, no logs and no error for either the operator or
+           the readiness check below. *)
         let run_cmd =
           "docker run -d --name bondi-orchestrator -p 3030:3030 -v \
            /var/run/docker.sock:/var/run/docker.sock" ^ volume_mounts
           ^ user_flag
           ^ " --group-add $(stat -c %g /var/run/docker.sock) --label \
              bondi.managed=true --label bondi.type=infrastructure --label \
-             bondi.logs=true --rm mlopez1506/bondi-server:"
-          ^ config.bondi_server.version
+             bondi.logs=true " ^ image
         in
-        let* output = remote_run ~user ~host ~key_path run_cmd in
+        let* _ = remote_run ~user ~host ~key_path run_cmd in
+        (* [docker run -d] reports that the container was created, which is not
+           the same fact as the server being up. The verdict is a pure decision
+           in [Orchestrator_probe]; this arm obtains the host's answer, and
+           fetches the container's own account of the failure only when there is
+           one to explain. *)
+        let probe =
+          remote_run ~user ~host ~key_path
+            (Orchestrator_probe.probe_command
+               ~port:Bondi_common.Defaults.server_port
+               ~attempts:Orchestrator_probe.readiness_attempts)
+        in
+        let* () =
+          Orchestrator_probe.verdict probe
+          |> Result.map_error (fun reason ->
+              let diagnostics =
+                match
+                  remote_run ~user ~host ~key_path
+                    Orchestrator_probe.diagnostics_command
+                with
+                | Ok output -> String.trim output
+                | Error message -> message
+              in
+              Orchestrator_probe.failure_message ~ip_address ~image ~reason
+                ~diagnostics)
+        in
         print_endline
-          (Printf.sprintf
-             "bondi-orchestrator container started on server %s: %s" ip_address
-             (String.trim output));
+          (Printf.sprintf "bondi-orchestrator is serving on server %s: %s"
+             ip_address image);
         run rest
     | EnsureAlloyConfig :: rest -> (
         match config.alloy with
@@ -705,27 +778,34 @@ let setup_server config server =
           let host = ip_address in
           let* context = gather_context ~user ~host ~key_path in
           let* actions = plan_for_config config context in
-          (* Log skip/restart reason when we have a running server *)
-          (match (context.running_version, actions) with
-          | None, _ -> ()
-          | Some running, actions when not (List.mem RunServer actions) ->
+          (* Log skip/restart reason when a container is already there *)
+          (match context.orchestrator with
+          | Orchestrator_absent -> ()
+          | Orchestrator_not_running ->
               print_endline
                 (Printf.sprintf
-                   "bondi-orchestrator container is already running on server \
-                    %s: %s, skipping..."
-                   ip_address running)
-          | Some running, actions when List.mem StopOrchestrator actions ->
-              let reason =
-                if running <> config.bondi_server.version then
-                  Printf.sprintf "version mismatch: running %s, want %s" running
-                    config.bondi_server.version
-                else "adding cron job support"
-              in
-              print_endline
-                (Printf.sprintf
-                   "bondi-orchestrator on server %s: %s, stopping to restart..."
-                   ip_address reason)
-          | _ -> ());
+                   "bondi-orchestrator on server %s exists but is not running, \
+                    replacing it..."
+                   ip_address)
+          | Orchestrator_running { version = running } ->
+              if not (List.mem RunServer actions) then
+                print_endline
+                  (Printf.sprintf
+                     "bondi-orchestrator container is already running on \
+                      server %s: %s, skipping..."
+                     ip_address running)
+              else
+                let reason =
+                  if running <> config.bondi_server.version then
+                    Printf.sprintf "version mismatch: running %s, want %s"
+                      running config.bondi_server.version
+                  else "adding cron job support"
+                in
+                print_endline
+                  (Printf.sprintf
+                     "bondi-orchestrator on server %s: %s, stopping to \
+                      restart..."
+                     ip_address reason));
           interpret ~user ~host ~key_path ~ip_address config actions)
 
 let run () =

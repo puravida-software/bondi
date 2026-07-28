@@ -67,19 +67,58 @@ COPY --chown=opam:opam . .
 ENV VERSION=$VERSION
 RUN opam exec -- dune build --profile release bin/server/main.exe
 
+# Collect the binary's own shared-library closure so the runtime stage carries
+# exactly what it links. A hand-written apk list cannot do this: it is not
+# derived from anything, so it silently goes stale the moment a dependency
+# starts linking something new, and the first symptom is the musl loader
+# aborting before main with exit 127 on a production host.
+#
+# ldd resolves transitively, so this is the whole closure, not just the direct
+# NEEDED entries. The musl loader itself is excluded: it is libc, every Alpine
+# image already has one, and overwriting the runtime stage's copy with the
+# builder's would break the rest of that image.
+USER root
+RUN set -eu; \
+    binary=/build/_build/default/bin/server/main.exe; \
+    mkdir -p /runtime-libs; \
+    if ! ldd "$binary" > /tmp/ldd.txt 2>&1; then \
+        echo "error: the built binary has unresolved shared libraries:"; \
+        cat /tmp/ldd.txt; \
+        exit 1; \
+    fi; \
+    awk '{ for (i = 1; i <= NF; i++) if ($i == "=>") print $(i + 1) }' /tmp/ldd.txt \
+        | grep -v 'ld-musl' \
+        | sort -u \
+        | while IFS= read -r lib; do cp -L "$lib" /runtime-libs/; done; \
+    echo "runtime closure:"; ls -1 /runtime-libs
+
 # Final stage - minimal runtime image
 FROM alpine:latest
 
-# Install minimal runtime dependencies needed for the OCaml binary
-RUN apk add --no-cache \
-    gmp \
-    libev \
-    openssl \
-    pcre \
-    ca-certificates
+# ca-certificates is a trust store, not a linkage: no amount of scanning the
+# binary can discover it, and outbound TLS to alert sinks needs it.
+RUN apk add --no-cache ca-certificates
+
+# The runtime closure derived from the binary above, rather than a package list
+# maintained by hand alongside it.
+COPY --from=builder /runtime-libs/ /usr/lib/
 
 # Copy the binary from the build stage and set permissions in one layer
 COPY --from=builder --chmod=755 /build/_build/default/bin/server/main.exe /usr/local/bin/bondi-server
+
+# Fail the build rather than the deployment. An unresolved shared library stops
+# the musl loader before main, which `docker run -d` still reports as success,
+# so nothing downstream of here would notice. ldd exits 127 in that case — the
+# same 127 the failure presents as on a server.
+RUN set -eu; \
+    if ! ldd /usr/local/bin/bondi-server > /tmp/ldd.txt 2>&1 \
+       || grep -qE 'not found|Error loading|Error relocating' /tmp/ldd.txt; then \
+        echo "error: unresolved shared libraries in the runtime image:"; \
+        cat /tmp/ldd.txt; \
+        exit 1; \
+    fi; \
+    cat /tmp/ldd.txt; \
+    rm -f /tmp/ldd.txt
 
 # Set user to non-root for security
 RUN addgroup -g 1000 appuser && \
