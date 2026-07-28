@@ -86,10 +86,26 @@ jobs:
         with:
           just-version: "1.46.0"
 
-      - name: Build and push server image
+      - name: Build server image
         run: |
           just build-server "$VERSION"
           just tag-server "$VERSION"
+
+      # Nothing is pushed until the built image has been proven to run. The
+      # assertions target the local tag produced above, which `push-server`
+      # then uploads, so the image that is checked and the image that is
+      # published are the same artifact rather than two builds of one
+      # Dockerfile. Versions 0.8.2 through 0.10.1 built cleanly and could not
+      # start; this is the step that would have caught them.
+      - name: Verify the built image runs
+        run: just verify-server-image "$VERSION"
+
+      # A check that cannot fail is not a check.
+      - name: Verify that the check itself can fail
+        run: just verify-server-image-negative "$VERSION"
+
+      - name: Push server image
+        run: |
           just push-server "$VERSION"
           docker push mlopez1506/bondi-server:latest
 

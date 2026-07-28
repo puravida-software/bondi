@@ -13,6 +13,7 @@ let action_string = function
   | Setup.EnsureNetwork name -> "EnsureNetwork " ^ name
   | Setup.RequireCronCurl -> "RequireCronCurl"
   | Setup.StopOrchestrator -> "StopOrchestrator"
+  | Setup.RemoveOrchestrator -> "RemoveOrchestrator"
   | Setup.RunServer -> "RunServer"
   | Setup.EnsureAlloyConfig -> "EnsureAlloyConfig"
   | Setup.RunAlloy -> "RunAlloy"
@@ -34,6 +35,7 @@ let is_ensure_network = function
   | Setup.EnsureAcmeFile
   | Setup.RequireCronCurl
   | Setup.StopOrchestrator
+  | Setup.RemoveOrchestrator
   | Setup.RunServer
   | Setup.EnsureAlloyConfig
   | Setup.RunAlloy
@@ -58,6 +60,7 @@ let joins_network = function
   | Setup.EnsureNetwork _
   | Setup.RequireCronCurl
   | Setup.StopOrchestrator
+  | Setup.RemoveOrchestrator
   | Setup.EnsureAlloyConfig
   | Setup.StopAlloy
   | Setup.RemoveAlloy
@@ -81,6 +84,7 @@ let is_managed = function
   | Setup.EnsureNetwork _
   | Setup.RequireCronCurl
   | Setup.StopOrchestrator
+  | Setup.RemoveOrchestrator
   | Setup.RunServer
   | Setup.EnsureAlloyConfig
   | Setup.RunAlloy
@@ -129,14 +133,14 @@ let make_config ?(alloy = None) ?(managed_containers = None) ~user_service
   }
 
 let ctx ?(alloy_state = Setup.Alloy_not_running)
-    ?(managed = Setup.Managed_observed []) ~running_version ~docker_installed
+    ?(managed = Setup.Managed_observed []) ~orchestrator ~docker_installed
     ~acme_exists () =
   {
     Setup.docker_status =
       (if docker_installed then `Installed "Docker version 24.0"
        else `NotInstalled "command not found");
     Setup.acme_file_exists = acme_exists;
-    Setup.running_version;
+    Setup.orchestrator;
     Setup.alloy_state;
     Setup.managed;
   }
@@ -184,12 +188,59 @@ let observed pairs =
   |> fun output ->
   Setup.Managed_observed (Setup.managed_of_ps_output (output ^ "\n"))
 
+(* ------------------------------------------------------------------------- *)
+(* Orchestrator observation                                                  *)
+(* ------------------------------------------------------------------------- *)
+
+(* `docker ps -a` reports containers in every state, which is what lets a dead
+   orchestrator be seen at all. Reading "exited" as running is the shape of the
+   outage this change exists to prevent: setup would skip the restart and leave
+   the host with nothing serving. *)
+let test_exited_orchestrator_is_not_read_as_running () =
+  check bool "an exited container is not running" true
+    (Setup.orchestrator_state_of_ps_output
+       "exited\tmlopez1506/bondi-server:0.10.1\n"
+    = Setup.Orchestrator_not_running)
+
+let test_running_orchestrator_reports_its_version () =
+  check bool "version read from the image tag" true
+    (Setup.orchestrator_state_of_ps_output
+       "running\tmlopez1506/bondi-server:0.10.1\n"
+    = Setup.Orchestrator_running { version = "0.10.1" })
+
+(* A container built from some other image is still the orchestrator by name.
+   Reporting the whole image is what makes the version-mismatch message
+   readable when someone has pinned a fork or a local build. *)
+let test_running_orchestrator_from_another_image_reports_the_image () =
+  check bool "whole image reported" true
+    (Setup.orchestrator_state_of_ps_output "running\tlocal/bondi:dev\n"
+    = Setup.Orchestrator_running { version = "local/bondi:dev" })
+
+let test_no_orchestrator_container_is_absent () =
+  check bool "no container is absent" true
+    (Setup.orchestrator_state_of_ps_output "\n" = Setup.Orchestrator_absent)
+
+(* Docker reports "created" for a container that was never started and
+   "restarting" for one in a crash loop. Neither is serving, and both must be
+   replaced rather than skipped. *)
+let test_non_running_states_are_not_serving () =
+  List.iter
+    (fun state ->
+      check bool
+        (state ^ " is not running")
+        true
+        (Setup.orchestrator_state_of_ps_output
+           (state ^ "\tmlopez1506/bondi-server:0.10.1\n")
+        = Setup.Orchestrator_not_running))
+    [ "created"; "restarting"; "paused"; "dead" ]
+
 let test_plan_always_includes_ensure_docker () =
   let config =
     make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
   in
   let context =
-    ctx ~running_version:None ~docker_installed:true ~acme_exists:false ()
+    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_installed:true
+      ~acme_exists:false ()
   in
   let actions = plan config context in
   check bool "EnsureDocker is first" (List.hd actions = Setup.EnsureDocker) true
@@ -199,7 +250,8 @@ let test_plan_no_user_service_skips_acme () =
     make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
   in
   let context =
-    ctx ~running_version:None ~docker_installed:true ~acme_exists:false ()
+    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_installed:true
+      ~acme_exists:false ()
   in
   let actions = plan config context in
   check bool "no EnsureAcmeFile when no user_service"
@@ -212,7 +264,8 @@ let test_plan_with_user_service_includes_acme () =
       ~version:"1.0.0" ()
   in
   let context =
-    ctx ~running_version:None ~docker_installed:true ~acme_exists:false ()
+    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_installed:true
+      ~acme_exists:false ()
   in
   let actions = plan config context in
   check bool "EnsureAcmeFile when user_service present"
@@ -224,8 +277,9 @@ let test_plan_skip_server_when_up_to_date () =
     make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
   in
   let context =
-    ctx ~running_version:(Some "1.0.0") ~docker_installed:true
-      ~acme_exists:false ()
+    ctx
+      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+      ~docker_installed:true ~acme_exists:false ()
   in
   let actions = plan config context in
   check bool "no RunServer when version matches and no cron"
@@ -240,7 +294,8 @@ let test_plan_fresh_install_runs_server () =
     make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
   in
   let context =
-    ctx ~running_version:None ~docker_installed:true ~acme_exists:false ()
+    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_installed:true
+      ~acme_exists:false ()
   in
   let actions = plan config context in
   check bool "RunServer when no running orchestrator"
@@ -255,8 +310,9 @@ let test_plan_version_mismatch_stops_and_runs () =
     make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
   in
   let context =
-    ctx ~running_version:(Some "0.9.0") ~docker_installed:true
-      ~acme_exists:false ()
+    ctx
+      ~orchestrator:(Setup.Orchestrator_running { version = "0.9.0" })
+      ~docker_installed:true ~acme_exists:false ()
   in
   let actions = plan config context in
   check bool "StopOrchestrator on version mismatch"
@@ -265,6 +321,52 @@ let test_plan_version_mismatch_stops_and_runs () =
   check bool "RunServer after version mismatch"
     (List.mem Setup.RunServer actions)
     true
+
+(* The orchestrator no longer runs with --rm, so a container that died on
+   startup is still there on the next setup. Running without removing it first
+   fails on the name collision, which would make the box unrecoverable by the
+   very command an operator reaches for to recover it. *)
+let test_plan_exited_orchestrator_is_removed_before_running () =
+  let config =
+    make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
+  in
+  let context =
+    ctx ~orchestrator:Setup.Orchestrator_not_running ~docker_installed:true
+      ~acme_exists:false ()
+  in
+  let actions = plan config context in
+  check_actions
+    ~expected:
+      [
+        "EnsureDocker";
+        "EnsureNetwork bondi-network";
+        "RemoveOrchestrator";
+        "RunServer";
+      ]
+    actions
+
+(* A running orchestrator being replaced is stopped and then removed: stopping
+   alone used to be enough only because --rm deleted it. *)
+let test_plan_running_orchestrator_is_removed_after_stopping () =
+  let config =
+    make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
+  in
+  let context =
+    ctx
+      ~orchestrator:(Setup.Orchestrator_running { version = "0.9.0" })
+      ~docker_installed:true ~acme_exists:false ()
+  in
+  let actions = plan config context in
+  check_actions
+    ~expected:
+      [
+        "EnsureDocker";
+        "EnsureNetwork bondi-network";
+        "StopOrchestrator";
+        "RemoveOrchestrator";
+        "RunServer";
+      ]
+    actions
 
 let test_plan_cron_jobs_force_restart () =
   let cron_job =
@@ -286,8 +388,9 @@ let test_plan_cron_jobs_force_restart () =
       ~version:"1.0.0" ()
   in
   let context =
-    ctx ~running_version:(Some "1.0.0") ~docker_installed:true
-      ~acme_exists:false ()
+    ctx
+      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+      ~docker_installed:true ~acme_exists:false ()
   in
   let actions = plan config context in
   check bool "StopOrchestrator when adding cron jobs"
@@ -303,8 +406,9 @@ let test_plan_action_order () =
       ~version:"1.0.0" ()
   in
   let context =
-    ctx ~running_version:(Some "0.9.0") ~docker_installed:true
-      ~acme_exists:false ()
+    ctx
+      ~orchestrator:(Setup.Orchestrator_running { version = "0.9.0" })
+      ~docker_installed:true ~acme_exists:false ()
   in
   let actions = plan config context in
   check_actions
@@ -314,6 +418,7 @@ let test_plan_action_order () =
         "EnsureNetwork bondi-network";
         "EnsureAcmeFile";
         "StopOrchestrator";
+        "RemoveOrchestrator";
         "RunServer";
       ]
     actions
@@ -338,7 +443,8 @@ let test_plan_cron_only_no_acme () =
       ~version:"1.0.0" ()
   in
   let context =
-    ctx ~running_version:None ~docker_installed:true ~acme_exists:false ()
+    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_installed:true
+      ~acme_exists:false ()
   in
   let actions = plan config context in
   check bool "no EnsureAcmeFile when cron-only (no user_service)"
@@ -379,7 +485,8 @@ let test_plan_requires_curl_when_cron_jobs_declared () =
       ~version:"1.0.0" ()
   in
   let context =
-    ctx ~running_version:None ~docker_installed:true ~acme_exists:false ()
+    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_installed:true
+      ~acme_exists:false ()
   in
   let actions = plan config context in
   let index_of target =
@@ -404,7 +511,8 @@ let test_plan_omits_curl_check_without_cron_jobs () =
       ~version:"1.0.0" ()
   in
   let context =
-    ctx ~running_version:None ~docker_installed:true ~acme_exists:true ()
+    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_installed:true
+      ~acme_exists:true ()
   in
   check bool "no curl requirement without cron jobs"
     (List.mem Setup.RequireCronCurl (plan config context))
@@ -415,7 +523,8 @@ let test_setup_plans_ensure_network () =
     make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
   in
   let context =
-    ctx ~running_version:None ~docker_installed:true ~acme_exists:false ()
+    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_installed:true
+      ~acme_exists:false ()
   in
   let actions = plan config context in
   check bool "EnsureNetwork for the shared network"
@@ -443,8 +552,9 @@ let test_setup_plan_ensure_network_precedes_joining_actions () =
       ()
   in
   let context =
-    ctx ~running_version:(Some "0.9.0") ~docker_installed:true
-      ~acme_exists:false ()
+    ctx
+      ~orchestrator:(Setup.Orchestrator_running { version = "0.9.0" })
+      ~docker_installed:true ~acme_exists:false ()
   in
   let actions = plan config ~specs:(specs_of_entries entries) context in
   let joining = indices_where joins_network actions in
@@ -471,7 +581,8 @@ let converge ?(observed_managed = Setup.Managed_observed []) entries =
       ~cron_jobs:None ~version:"1.0.0" ()
   in
   let context =
-    ctx ~managed:observed_managed ~running_version:(Some "1.0.0")
+    ctx ~managed:observed_managed
+      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
       ~docker_installed:true ~acme_exists:false ()
   in
   (specs, plan config ~specs context)
@@ -590,8 +701,9 @@ let test_managed_ignores_malformed_ps_lines () =
             ~cron_jobs:None ~version:"1.0.0" ()
         in
         plan config
-          (ctx ~managed ~running_version:(Some "1.0.0") ~docker_installed:true
-             ~acme_exists:false ())
+          (ctx ~managed
+             ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+             ~docker_installed:true ~acme_exists:false ())
   in
   check_managed_actions
     ~expected:
@@ -633,8 +745,9 @@ let test_plan_for_config_reads_declared_containers () =
       ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
   in
   let context =
-    ctx ~running_version:(Some "1.0.0") ~docker_installed:true
-      ~acme_exists:false ()
+    ctx
+      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+      ~docker_installed:true ~acme_exists:false ()
   in
   match Setup.plan_for_config config context with
   | Error message -> fail message
@@ -655,8 +768,9 @@ let test_plan_for_config_surfaces_invalid_declaration () =
       ~cron_jobs:None ~version:"1.0.0" ()
   in
   let context =
-    ctx ~running_version:(Some "1.0.0") ~docker_installed:true
-      ~acme_exists:false ()
+    ctx
+      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+      ~docker_installed:true ~acme_exists:false ()
   in
   match Setup.plan_for_config config context with
   | Ok _ -> fail "expected an invalid restart policy to be rejected"
@@ -676,8 +790,8 @@ let test_plan_for_config_rejects_unobserved_with_declarations () =
   in
   let context =
     ctx ~managed:(Setup.Managed_unobserved "connection refused")
-      ~running_version:(Some "1.0.0") ~docker_installed:true ~acme_exists:false
-      ()
+      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+      ~docker_installed:true ~acme_exists:false ()
   in
   match Setup.plan_for_config config context with
   | Ok _ -> fail "expected a failed managed-container lookup to be rejected"
@@ -693,8 +807,8 @@ let test_plan_for_config_allows_unobserved_without_declarations () =
   in
   let context =
     ctx ~managed:(Setup.Managed_unobserved "connection refused")
-      ~running_version:(Some "1.0.0") ~docker_installed:true ~acme_exists:false
-      ()
+      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+      ~docker_installed:true ~acme_exists:false ()
   in
   match Setup.plan_for_config config context with
   | Error message -> fail message
@@ -706,7 +820,8 @@ let test_plan_alloy_enabled () =
       ~version:"1.0.0" ()
   in
   let context =
-    ctx ~running_version:None ~docker_installed:true ~acme_exists:false ()
+    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_installed:true
+      ~acme_exists:false ()
   in
   let actions = plan config context in
   check bool "EnsureAlloyConfig when alloy configured"
@@ -721,7 +836,8 @@ let test_plan_alloy_disabled () =
     make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
   in
   let context =
-    ctx ~running_version:None ~docker_installed:true ~acme_exists:false ()
+    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_installed:true
+      ~acme_exists:false ()
   in
   let actions = plan config context in
   check bool "no EnsureAlloyConfig when alloy not configured"
@@ -739,8 +855,8 @@ let test_plan_alloy_removed () =
     ctx
       ~alloy_state:
         (Setup.Alloy_running { image = Bondi_common.Defaults.alloy_image })
-      ~running_version:(Some "1.0.0") ~docker_installed:true ~acme_exists:false
-      ()
+      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+      ~docker_installed:true ~acme_exists:false ()
   in
   let actions = plan config context in
   check bool "StopAlloy when alloy removed from config"
@@ -761,8 +877,8 @@ let test_plan_alloy_version_change () =
   let context =
     ctx
       ~alloy_state:(Setup.Alloy_running { image = "grafana/alloy:v1.8.0" })
-      ~running_version:(Some "1.0.0") ~docker_installed:true ~acme_exists:false
-      ()
+      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+      ~docker_installed:true ~acme_exists:false ()
   in
   let actions = plan config context in
   check bool "StopAlloy on version change"
@@ -869,8 +985,8 @@ let test_plan_alloy_already_running () =
   let context =
     ctx
       ~alloy_state:(Setup.Alloy_running { image = desired_image })
-      ~running_version:(Some "1.0.0") ~docker_installed:true ~acme_exists:false
-      ()
+      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+      ~docker_installed:true ~acme_exists:false ()
   in
   let actions = plan config context in
   check bool "StopAlloy to converge config"
@@ -912,6 +1028,23 @@ let () =
             test_plan_version_mismatch_stops_and_runs;
           test_case "restarts when adding cron jobs" `Quick
             test_plan_cron_jobs_force_restart;
+          test_case "removes an exited orchestrator before running" `Quick
+            test_plan_exited_orchestrator_is_removed_before_running;
+          test_case "removes a running orchestrator after stopping it" `Quick
+            test_plan_running_orchestrator_is_removed_after_stopping;
+        ] );
+      ( "orchestrator observation",
+        [
+          test_case "an exited container is not read as running" `Quick
+            test_exited_orchestrator_is_not_read_as_running;
+          test_case "a running container reports its version" `Quick
+            test_running_orchestrator_reports_its_version;
+          test_case "a running container from another image reports it" `Quick
+            test_running_orchestrator_from_another_image_reports_the_image;
+          test_case "no container is absent" `Quick
+            test_no_orchestrator_container_is_absent;
+          test_case "created, restarting, paused and dead are not serving"
+            `Quick test_non_running_states_are_not_serving;
         ] );
       ("order", [ test_case "action order" `Quick test_plan_action_order ]);
       ( "cron curl",

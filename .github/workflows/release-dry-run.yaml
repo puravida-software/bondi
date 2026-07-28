@@ -82,6 +82,15 @@ jobs:
       - name: Build server Docker image (dry run)
         run: just build-server "$VERSION"
 
+      # The same two assertions the release runs before pushing, so a change
+      # that would publish an image that cannot start fails on the pull request
+      # rather than on a production host.
+      - name: Verify the built image runs
+        run: just verify-server-image latest
+
+      - name: Verify that the check itself can fail
+        run: just verify-server-image-negative latest
+
   update-homebrew-tap-dry-run:
     name: update-homebrew-tap-dry-run
     runs-on: ubuntu-22.04

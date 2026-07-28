@@ -80,6 +80,27 @@ Beyond your service and its cron jobs, `bondi.yaml` can declare long-running sup
 
 A cron job can classify each run's exit code into a `success`, `failure`, or `critical` severity and POST a generic alert to per-severity `https` sink URLs — a paging endpoint for `critical`, a dashboard for `failure`. Defaults are `0` → success and non-zero → failure; specific codes can be raised to `critical`. Delivery is best-effort and never changes the job's outcome. A run that never started counts as a failure, so a job is never silently skipped. See the [Usage Guide](USAGE.md#alerting-on-job-outcomes).
 
+### Recovering from a server image that will not start
+
+Server images `0.8.2`, `0.9.0`, `0.10.0` and `0.10.1` cannot start. The binary they package links `libzstd.so.1`, which those images do not ship, so the loader aborts before the server runs and the container exits `127`. `latest` pointed at a broken image until the first release after this fix; if you installed it before then, treat it as broken too.
+
+The symptom is a host with nothing listening on port `3030`. Scheduled jobs are the loudest casualty: every crontab line Bondi writes POSTs to the orchestrator, so they all become silent no-ops.
+
+Check what a server is running:
+
+```bash
+ssh YOUR_USER@YOUR_SERVER -- 'docker ps -a --filter name=^/bondi-orchestrator$ --format "{{.State}}\t{{.Image}}\t{{.Status}}"'
+```
+
+To recover, pin `bondi_server.version` in `bondi.yaml` to a version that runs — `0.8.1` is the newest known-good release before the fix — and run setup again:
+
+```bash
+sed -i 's/^  version: .*/  version: 0.8.1/' bondi.yaml
+bondi setup
+```
+
+`bondi setup` now verifies that the orchestrator answers its health endpoint before reporting success, so a version that cannot start fails the command with the container's exit code and logs instead of printing success.
+
 ## Available Commands
 
 - `bondi init` - Initialize a new Bondi project

@@ -7,5 +7,6 @@
   test_setup_process
   test_deploy_helpers
   test_status_format
-  test_curl_version)
+  test_curl_version
+  test_orchestrator_probe)
  (libraries alcotest bondi.client bondi.common yojson))
