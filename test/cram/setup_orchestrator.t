@@ -75,7 +75,9 @@ request to the health endpoint.
   1
 
 An orchestrator that never answers fails the setup and reports the server's own
-account of why, rather than printing success.
+account of why, rather than printing success. It was the last phase of this
+plan, so the report says that nothing after it was skipped rather than staying
+silent about the question.
 
   $ : > ssh-argv.log
   $ ORCHESTRATOR_DIES=1 bondi-client setup
@@ -92,6 +94,7 @@ account of why, rather than printing success.
   --- last 50 log lines ---
   Error loading shared library libzstd.so.1: No such file or directory (needed by /usr/local/bin/bondi-server)
   The container was left in place so it can be inspected: run `docker logs bondi-orchestrator` on 10.0.0.1. To restore service, set bondi_server.version in bondi.yaml back to a version known to run on this host and run `bondi setup` again.
+  setup stopped part-way through the orchestrator phase on server 10.0.0.1, which was the last one, so no phase was skipped.
   [1]
 
 Nothing claimed success on that run.

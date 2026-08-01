@@ -49,7 +49,7 @@ let is_ensure_network = function
       false
 
 (* An action that starts a container on the shared network. EnsureNetwork must
-   precede every one of these (FR-8). *)
+   precede every one of these. *)
 let joins_network = function
   | Setup.RunServer
   | Setup.RunAlloy
@@ -132,18 +132,60 @@ let make_config ?(alloy = None) ?(managed_containers = None) ~user_service
     managed_containers;
   }
 
-let ctx ?(alloy_state = Setup.Alloy_not_running)
-    ?(managed = Setup.Managed_observed []) ~orchestrator ~docker_installed
-    ~acme_exists () =
+(* The context carries the probe's own result rather than a pre-derived status,
+   so every arm of the plan is reached through the same derivation production
+   uses: a fixture that bypassed it could pin a state [gather_context] can
+   never produce. *)
+let ctx ?(alloy_state = Setup.Alloy_absent)
+    ?(managed = Setup.Managed_observed []) ~orchestrator ~docker_probe () =
   {
-    Setup.docker_status =
-      (if docker_installed then `Installed "Docker version 24.0"
-       else `NotInstalled "command not found");
-    Setup.acme_file_exists = acme_exists;
+    Setup.docker_status = Setup.docker_status_of_probe docker_probe;
     Setup.orchestrator;
     Setup.alloy_state;
     Setup.managed;
   }
+
+(* One distinctive transport error, shared by every probe fixture in this file.
+   An assertion that this text reached the operator cannot pass on a generic
+   failure the way "an error was returned" would. *)
+let transport_error =
+  "command failed (255): Connection closed by 203.0.113.9 port 22"
+
+(* The four probe results this file pins apart. Absence and transport failure
+   both reach the client on the error channel — [ssh] propagates the remote
+   shell's exit 127 for a missing command, and [run_command] turns any non-zero
+   exit into an [Error] — so a fixture that answered [Ok] for an absent Docker
+   would pin a reading [gather_context] can never produce.
+   [docker_missing_merged] is the same absence from a transport that folds
+   stderr into stdout and exits zero. *)
+let docker_present = Ok "Docker version 24.0"
+
+let docker_missing =
+  Error "command failed (127): bash: docker: command not found"
+
+let docker_missing_merged = Ok "bash: docker: command not found"
+let docker_unreachable = Error transport_error
+
+let docker_status_string = function
+  | Setup.Docker_installed output -> "Docker_installed " ^ output
+  | Setup.Docker_not_installed output -> "Docker_not_installed " ^ output
+  | Setup.Docker_undetermined message -> "Docker_undetermined " ^ message
+
+let check_docker_status ~expected probe =
+  check string "docker status"
+    (docker_status_string expected)
+    (docker_status_string (Setup.docker_status_of_probe probe))
+
+let docker_install_verdict_string = function
+  | Setup.Docker_satisfied version -> "Docker_satisfied " ^ version
+  | Setup.Docker_install -> "Docker_install"
+  | Setup.Docker_abort message -> "Docker_abort " ^ message
+
+let check_docker_install_verdict ~expected probe =
+  check string "docker install verdict"
+    (docker_install_verdict_string expected)
+    (docker_install_verdict_string
+       (Setup.docker_install_verdict_of_probe probe))
 
 (* ------------------------------------------------------------------------- *)
 (* Managed container fixtures                                                *)
@@ -192,6 +234,11 @@ let observed pairs =
 (* Orchestrator observation                                                  *)
 (* ------------------------------------------------------------------------- *)
 
+(* The two orchestrator listings the plan tests are built from: one that
+   answered, and one that never ran. *)
+let orchestrator_probe_running = Ok "running\tmlopez1506/bondi-server:0.9.0\n"
+let orchestrator_unreachable = Error transport_error
+
 (* `docker ps -a` reports containers in every state, which is what lets a dead
    orchestrator be seen at all. Reading "exited" as running is the shape of the
    outage this change exists to prevent: setup would skip the restart and leave
@@ -216,6 +263,32 @@ let test_running_orchestrator_from_another_image_reports_the_image () =
     (Setup.orchestrator_state_of_ps_output "running\tlocal/bondi:dev\n"
     = Setup.Orchestrator_running { version = "local/bondi:dev" })
 
+let orchestrator_state_string = function
+  | Setup.Orchestrator_absent -> "Orchestrator_absent"
+  | Setup.Orchestrator_not_running -> "Orchestrator_not_running"
+  | Setup.Orchestrator_running { version } -> "Orchestrator_running " ^ version
+  | Setup.Orchestrator_undetermined message ->
+      "Orchestrator_undetermined " ^ message
+
+(* A [docker ps] that never ran cannot say the host holds no orchestrator.
+   Reading its transport error as an absence plans a [docker run] against a name
+   that may already be taken, and the error the client saw is discarded on the
+   way. The affirmative arm is the same function on a successful probe: without
+   it the assertion above would hold for a derivation that reports every reading
+   as undetermined. *)
+let test_orchestrator_probe_error_is_undetermined () =
+  check string "a failed listing is undetermined"
+    (orchestrator_state_string
+       (Setup.Orchestrator_undetermined
+          "command failed (255): Connection closed by 203.0.113.9 port 22"))
+    (orchestrator_state_string
+       (Setup.orchestrator_state_of_probe orchestrator_unreachable));
+  check string "a successful listing is read"
+    (orchestrator_state_string
+       (Setup.Orchestrator_running { version = "0.9.0" }))
+    (orchestrator_state_string
+       (Setup.orchestrator_state_of_probe orchestrator_probe_running))
+
 let test_no_orchestrator_container_is_absent () =
   check bool "no container is absent" true
     (Setup.orchestrator_state_of_ps_output "\n" = Setup.Orchestrator_absent)
@@ -234,13 +307,185 @@ let test_non_running_states_are_not_serving () =
         = Setup.Orchestrator_not_running))
     [ "created"; "restarting"; "paused"; "dead" ]
 
+(* ------------------------------------------------------------------------- *)
+(* Alloy observation                                                         *)
+(* ------------------------------------------------------------------------- *)
+
+(* Alloy state is built from real `docker ps -a` output for the same reason the
+   managed fixtures are: a fixture that bypasses the derivation can pin a state
+   [gather_context] is unable to produce. *)
+let alloy_ps ~state ~image =
+  Setup.alloy_state_of_ps_output (Printf.sprintf "%s\t%s\n" state image)
+
+(* A container that exists but is not running still holds its name, so it is not
+   the same fact as no container at all. Reading the first as the second makes
+   the plan run [docker run] against a name that is taken, which is the conflict
+   that wedged every later setup on the affected host. *)
+let test_alloy_stopped_container_is_present_not_absent () =
+  check bool "an exited container is present" true
+    (alloy_ps ~state:"exited" ~image:"grafana/alloy:v1.8.0"
+    = Setup.Alloy_present)
+
+(* Running and stopped are the same fact to the plan: both hold the name, and
+   alloy is replaced either way. The state column is still read because it is
+   what tells a container apart from no container at all. *)
+let test_alloy_running_container_is_present () =
+  check bool "a running container is present" true
+    (alloy_ps ~state:"running" ~image:"grafana/alloy:v1.8.0"
+    = Setup.Alloy_present)
+
+let test_alloy_no_container_is_absent () =
+  check bool "no container is absent" true
+    (Setup.alloy_state_of_ps_output "\n" = Setup.Alloy_absent)
+
+let alloy_state_string = function
+  | Setup.Alloy_absent -> "Alloy_absent"
+  | Setup.Alloy_present -> "Alloy_present"
+  | Setup.Alloy_undetermined message -> "Alloy_undetermined " ^ message
+
+(* The two alloy listings the plan tests are built from. *)
+let alloy_probe_stopped = Ok "exited\tgrafana/alloy:v1.8.0\n"
+let alloy_unreachable = Error transport_error
+
+(* The same reading as the orchestrator's: a listing that never ran is not a
+   host with no alloy container, and the plan must not run one against a name it
+   never checked. The affirmative arm is the same function on a listing that
+   answered. *)
+let test_alloy_probe_error_is_undetermined () =
+  check string "a failed listing is undetermined"
+    (alloy_state_string (Setup.Alloy_undetermined transport_error))
+    (alloy_state_string (Setup.alloy_state_of_probe alloy_unreachable));
+  check string "a successful listing is read"
+    (alloy_state_string Setup.Alloy_present)
+    (alloy_state_string (Setup.alloy_state_of_probe alloy_probe_stopped))
+
+(* ------------------------------------------------------------------------- *)
+(* Docker observation                                                        *)
+(* ------------------------------------------------------------------------- *)
+
+(* A probe that never ran says nothing about the remote host. Reading its
+   transport error as "Docker is not installed" is what let a dropped SSH
+   connection pipe an installer into root's shell on a host whose engine was
+   already current. *)
+let test_docker_probe_error_is_undetermined () =
+  check_docker_status
+    ~expected:
+      (Setup.Docker_undetermined
+         "command failed (255): Connection closed by 203.0.113.9 port 22")
+    docker_unreachable
+
+(* The affirmative absence arm: the shell's own report that the command does
+   not exist is a positive determination, and the only one that may lead to an
+   install. It arrives as a non-zero exit, which is the same channel the
+   transport error above arrives on — the two are told apart by what the host
+   said, not by whether the command succeeded. *)
+let test_docker_probe_command_not_found_is_not_installed () =
+  check_docker_status
+    ~expected:
+      (Setup.Docker_not_installed
+         "command failed (127): bash: docker: command not found")
+    docker_missing
+
+(* A transport that folds stderr into stdout and exits zero reports the same
+   absence on the success channel. Both spellings are the host answering. *)
+let test_docker_probe_command_not_found_on_stdout_is_not_installed () =
+  check_docker_status
+    ~expected:(Setup.Docker_not_installed "bash: docker: command not found")
+    docker_missing_merged
+
+let test_docker_probe_version_output_is_installed () =
+  check_docker_status
+    ~expected:(Setup.Docker_installed "Docker version 29.2.1, build 1234567")
+    (Ok "Docker version 29.2.1, build 1234567\n")
+
+(* No action list is produced at all, so nothing is interpreted against a host
+   whose state was never read. *)
+let test_plan_for_config_aborts_on_undetermined_docker () =
+  let config =
+    make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
+  in
+  let context =
+    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_probe:docker_unreachable
+      ()
+  in
+  match Setup.plan_for_config config context with
+  | Ok actions ->
+      fail
+        ("expected an undetermined Docker probe to be rejected, planned: "
+        ^ String.concat ", " (List.map action_string actions))
+  | Error _ -> ()
+
+(* Naming the transport error is what makes the abort actionable. A message
+   that only said a probe had failed would be a second silent conclusion. *)
+let test_plan_for_config_abort_names_the_transport_error () =
+  let config =
+    make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
+  in
+  let context =
+    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_probe:docker_unreachable
+      ()
+  in
+  match Setup.plan_for_config config context with
+  | Ok _ -> fail "expected an undetermined Docker probe to be rejected"
+  | Error message ->
+      check bool "carries the probe's own text"
+        (Bondi_common.String_utils.contains
+           ~needle:"Connection closed by 203.0.113.9 port 22" message)
+        true
+
+(* The same fixture with a positively absent Docker: the abort above must be
+   caused by the reading, not by the plan having stopped installing at all. *)
+let test_plan_for_config_still_installs_when_docker_is_absent () =
+  let config =
+    make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
+  in
+  let context =
+    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_probe:docker_missing ()
+  in
+  match Setup.plan_for_config config context with
+  | Error message -> fail message
+  | Ok actions ->
+      check bool "EnsureDocker planned for an absent Docker"
+        (List.mem Setup.EnsureDocker actions)
+        true
+
+(* ------------------------------------------------------------------------- *)
+(* Docker install verdict                                                     *)
+(* ------------------------------------------------------------------------- *)
+
+(* The interpreter re-probes the version itself before acting on EnsureDocker,
+   which is a second SSH round trip and a second chance for the connection to
+   drop. A dropped one used to print "Docker not found" and pipe get.docker.com
+   into root's shell, upgrading the engine and restarting every container on a
+   host whose Docker was already current. *)
+let test_ensure_docker_probe_error_is_a_failure_not_an_install () =
+  match Setup.docker_install_verdict_of_probe docker_unreachable with
+  | Setup.Docker_install -> fail "a failed probe must not install Docker"
+  | Setup.Docker_satisfied version ->
+      fail ("a failed probe is not an installed Docker: " ^ version)
+  | Setup.Docker_abort message ->
+      check bool "carries the probe's own text"
+        (Bondi_common.String_utils.contains
+           ~needle:"Connection closed by 203.0.113.9 port 22" message)
+        true
+
+(* The affirmative arm: the shell's own report that the command does not exist
+   is the one reading that may install. Without it the assertion above would
+   hold for a verdict that never installs at all. *)
+let test_ensure_docker_verdict_installs_only_when_absent () =
+  check_docker_install_verdict ~expected:Setup.Docker_install docker_missing
+
+let test_ensure_docker_verdict_is_satisfied_when_installed () =
+  check_docker_install_verdict
+    ~expected:(Setup.Docker_satisfied "Docker version 29.2.1, build 1234567")
+    (Ok "Docker version 29.2.1, build 1234567\n")
+
 let test_plan_always_includes_ensure_docker () =
   let config =
     make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
   in
   let context =
-    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_installed:true
-      ~acme_exists:false ()
+    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_probe:docker_present ()
   in
   let actions = plan config context in
   check bool "EnsureDocker is first" (List.hd actions = Setup.EnsureDocker) true
@@ -250,8 +495,7 @@ let test_plan_no_user_service_skips_acme () =
     make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
   in
   let context =
-    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_installed:true
-      ~acme_exists:false ()
+    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_probe:docker_present ()
   in
   let actions = plan config context in
   check bool "no EnsureAcmeFile when no user_service"
@@ -264,8 +508,7 @@ let test_plan_with_user_service_includes_acme () =
       ~version:"1.0.0" ()
   in
   let context =
-    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_installed:true
-      ~acme_exists:false ()
+    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_probe:docker_present ()
   in
   let actions = plan config context in
   check bool "EnsureAcmeFile when user_service present"
@@ -279,7 +522,7 @@ let test_plan_skip_server_when_up_to_date () =
   let context =
     ctx
       ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
-      ~docker_installed:true ~acme_exists:false ()
+      ~docker_probe:docker_present ()
   in
   let actions = plan config context in
   check bool "no RunServer when version matches and no cron"
@@ -294,8 +537,7 @@ let test_plan_fresh_install_runs_server () =
     make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
   in
   let context =
-    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_installed:true
-      ~acme_exists:false ()
+    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_probe:docker_present ()
   in
   let actions = plan config context in
   check bool "RunServer when no running orchestrator"
@@ -312,7 +554,7 @@ let test_plan_version_mismatch_stops_and_runs () =
   let context =
     ctx
       ~orchestrator:(Setup.Orchestrator_running { version = "0.9.0" })
-      ~docker_installed:true ~acme_exists:false ()
+      ~docker_probe:docker_present ()
   in
   let actions = plan config context in
   check bool "StopOrchestrator on version mismatch"
@@ -331,8 +573,8 @@ let test_plan_exited_orchestrator_is_removed_before_running () =
     make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
   in
   let context =
-    ctx ~orchestrator:Setup.Orchestrator_not_running ~docker_installed:true
-      ~acme_exists:false ()
+    ctx ~orchestrator:Setup.Orchestrator_not_running
+      ~docker_probe:docker_present ()
   in
   let actions = plan config context in
   check_actions
@@ -354,7 +596,7 @@ let test_plan_running_orchestrator_is_removed_after_stopping () =
   let context =
     ctx
       ~orchestrator:(Setup.Orchestrator_running { version = "0.9.0" })
-      ~docker_installed:true ~acme_exists:false ()
+      ~docker_probe:docker_present ()
   in
   let actions = plan config context in
   check_actions
@@ -390,7 +632,7 @@ let test_plan_cron_jobs_force_restart () =
   let context =
     ctx
       ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
-      ~docker_installed:true ~acme_exists:false ()
+      ~docker_probe:docker_present ()
   in
   let actions = plan config context in
   check bool "StopOrchestrator when adding cron jobs"
@@ -408,7 +650,7 @@ let test_plan_action_order () =
   let context =
     ctx
       ~orchestrator:(Setup.Orchestrator_running { version = "0.9.0" })
-      ~docker_installed:true ~acme_exists:false ()
+      ~docker_probe:docker_present ()
   in
   let actions = plan config context in
   check_actions
@@ -443,8 +685,7 @@ let test_plan_cron_only_no_acme () =
       ~version:"1.0.0" ()
   in
   let context =
-    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_installed:true
-      ~acme_exists:false ()
+    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_probe:docker_present ()
   in
   let actions = plan config context in
   check bool "no EnsureAcmeFile when cron-only (no user_service)"
@@ -485,8 +726,7 @@ let test_plan_requires_curl_when_cron_jobs_declared () =
       ~version:"1.0.0" ()
   in
   let context =
-    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_installed:true
-      ~acme_exists:false ()
+    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_probe:docker_present ()
   in
   let actions = plan config context in
   let index_of target =
@@ -511,8 +751,7 @@ let test_plan_omits_curl_check_without_cron_jobs () =
       ~version:"1.0.0" ()
   in
   let context =
-    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_installed:true
-      ~acme_exists:true ()
+    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_probe:docker_present ()
   in
   check bool "no curl requirement without cron jobs"
     (List.mem Setup.RequireCronCurl (plan config context))
@@ -523,8 +762,7 @@ let test_setup_plans_ensure_network () =
     make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
   in
   let context =
-    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_installed:true
-      ~acme_exists:false ()
+    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_probe:docker_present ()
   in
   let actions = plan config context in
   check bool "EnsureNetwork for the shared network"
@@ -554,7 +792,7 @@ let test_setup_plan_ensure_network_precedes_joining_actions () =
   let context =
     ctx
       ~orchestrator:(Setup.Orchestrator_running { version = "0.9.0" })
-      ~docker_installed:true ~acme_exists:false ()
+      ~docker_probe:docker_present ()
   in
   let actions = plan config ~specs:(specs_of_entries entries) context in
   let joining = indices_where joins_network actions in
@@ -583,7 +821,7 @@ let converge ?(observed_managed = Setup.Managed_observed []) entries =
   let context =
     ctx ~managed:observed_managed
       ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
-      ~docker_installed:true ~acme_exists:false ()
+      ~docker_probe:docker_present ()
   in
   (specs, plan config ~specs context)
 
@@ -703,7 +941,7 @@ let test_managed_ignores_malformed_ps_lines () =
         plan config
           (ctx ~managed
              ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
-             ~docker_installed:true ~acme_exists:false ())
+             ~docker_probe:docker_present ())
   in
   check_managed_actions
     ~expected:
@@ -747,7 +985,7 @@ let test_plan_for_config_reads_declared_containers () =
   let context =
     ctx
       ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
-      ~docker_installed:true ~acme_exists:false ()
+      ~docker_probe:docker_present ()
   in
   match Setup.plan_for_config config context with
   | Error message -> fail message
@@ -770,7 +1008,7 @@ let test_plan_for_config_surfaces_invalid_declaration () =
   let context =
     ctx
       ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
-      ~docker_installed:true ~acme_exists:false ()
+      ~docker_probe:docker_present ()
   in
   match Setup.plan_for_config config context with
   | Ok _ -> fail "expected an invalid restart policy to be rejected"
@@ -791,7 +1029,7 @@ let test_plan_for_config_rejects_unobserved_with_declarations () =
   let context =
     ctx ~managed:(Setup.Managed_unobserved "connection refused")
       ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
-      ~docker_installed:true ~acme_exists:false ()
+      ~docker_probe:docker_present ()
   in
   match Setup.plan_for_config config context with
   | Ok _ -> fail "expected a failed managed-container lookup to be rejected"
@@ -808,7 +1046,7 @@ let test_plan_for_config_allows_unobserved_without_declarations () =
   let context =
     ctx ~managed:(Setup.Managed_unobserved "connection refused")
       ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
-      ~docker_installed:true ~acme_exists:false ()
+      ~docker_probe:docker_present ()
   in
   match Setup.plan_for_config config context with
   | Error message -> fail message
@@ -820,8 +1058,7 @@ let test_plan_alloy_enabled () =
       ~version:"1.0.0" ()
   in
   let context =
-    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_installed:true
-      ~acme_exists:false ()
+    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_probe:docker_present ()
   in
   let actions = plan config context in
   check bool "EnsureAlloyConfig when alloy configured"
@@ -836,8 +1073,7 @@ let test_plan_alloy_disabled () =
     make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
   in
   let context =
-    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_installed:true
-      ~acme_exists:false ()
+    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_probe:docker_present ()
   in
   let actions = plan config context in
   check bool "no EnsureAlloyConfig when alloy not configured"
@@ -852,11 +1088,9 @@ let test_plan_alloy_removed () =
     make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
   in
   let context =
-    ctx
-      ~alloy_state:
-        (Setup.Alloy_running { image = Bondi_common.Defaults.alloy_image })
+    ctx ~alloy_state:Setup.Alloy_present
       ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
-      ~docker_installed:true ~acme_exists:false ()
+      ~docker_probe:docker_present ()
   in
   let actions = plan config context in
   check bool "StopAlloy when alloy removed from config"
@@ -866,7 +1100,11 @@ let test_plan_alloy_removed () =
     (List.mem Setup.RemoveAlloy actions)
     true
 
-let test_plan_alloy_version_change () =
+(* A declared image does not change the plan: unlike the orchestrator, alloy is
+   not compared against a running version — a present container is replaced
+   whatever image it came from, so a custom image converges the same way the
+   default one does. *)
+let test_plan_alloy_declared_image_converges_like_the_default () =
   let alloy_with_custom_image =
     { minimal_alloy with Config_file.image = Some "grafana/alloy:v2.0.0" }
   in
@@ -875,22 +1113,198 @@ let test_plan_alloy_version_change () =
       ~cron_jobs:None ~version:"1.0.0" ()
   in
   let context =
-    ctx
-      ~alloy_state:(Setup.Alloy_running { image = "grafana/alloy:v1.8.0" })
+    ctx ~alloy_state:Setup.Alloy_present
       ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
-      ~docker_installed:true ~acme_exists:false ()
+      ~docker_probe:docker_present ()
   in
   let actions = plan config context in
-  check bool "StopAlloy on version change"
-    (List.mem Setup.StopAlloy actions)
-    true;
-  check bool "RemoveAlloy on version change"
-    (List.mem Setup.RemoveAlloy actions)
-    true;
-  check bool "EnsureAlloyConfig on version change"
-    (List.mem Setup.EnsureAlloyConfig actions)
-    true;
-  check bool "RunAlloy on version change" (List.mem Setup.RunAlloy actions) true
+  check_actions
+    ~expected:
+      [
+        "EnsureDocker";
+        "EnsureNetwork " ^ Bondi_common.Defaults.network_name;
+        "StopAlloy";
+        "RemoveAlloy";
+        "EnsureAlloyConfig";
+        "RunAlloy";
+      ]
+    actions
+
+let ensure_network_action =
+  "EnsureNetwork " ^ Bondi_common.Defaults.network_name
+
+(* The container the plan wants to run already holds the name, so the removal
+   has to come first: a removal after the run is the same conflict. The whole
+   list is enumerated rather than the two actions being looked for, because a
+   plan that also stops what is already stopped is a different plan. *)
+let test_plan_alloy_stopped_is_removed_before_running () =
+  let config =
+    make_config ~alloy:(Some minimal_alloy) ~user_service:None ~cron_jobs:None
+      ~version:"1.0.0" ()
+  in
+  let context =
+    ctx
+      ~alloy_state:
+        (alloy_ps ~state:"exited" ~image:Bondi_common.Defaults.alloy_image)
+      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+      ~docker_probe:docker_present ()
+  in
+  check_actions
+    ~expected:
+      [
+        "EnsureDocker";
+        ensure_network_action;
+        "StopAlloy";
+        "RemoveAlloy";
+        "EnsureAlloyConfig";
+        "RunAlloy";
+      ]
+    (plan config context)
+
+(* The affirmative arm of the removal above: with no container on the host there
+   is nothing to remove, and planning a removal anyway would fail the run on
+   "no such container" — the first setup of a host is exactly this case. *)
+let test_plan_alloy_absent_runs_without_removing () =
+  let config =
+    make_config ~alloy:(Some minimal_alloy) ~user_service:None ~cron_jobs:None
+      ~version:"1.0.0" ()
+  in
+  let context =
+    ctx
+      ~alloy_state:(Setup.alloy_state_of_ps_output "\n")
+      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+      ~docker_probe:docker_present ()
+  in
+  check_actions
+    ~expected:
+      [ "EnsureDocker"; ensure_network_action; "EnsureAlloyConfig"; "RunAlloy" ]
+    (plan config context)
+
+(* Withdrawing alloy from the configuration must clear a stopped container too.
+   Leaving it behind keeps the name taken, so the wedge would survive the very
+   change made to get rid of it. *)
+let test_plan_alloy_withdrawn_stopped_is_removed () =
+  let config =
+    make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
+  in
+  let context =
+    ctx
+      ~alloy_state:
+        (alloy_ps ~state:"exited" ~image:Bondi_common.Defaults.alloy_image)
+      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+      ~docker_probe:docker_present ()
+  in
+  check_actions
+    ~expected:
+      [ "EnsureDocker"; ensure_network_action; "StopAlloy"; "RemoveAlloy" ]
+    (plan config context)
+
+(* ------------------------------------------------------------------------- *)
+(* Container listings that never ran                                          *)
+(* ------------------------------------------------------------------------- *)
+
+(* Every case below is the same fixture with one probe result changed, so a
+   difference in outcome can only come from the reading under test. *)
+let plan_with_probes ?alloy ~orchestrator_probe ~alloy_probe () =
+  let config =
+    make_config ?alloy ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
+  in
+  let context =
+    ctx
+      ~orchestrator:(Setup.orchestrator_state_of_probe orchestrator_probe)
+      ~alloy_state:(Setup.alloy_state_of_probe alloy_probe)
+      ~docker_probe:docker_present ()
+  in
+  Setup.plan_for_config config context
+
+(* Read as an absence, an unread orchestrator listing plans a [docker run]
+   against a name that may already be taken, and the transport error the client
+   saw never reaches the operator at all. Each probe aborts naming itself: a
+   single "a probe failed" would leave the operator guessing which one. *)
+let test_plan_for_config_aborts_on_undetermined_orchestrator () =
+  match
+    plan_with_probes ~orchestrator_probe:orchestrator_unreachable
+      ~alloy_probe:(Ok "\n") ()
+  with
+  | Ok actions ->
+      fail
+        ("expected an unread orchestrator listing to be rejected, planned: "
+        ^ String.concat ", " (List.map action_string actions))
+  | Error message ->
+      check bool "names the listing that failed"
+        (Bondi_common.String_utils.contains ~needle:"bondi-orchestrator" message)
+        true;
+      check bool "carries the probe's own text"
+        (Bondi_common.String_utils.contains ~needle:transport_error message)
+        true
+
+let test_plan_for_config_aborts_on_undetermined_alloy () =
+  match
+    plan_with_probes ~alloy:(Some minimal_alloy)
+      ~orchestrator_probe:orchestrator_probe_running
+      ~alloy_probe:alloy_unreachable ()
+  with
+  | Ok actions ->
+      fail
+        ("expected an unread alloy listing to be rejected, planned: "
+        ^ String.concat ", " (List.map action_string actions))
+  | Error message ->
+      check bool "names the listing that failed"
+        (Bondi_common.String_utils.contains ~needle:"bondi-alloy" message)
+        true;
+      check bool "carries the probe's own text"
+        (Bondi_common.String_utils.contains ~needle:transport_error message)
+        true
+
+(* An alloy the configuration does not declare converges to nothing whether the
+   listing answered or not, so refusing to plan at all would block the phases
+   after it — the managed containers among them — over a reading nothing was
+   going to be planned from. This is the refinement [Managed_unobserved] already
+   makes: an unobservable listing only matters when something is declared
+   against it. *)
+let test_plan_for_config_allows_undetermined_alloy_without_declaration () =
+  match
+    plan_with_probes ~orchestrator_probe:orchestrator_probe_running
+      ~alloy_probe:alloy_unreachable ()
+  with
+  | Error message -> fail message
+  | Ok actions ->
+      check_actions
+        ~expected:
+          [
+            "EnsureDocker";
+            ensure_network_action;
+            "StopOrchestrator";
+            "RemoveOrchestrator";
+            "RunServer";
+          ]
+        actions
+
+(* The affirmative arm of both aborts: the identical fixture with listings that
+   answered plans the run. Without it the two refusals above would hold for a
+   [plan_for_config] that had stopped planning anything at all. *)
+let test_plan_for_config_proceeds_when_probes_succeed () =
+  match
+    plan_with_probes ~alloy:(Some minimal_alloy)
+      ~orchestrator_probe:orchestrator_probe_running
+      ~alloy_probe:alloy_probe_stopped ()
+  with
+  | Error message -> fail message
+  | Ok actions ->
+      check_actions
+        ~expected:
+          [
+            "EnsureDocker";
+            ensure_network_action;
+            "StopOrchestrator";
+            "RemoveOrchestrator";
+            "RunServer";
+            "StopAlloy";
+            "RemoveAlloy";
+            "EnsureAlloyConfig";
+            "RunAlloy";
+          ]
+        actions
 
 let test_excluded_containers_no_service () =
   let config =
@@ -979,14 +1393,10 @@ let test_plan_alloy_already_running () =
     make_config ~alloy:(Some minimal_alloy) ~user_service:None ~cron_jobs:None
       ~version:"1.0.0" ()
   in
-  let desired_image =
-    Option.value minimal_alloy.image ~default:Bondi_common.Defaults.alloy_image
-  in
   let context =
-    ctx
-      ~alloy_state:(Setup.Alloy_running { image = desired_image })
+    ctx ~alloy_state:Setup.Alloy_present
       ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
-      ~docker_installed:true ~acme_exists:false ()
+      ~docker_probe:docker_present ()
   in
   let actions = plan config context in
   check bool "StopAlloy to converge config"
@@ -1009,6 +1419,32 @@ let () =
         [
           test_case "always included" `Quick
             test_plan_always_includes_ensure_docker;
+        ] );
+      ( "docker observation",
+        [
+          test_case "a failed probe is undetermined" `Quick
+            test_docker_probe_error_is_undetermined;
+          test_case "command not found is a positive absence" `Quick
+            test_docker_probe_command_not_found_is_not_installed;
+          test_case "command not found on stdout is a positive absence" `Quick
+            test_docker_probe_command_not_found_on_stdout_is_not_installed;
+          test_case "a version string is an installed Docker" `Quick
+            test_docker_probe_version_output_is_installed;
+          test_case "plan_for_config aborts on an undetermined probe" `Quick
+            test_plan_for_config_aborts_on_undetermined_docker;
+          test_case "the abort names the transport error" `Quick
+            test_plan_for_config_abort_names_the_transport_error;
+          test_case "an absent Docker is still installed" `Quick
+            test_plan_for_config_still_installs_when_docker_is_absent;
+        ] );
+      ( "docker install verdict",
+        [
+          test_case "a failed probe is a failure, not an install" `Quick
+            test_ensure_docker_probe_error_is_a_failure_not_an_install;
+          test_case "installs only when Docker is absent" `Quick
+            test_ensure_docker_verdict_installs_only_when_absent;
+          test_case "satisfied when Docker is installed" `Quick
+            test_ensure_docker_verdict_is_satisfied_when_installed;
         ] );
       ( "ACME",
         [
@@ -1045,6 +1481,20 @@ let () =
             test_no_orchestrator_container_is_absent;
           test_case "created, restarting, paused and dead are not serving"
             `Quick test_non_running_states_are_not_serving;
+          test_case "a failed listing is undetermined" `Quick
+            test_orchestrator_probe_error_is_undetermined;
+        ] );
+      ( "probe aborts",
+        [
+          test_case "an unread orchestrator listing is rejected" `Quick
+            test_plan_for_config_aborts_on_undetermined_orchestrator;
+          test_case "an unread alloy listing is rejected" `Quick
+            test_plan_for_config_aborts_on_undetermined_alloy;
+          test_case "an unread alloy listing with no alloy declared proceeds"
+            `Quick
+            test_plan_for_config_allows_undetermined_alloy_without_declaration;
+          test_case "listings that answered are planned from" `Quick
+            test_plan_for_config_proceeds_when_probes_succeed;
         ] );
       ("order", [ test_case "action order" `Quick test_plan_action_order ]);
       ( "cron curl",
@@ -1092,9 +1542,27 @@ let () =
           test_case "enabled" `Quick test_plan_alloy_enabled;
           test_case "disabled" `Quick test_plan_alloy_disabled;
           test_case "removed" `Quick test_plan_alloy_removed;
-          test_case "version change" `Quick test_plan_alloy_version_change;
+          test_case "a declared image converges like the default" `Quick
+            test_plan_alloy_declared_image_converges_like_the_default;
           test_case "already running converges" `Quick
             test_plan_alloy_already_running;
+          test_case "a stopped container is removed before running" `Quick
+            test_plan_alloy_stopped_is_removed_before_running;
+          test_case "an absent container runs without removing" `Quick
+            test_plan_alloy_absent_runs_without_removing;
+          test_case "withdrawal removes a stopped container" `Quick
+            test_plan_alloy_withdrawn_stopped_is_removed;
+        ] );
+      ( "alloy observation",
+        [
+          test_case "a stopped container is present, not absent" `Quick
+            test_alloy_stopped_container_is_present_not_absent;
+          test_case "a running container is present" `Quick
+            test_alloy_running_container_is_present;
+          test_case "no container is absent" `Quick
+            test_alloy_no_container_is_absent;
+          test_case "a failed listing is undetermined" `Quick
+            test_alloy_probe_error_is_undetermined;
         ] );
       ( "excluded_containers_from_config",
         [
