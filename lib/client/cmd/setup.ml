@@ -94,23 +94,35 @@ let run_remote_docker ~user ~host ~key_path cmd =
 
 module Managed_container = Bondi_common.Managed_container
 
-type alloy_state = Alloy_not_running | Alloy_running of { image : string }
+(* The listing that produces this state is a remote command that can fail to run
+   at all, so "no container" and "no answer" are separate constructors. Reading
+   the second as the first plans a [docker run] against a name the host may
+   already be holding, and discards the transport error on the way.
+
+   Running and stopped are one fact here, unlike the orchestrator's: every state
+   a container can be in holds its name, and alloy carries no version the plan
+   compares against, so a present container is stopped, removed and re-run
+   whatever it was doing. *)
+type alloy_state = Alloy_absent | Alloy_present | Alloy_undetermined of string
 
 (* The orchestrator container is observed as three distinct facts rather than as
    a [string option] of the running version. A container that exists but is not
    running is neither "nothing there" nor "the right version is up": read as the
    first, the plan starts a container whose name is already taken; read as the
    second, setup skips the restart and leaves the host with nothing serving.
-   Both were reachable while presence and version were separate fields. *)
+   Both were reachable while presence and version were separate fields. A
+   fourth fact is that the listing never ran, which supports none of the three
+   and is kept apart from them for the same reason. *)
 type orchestrator_state =
   | Orchestrator_absent
   | Orchestrator_not_running
   | Orchestrator_running of { version : string }
+  | Orchestrator_undetermined of string
 
 (* Observed state of one managed container. Derived from the container's
    existence and its spec-hash label only, never from whether it is currently
    running: a container performing a scheduled self-restart still exists and
-   still carries a matching hash, so it converges to no action (FR-5). *)
+   still carries a matching hash, so it converges to no action. *)
 type managed_state =
   | Managed_absent
   | Managed_present of { spec_hash : string }
@@ -123,9 +135,31 @@ type managed_observation =
   | Managed_unobserved of string
   | Managed_observed of (string * managed_state) list
 
+(* What reading the host's Docker version established. The probe is a remote
+   command that can fail to run at all, and a command that never ran says
+   nothing about the host: read as an absence it makes the plan install Docker,
+   which restarts the daemon and every container with it. Absence is the host's
+   own report that the command does not exist, never a failure to ask — and
+   both reach the client the same way, since [ssh] propagates the remote
+   shell's exit 127 and [run_command] turns any non-zero exit into an [Error].
+   The two are told apart by what the host said, not by which channel said
+   it. *)
+type docker_status =
+  | Docker_installed of string
+  | Docker_not_installed of string
+  | Docker_undetermined of string
+
+(* What to do about Docker, decided from the probe the interpreter runs for
+   itself. It is a second SSH round trip and a second chance for the connection
+   to drop, so the gathered status does not make it safe: the decision is the
+   same one, taken again against a fresh reading. *)
+type docker_install_verdict =
+  | Docker_satisfied of string
+  | Docker_install
+  | Docker_abort of string
+
 type setup_context = {
-  docker_status : [ `Installed of string | `NotInstalled of string ];
-  acme_file_exists : bool;
+  docker_status : docker_status;
   orchestrator : orchestrator_state;
   alloy_state : alloy_state;
   managed : managed_observation;
@@ -148,6 +182,32 @@ type action =
   | StopManaged of string
   | RemoveManaged of string
   | CleanManagedConfig of string
+
+(* Which phase of the plan an action belongs to. The phase type and the report
+   built from it live in [Setup_phases], which knows nothing about actions; this
+   mapping is what [setup] passes in, and it stays here because the compiler can
+   only insist that a new action is given a phase where the action type is in
+   scope. *)
+let phase_of_action : action -> Setup_phases.phase = function
+  | EnsureDocker -> Setup_phases.Docker
+  | EnsureNetwork _ -> Setup_phases.Network
+  | RequireCronCurl -> Setup_phases.Cron_curl
+  | EnsureAcmeFile -> Setup_phases.Acme
+  | StopOrchestrator
+  | RemoveOrchestrator
+  | RunServer ->
+      Setup_phases.Orchestrator
+  | EnsureAlloyConfig
+  | RunAlloy
+  | StopAlloy
+  | RemoveAlloy ->
+      Setup_phases.Alloy
+  | WriteManagedEnv _
+  | RunManaged _
+  | StopManaged _
+  | RemoveManaged _
+  | CleanManagedConfig _ ->
+      Setup_phases.Managed
 
 (* ------------------------------------------------------------------------- *)
 (* Phase 1: Gather context (read-only)                                       *)
@@ -197,9 +257,35 @@ let orchestrator_state_of_ps_output output =
       | _ :: _ :: _ :: _ ->
           Orchestrator_not_running)
 
+let orchestrator_state_of_probe = function
+  | Ok output -> orchestrator_state_of_ps_output output
+  | Error err -> Orchestrator_undetermined err
+
+let alloy_ps_command =
+  "ps -a --filter name=^/bondi-alloy$ --format '{{.State}}\t{{.Image}}'"
+
+(* The listing is filtered to the one name, so any line at all is that
+   container — including one that does not parse, and one in "created",
+   "restarting", "paused", "exited", "removing" or "dead". The columns are read
+   by nothing here: what the plan needs to know is whether the name is taken.
+   The state column is kept in the command because it is what an operator reads
+   out of the SSH log when a run is being diagnosed. *)
+let alloy_state_of_ps_output output =
+  match
+    output
+    |> String.split_on_char '\n'
+    |> List.find_opt (fun line -> String.trim line <> "")
+  with
+  | None -> Alloy_absent
+  | Some _ -> Alloy_present
+
+let alloy_state_of_probe = function
+  | Ok output -> alloy_state_of_ps_output output
+  | Error err -> Alloy_undetermined err
+
 (* Managed containers are discovered by label rather than by name: the declared
    set is not known to the server, and [-a] is what lets a self-restarting
-   container be observed rather than read as absent (FR-5). *)
+   container be observed rather than read as absent. *)
 let managed_ps_command =
   let label_key, label_value = Managed_container.type_label in
   Printf.sprintf
@@ -226,64 +312,72 @@ let managed_of_ps_output output =
       | _ :: _ :: _ :: _ ->
           None)
 
+let docker_status_of_probe = function
+  | Ok version_output ->
+      if
+        Bondi_common.String_utils.contains ~needle:"command not found"
+          version_output
+      then Docker_not_installed (String.trim version_output)
+      else Docker_installed (String.trim version_output)
+  (* The shell reports a missing command by exiting non-zero, which is the same
+     channel a dropped connection arrives on. An error carrying the shell's own
+     words is the host answering, and it is the only error that may lead to an
+     install. *)
+  | Error err
+    when Bondi_common.String_utils.contains ~needle:"command not found" err ->
+      Docker_not_installed (String.trim err)
+  | Error err -> Docker_undetermined err
+
+(* Installing Docker is the one action here that changes a host nobody asked to
+   change: it restarts the daemon, and with it every container carrying a
+   restart policy. Only the host's own report that the command does not exist
+   is a reason to do that; a probe that could not be run at all is a reason to
+   stop and say so. *)
+let docker_install_verdict_of_probe probe =
+  match docker_status_of_probe probe with
+  | Docker_installed version -> Docker_satisfied version
+  | Docker_not_installed _ -> Docker_install
+  | Docker_undetermined message ->
+      Docker_abort
+        (Printf.sprintf
+           "could not read the Docker version, so Docker will not be \
+            installed: %s"
+           message)
+
 let gather_context ~user ~host ~key_path : (setup_context, string) result =
   let docker_status =
-    match get_docker_version ~user ~host ~key_path with
-    | Ok version_output ->
-        if
-          Bondi_common.String_utils.contains ~needle:"command not found"
-            version_output
-        then `NotInstalled (String.trim version_output)
-        else `Installed (String.trim version_output)
-    | Error err -> `NotInstalled err
-  in
-  let acme_file = "/etc/traefik/acme/acme.json" in
-  let acme_file_exists =
-    match remote_run ~user ~host ~key_path ("test -f " ^ acme_file) with
-    | Ok _ -> true
-    | Error _ -> false
+    docker_status_of_probe (get_docker_version ~user ~host ~key_path)
   in
   let orchestrator =
     match docker_status with
-    | `NotInstalled _ -> Orchestrator_absent
-    | `Installed _ -> (
-        match
-          run_remote_docker ~user ~host ~key_path orchestrator_ps_command
-        with
-        | Ok output -> orchestrator_state_of_ps_output output
-        | Error _ -> Orchestrator_absent)
+    | Docker_not_installed _ -> Orchestrator_absent
+    | Docker_undetermined message -> Orchestrator_undetermined message
+    | Docker_installed _ ->
+        orchestrator_state_of_probe
+          (run_remote_docker ~user ~host ~key_path orchestrator_ps_command)
   in
   let alloy_state =
     match docker_status with
-    | `NotInstalled _ -> Alloy_not_running
-    | `Installed _ -> (
-        match
-          run_remote_docker ~user ~host ~key_path
-            "ps --filter name=^/bondi-alloy$ --format '{{.Image}}'"
-        with
-        | Ok output -> (
-            let image =
-              output
-              |> String.split_on_char '\n'
-              |> List.find_opt (fun line -> String.trim line <> "")
-              |> Option.map String.trim
-            in
-            match image with
-            | Some img when img <> "" -> Alloy_running { image = img }
-            | _ -> Alloy_not_running)
-        | Error _ -> Alloy_not_running)
+    | Docker_not_installed _ -> Alloy_absent
+    | Docker_undetermined message -> Alloy_undetermined message
+    | Docker_installed _ ->
+        alloy_state_of_probe
+          (run_remote_docker ~user ~host ~key_path alloy_ps_command)
   in
   let managed =
     match docker_status with
     (* No Docker means no containers, which is an observation rather than a
        failure to observe: a first setup must still plan the declared ones. *)
-    | `NotInstalled _ -> Managed_observed []
-    | `Installed _ -> (
+    | Docker_not_installed _ -> Managed_observed []
+    (* An unread Docker is a failure to observe. No listing was run, so an
+       empty one is a claim about the host that nothing supports. *)
+    | Docker_undetermined message -> Managed_unobserved message
+    | Docker_installed _ -> (
         match run_remote_docker ~user ~host ~key_path managed_ps_command with
         | Ok output -> Managed_observed (managed_of_ps_output output)
         | Error err -> Managed_unobserved err)
   in
-  Ok { docker_status; acme_file_exists; orchestrator; alloy_state; managed }
+  Ok { docker_status; orchestrator; alloy_state; managed }
 
 (* ------------------------------------------------------------------------- *)
 (* Phase 2: Plan (pure)                                                      *)
@@ -308,14 +402,14 @@ let orchestrator_actions (config : Config_file.t) (ctx : setup_context) :
     action list =
   match ctx.orchestrator with
   | Orchestrator_absent -> [ RunServer ]
+  (* Nothing is planned against a listing that never ran; [plan_for_config] is
+     where that becomes an error rather than a silent no-op. *)
+  | Orchestrator_undetermined _ -> []
   | Orchestrator_not_running -> [ RemoveOrchestrator; RunServer ]
   | Orchestrator_running { version } ->
       if version = config.bondi_server.version && not (has_cron_jobs config)
       then []
       else [ StopOrchestrator; RemoveOrchestrator; RunServer ]
-
-let alloy_desired_image (alloy : Config_file.alloy) =
-  Option.value alloy.image ~default:Bondi_common.Defaults.alloy_image
 
 let managed_state_of observed name =
   match List.assoc_opt name observed with
@@ -350,15 +444,29 @@ let plan (config : Config_file.t) ~(specs : Managed_container.t list)
   let acme = if has_user_services config then [ EnsureAcmeFile ] else [] in
   (* Server setup - skip entirely if already up-to-date *)
   let server = orchestrator_actions config ctx in
+  (* Every state that leaves a container behind removes it first, stopped ones
+     included: [docker run] refuses a name that is already taken, so a stopped
+     bondi-alloy makes every later setup fail on a name conflict — and because
+     alloy precedes the managed containers here, nothing after it converges
+     either. The stop stays ahead of the removal because [RemoveAlloy]'s [docker
+     rm] refuses a paused or restarting container just as it refuses a running
+     one, and both are states a non-running container can be in. *)
   let alloy =
     match (config.alloy, ctx.alloy_state) with
-    (* Alloy removed from config but still running *)
-    | None, Alloy_running _ -> [ StopAlloy; RemoveAlloy ]
-    | Some _, Alloy_running _ ->
+    | Some _, Alloy_present ->
         [ StopAlloy; RemoveAlloy; EnsureAlloyConfig; RunAlloy ]
-    (* Alloy configured but not running *)
-    | Some _, Alloy_not_running -> [ EnsureAlloyConfig; RunAlloy ]
-    | None, Alloy_not_running -> []
+    | Some _, Alloy_absent -> [ EnsureAlloyConfig; RunAlloy ]
+    (* Withdrawn from configuration. A stopped container has to go too, or the
+       name stays taken and the wedge outlives the withdrawal. *)
+    | None, Alloy_present -> [ StopAlloy; RemoveAlloy ]
+    | None, Alloy_absent -> []
+    (* Nothing is planned against a listing that never ran, whether alloy is
+       declared or not. With it declared [plan_for_config] turns this into an
+       error; without it there was nothing to converge anyway, so the run
+       carries on to the phases that follow. *)
+    | Some _, Alloy_undetermined _
+    | None, Alloy_undetermined _ ->
+        []
   in
   let managed =
     match ctx.managed with
@@ -397,6 +505,56 @@ let plan (config : Config_file.t) ~(specs : Managed_container.t list)
    declaration surfaces here rather than inside the plan. *)
 let plan_for_config (config : Config_file.t) (ctx : setup_context) =
   let* specs = Config_file.managed_containers config in
+  let* () =
+    match ctx.docker_status with
+    (* Installing Docker restarts the daemon, and with it every container
+       carrying a restart policy. That is only ever worth doing against a host
+       that positively said it has no Docker; a probe that could not be run is
+       a reason to stop and report, not to converge. *)
+    | Docker_undetermined message ->
+        Error
+          (Printf.sprintf
+             "could not read the Docker version on the server, so setup will \
+              not act on whether it is installed: %s"
+             message)
+    | Docker_installed _
+    | Docker_not_installed _ ->
+        Ok ()
+  in
+  let* () =
+    match ctx.orchestrator with
+    (* A listing that never ran cannot say the host holds no orchestrator, and
+       the plan's answer to an absent one is to run a container under a name
+       that may already be taken. Each probe reports itself: one shared "a probe
+       failed" would leave the operator guessing which reading to go and check
+       by hand. *)
+    | Orchestrator_undetermined message ->
+        Error
+          (Printf.sprintf
+             "could not list the bondi-orchestrator container on the server, \
+              so setup will not act on whether it is running: %s"
+             message)
+    | Orchestrator_absent
+    | Orchestrator_not_running
+    | Orchestrator_running _ ->
+        Ok ()
+  in
+  let* () =
+    match (ctx.alloy_state, config.alloy) with
+    (* An alloy the configuration does not declare converges to nothing whether
+       the listing answered or not, so refusing here would block every phase
+       after it over a reading nothing was going to be planned from. Declared,
+       it is the reading the run depends on. *)
+    | Alloy_undetermined message, Some _ ->
+        Error
+          (Printf.sprintf
+             "could not list the bondi-alloy container on the server, so setup \
+              will not act on whether it is running: %s"
+             message)
+    | Alloy_undetermined _, None
+    | (Alloy_absent | Alloy_present), _ ->
+        Ok ()
+  in
   match (ctx.managed, specs) with
   (* Converging a declared container against an observation that never happened
      would plan a run for one that may already exist. With nothing declared
@@ -453,42 +611,41 @@ let alloy_river_config (config : Config_file.t) (alloy : Config_file.alloy) :
 
 let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
     (actions : action list) : (unit, string) result =
-  let rec run = function
-    | [] -> Ok ()
-    | EnsureDocker :: rest -> (
+  (* One action, applied. No arm here knows what follows it: the plan stops at
+     the first failure, and saying what that leaves undone is [run]'s job
+     below. *)
+  let step : action -> (unit, string) result = function
+    | EnsureDocker -> (
+        (* The version is read again here rather than taken from the gathered
+           context: this is a separate SSH round trip, and a host can change
+           under a long setup run. What the reading may lead to is decided in
+           [docker_install_verdict_of_probe]; this arm only carries it out. *)
         match
-          match get_docker_version ~user ~host ~key_path with
-          | Ok version_output ->
-              if
-                Bondi_common.String_utils.contains ~needle:"command not found"
-                  version_output
-              then Error "docker not installed"
-              else (
-                print_endline
-                  (Printf.sprintf "Docker is already installed on server %s: %s"
-                     ip_address
-                     (String.trim version_output));
-                Ok ())
-          | Error err ->
-              print_endline
-                (Printf.sprintf
-                   "Docker not found on server %s\n\
-                    Error: %s\n\
-                    Installing Docker..."
-                   ip_address err);
-              let install_cmd =
-                "curl -fsSL https://get.docker.com -o get-docker.sh && sudo sh \
-                 get-docker.sh"
-              in
-              let* output = remote_run ~user ~host ~key_path install_cmd in
-              print_endline
-                (Printf.sprintf "Docker installed on server %s: %s" ip_address
-                   (String.trim output));
-              Ok ()
+          docker_install_verdict_of_probe
+            (get_docker_version ~user ~host ~key_path)
         with
-        | Error err -> Error err
-        | Ok () -> run rest)
-    | EnsureAcmeFile :: rest ->
+        (* Bare: [run] below names the server once, for every arm. *)
+        | Docker_abort message -> Error message
+        | Docker_satisfied version ->
+            print_endline
+              (Printf.sprintf "Docker is already installed on server %s: %s"
+                 ip_address version);
+            Ok ()
+        | Docker_install ->
+            print_endline
+              (Printf.sprintf
+                 "Docker not found on server %s\nInstalling Docker..."
+                 ip_address);
+            let install_cmd =
+              "curl -fsSL https://get.docker.com -o get-docker.sh && sudo sh \
+               get-docker.sh"
+            in
+            let* output = remote_run ~user ~host ~key_path install_cmd in
+            print_endline
+              (Printf.sprintf "Docker installed on server %s: %s" ip_address
+                 (String.trim output));
+            Ok ())
+    | EnsureAcmeFile ->
         let acme_dir = "/etc/traefik/acme" in
         let acme_file = acme_dir ^ "/acme.json" in
         let* () =
@@ -516,8 +673,8 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
                    (String.trim output));
               Ok ()
         in
-        run rest
-    | EnsureNetwork network_name :: rest ->
+        Ok ()
+    | EnsureNetwork network_name ->
         let cmd =
           Printf.sprintf
             "docker network inspect %s > /dev/null 2>&1 || docker network \
@@ -529,8 +686,8 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
         print_endline
           (Printf.sprintf "Network %s is present on server %s" network_name
              ip_address);
-        run rest
-    | RequireCronCurl :: rest ->
+        Ok ()
+    | RequireCronCurl ->
         (* The version comparison is a pure decision in [Curl_version]; this arm
            only obtains the host's answer and reports the verdict. A curl that
            cannot be run at all is indistinguishable here from one too old, and
@@ -541,11 +698,7 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
           | Ok output -> output
           | Error err -> err
         in
-        let* () =
-          Curl_version.supports_fail_with_body output
-          |> Result.map_error (fun msg ->
-              Printf.sprintf "server %s: %s" ip_address msg)
-        in
+        let* () = Curl_version.supports_fail_with_body output in
         print_endline
           (Printf.sprintf "curl on server %s supports the crontab command: %s"
              ip_address
@@ -553,16 +706,16 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
                 (match String.split_on_char '\n' output with
                 | [] -> output
                 | line :: _ -> line)));
-        run rest
-    | StopOrchestrator :: rest ->
+        Ok ()
+    | StopOrchestrator ->
         let* _ =
           run_remote_docker ~user ~host ~key_path "stop bondi-orchestrator"
         in
         print_endline
           (Printf.sprintf "Stopped bondi-orchestrator container on server %s"
              ip_address);
-        run rest
-    | RemoveOrchestrator :: rest ->
+        Ok ()
+    | RemoveOrchestrator ->
         (* Asserts the outcome rather than the command's exit status: an
            orchestrator started by an older Bondi ran with --rm, so [docker
            stop] has already deleted it and [docker rm] would report "no such
@@ -578,8 +731,8 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
         print_endline
           (Printf.sprintf "Removed bondi-orchestrator container on server %s"
              ip_address);
-        run rest
-    | RunServer :: rest ->
+        Ok ()
+    | RunServer ->
         let volume_mounts, user_flag =
           match config.cron_jobs with
           | Some jobs when jobs <> [] ->
@@ -628,10 +781,10 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
         print_endline
           (Printf.sprintf "bondi-orchestrator is serving on server %s: %s"
              ip_address image);
-        run rest
-    | EnsureAlloyConfig :: rest -> (
+        Ok ()
+    | EnsureAlloyConfig -> (
         match config.alloy with
-        | None -> run rest
+        | None -> Ok ()
         | Some alloy ->
             let river_config =
               Bondi_common.Alloy_river.generate
@@ -653,10 +806,10 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
             print_endline
               (Printf.sprintf "Alloy config written on server %s: %s" ip_address
                  config_path);
-            run rest)
-    | RunAlloy :: rest -> (
+            Ok ())
+    | RunAlloy -> (
         match config.alloy with
-        | None -> run rest
+        | None -> Ok ()
         | Some alloy ->
             let image =
               Option.value alloy.image
@@ -678,14 +831,14 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
             print_endline
               (Printf.sprintf "bondi-alloy container started on server %s: %s"
                  ip_address (String.trim output));
-            run rest)
-    | StopAlloy :: rest ->
+            Ok ())
+    | StopAlloy ->
         let* _ = run_remote_docker ~user ~host ~key_path "stop bondi-alloy" in
         print_endline
           (Printf.sprintf "Stopped bondi-alloy container on server %s"
              ip_address);
-        run rest
-    | RemoveAlloy :: rest ->
+        Ok ()
+    | RemoveAlloy ->
         let* _ = run_remote_docker ~user ~host ~key_path "rm bondi-alloy" in
         let* _ =
           remote_run ~user ~host ~key_path "sudo rm -rf /etc/bondi/alloy"
@@ -693,8 +846,8 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
         print_endline
           (Printf.sprintf
              "Removed bondi-alloy container and config on server %s" ip_address);
-        run rest
-    | WriteManagedEnv spec :: rest ->
+        Ok ()
+    | WriteManagedEnv spec ->
         let env_path = Managed_container.env_file_path spec in
         (* umask 077 makes the file mode 600 as it is created, rather than
            creating it readable and narrowing it afterwards, and the contents
@@ -717,8 +870,8 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
         print_endline
           (Printf.sprintf "Wrote secret environment file on server %s: %s"
              ip_address env_path);
-        run rest
-    | RunManaged spec :: rest ->
+        Ok ()
+    | RunManaged spec ->
         let args = Managed_container.run_args spec |> List.map Filename.quote in
         let* output =
           run_remote_docker ~user ~host ~key_path (String.concat " " args)
@@ -727,8 +880,8 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
           (Printf.sprintf "%s container started on server %s: %s"
              (Managed_container.container_name spec)
              ip_address (String.trim output));
-        run rest
-    | StopManaged name :: rest ->
+        Ok ()
+    | StopManaged name ->
         let container = Managed_container.container_name_of name in
         let* _ =
           run_remote_docker ~user ~host ~key_path
@@ -737,8 +890,8 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
         print_endline
           (Printf.sprintf "Stopped %s container on server %s" container
              ip_address);
-        run rest
-    | RemoveManaged name :: rest ->
+        Ok ()
+    | RemoveManaged name ->
         let container = Managed_container.container_name_of name in
         let* _ =
           run_remote_docker ~user ~host ~key_path
@@ -747,8 +900,8 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
         print_endline
           (Printf.sprintf "Removed %s container on server %s" container
              ip_address);
-        run rest
-    | CleanManagedConfig name :: rest ->
+        Ok ()
+    | CleanManagedConfig name ->
         let dir = Managed_container.config_dir_of name in
         let* _ =
           remote_run ~user ~host ~key_path ("sudo rm -rf " ^ Filename.quote dir)
@@ -756,7 +909,28 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
         print_endline
           (Printf.sprintf "Removed config directory on server %s: %s" ip_address
              dir);
-        run rest
+        Ok ()
+  in
+  (* [plan]'s concatenation is docker, network, cron curl, ACME, orchestrator,
+     alloy, managed — so an action that fails half way down it leaves every
+     phase below unapplied, and the host part-way through a setup. Reporting
+     only the action that failed is what let a run that stranded the declared
+     containers read as a single small failure about alloy. The wording is a
+     decision and belongs with the phases; this arm only supplies the facts.
+     Naming the server is part of that wording, which is why no [step] arm above
+     prefixes its own error: attribution belongs to whatever reports the
+     failure, and every failure passes through here. *)
+  let rec run = function
+    | [] -> Ok ()
+    | action :: rest -> (
+        match step action with
+        | Ok () -> run rest
+        | Error reason ->
+            Error
+              (Setup_phases.failure_message ~server:ip_address
+                 ~failed:(phase_of_action action)
+                 ~remaining:(List.map phase_of_action rest)
+                 ~reason))
   in
   run actions
 
@@ -777,10 +951,22 @@ let setup_server config server =
           let user = ssh_config.user in
           let host = ip_address in
           let* context = gather_context ~user ~host ~key_path in
-          let* actions = plan_for_config config context in
+          (* [plan_for_config] refuses a reading it could not take, and it does
+             not know which host it was taken from. Every failure the
+             interpreter reports names its server, and [run] below prints them
+             all at the end of a multi-server run, far from the "Processing
+             server" line that would otherwise have to identify them. *)
+          let* actions =
+            plan_for_config config context
+            |> Result.map_error (fun message ->
+                Printf.sprintf "server %s: %s" ip_address message)
+          in
           (* Log skip/restart reason when a container is already there *)
           (match context.orchestrator with
           | Orchestrator_absent -> ()
+          (* Nothing to report: [plan_for_config] above has already refused a
+             listing that never ran, so this line is never reached with one. *)
+          | Orchestrator_undetermined _ -> ()
           | Orchestrator_not_running ->
               print_endline
                 (Printf.sprintf

@@ -174,7 +174,7 @@ container that may already exist.
   $ bondi-client setup
   Setting up the servers...
   Processing server: 10.0.0.1
-  Error: could not list managed containers on the server, so the declared ones cannot be converged: command failed (7): 
+  Error: server 10.0.0.1: could not list managed containers on the server, so the declared ones cannot be converged: command failed (7): 
   [1]
 
 Nothing was started, and no environment file was written.

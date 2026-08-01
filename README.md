@@ -16,7 +16,9 @@ The server:
 - exposes a web UI for managing the server
 
 The CLI:
-- installs Docker on the server if it's not already installed
+- installs Docker on the server if the server reports it is not installed — a
+  version probe that cannot be read at all stops the run instead, since
+  installing Docker restarts the daemon and every container with it
 - pulls and runs the bondi-orchestrator Docker image
 - triggers deployments of your service/workload's Docker image to the server
 
