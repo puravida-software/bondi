@@ -67,8 +67,12 @@ push-server TAG:
 server-docker:
     docker run --group-add $(stat -c %g /var/run/docker.sock) --name bondi-orchestrator -p 3030:3030 -v /var/run/docker.sock:/var/run/docker.sock --rm {{ IMAGE_NAME }}
 
+# ODOC_WARN_ERROR matches what CI's lint-doc action sets. Without it odoc
+# reports an unresolvable {!Reference} as a warning and exits 0, so the local
+# gate passes and CI fails on the same tree — which is how a broken cross-library
+# reference reaches a pull request.
 lint-doc:
-    opam exec -- dune build @doc
+    ODOC_WARN_ERROR=true opam exec -- dune build @doc
 
 lint-fmt:
     opam exec -- dune build @fmt

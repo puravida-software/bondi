@@ -19,7 +19,7 @@ val orchestrator_reading_standalone :
 
     This is a deviation from the rule that an Eio loop is opened once, at the
     program's entry point, and it holds only while nothing calls this from
-    inside a fiber — {!Eio_main.run} cannot be nested, and nothing in the types
+    inside a fiber — [Eio_main.run] cannot be nested, and nothing in the types
     will say so. The day [setup] or a shared CLI entry point runs under a loop
     of its own, this has to become a function taking [env] instead. *)
 
