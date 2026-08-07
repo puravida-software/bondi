@@ -344,6 +344,58 @@ let docker_install_verdict_of_probe probe =
             installed: %s"
            message)
 
+(* What reading the host's curl established. The crontab command uses
+   --fail-with-body and an older curl rejects it as unknown, so the version is
+   read once at setup time rather than discovered by a job at 3am — but that
+   reading is a version string, and a command that never ran has no version
+   string in it. Folding the transport's own error into curl's output tells the
+   operator that the host reported "command failed (255): Connection closed by …"
+   but 7.76.0 is required, which is a failure to ask dressed as a fact about
+   curl. Absence is different: the host's own report that the command does not
+   exist arrives on the same channel and is an answer, so the two are told apart
+   by what the host said rather than by which channel said it. *)
+type cron_curl_verdict =
+  | Cron_curl_reported of string
+  | Cron_curl_undetermined of string
+
+let cron_curl_verdict_of_probe = function
+  | Ok output -> Cron_curl_reported output
+  | Error err
+    when Bondi_common.String_utils.contains ~needle:"command not found" err ->
+      Cron_curl_reported err
+  | Error err -> Cron_curl_undetermined err
+
+(* What reading the ACME file established. [test -f] reports an absent file by
+   exiting non-zero, which is the channel a dropped connection arrives on too,
+   so the host's answer and the failure to get one were the same value. The
+   probe below always exits 0 and says which on standard output, leaving the
+   exit status to mean "the command could be run on that host" — the same
+   separation every other probe in this file draws. *)
+let acme_file_present_marker = "BONDI_ACME_PRESENT"
+let acme_file_absent_marker = "BONDI_ACME_ABSENT"
+
+let acme_probe_command ~path =
+  Printf.sprintf "if [ -f %s ]; then echo %s; else echo %s; fi"
+    (Filename.quote path) acme_file_present_marker acme_file_absent_marker
+
+type acme_file_state =
+  | Acme_file_present
+  | Acme_file_absent
+  | Acme_file_undetermined of string
+
+let acme_file_state_of_probe = function
+  | Error message -> Acme_file_undetermined message
+  | Ok output ->
+      let said marker =
+        Bondi_common.String_utils.contains ~needle:marker output
+      in
+      if said acme_file_present_marker then Acme_file_present
+      else if said acme_file_absent_marker then Acme_file_absent
+      else
+        Acme_file_undetermined
+          (Printf.sprintf "the host answered without saying which: %s"
+             (String.trim output))
+
 let gather_context ~user ~host ~key_path : (setup_context, string) result =
   let docker_status =
     docker_status_of_probe (get_docker_version ~user ~host ~key_path)
@@ -648,9 +700,21 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
     | EnsureAcmeFile ->
         let acme_dir = "/etc/traefik/acme" in
         let acme_file = acme_dir ^ "/acme.json" in
+        (* What the reading may lead to is decided above; this arm only obtains
+           the host's answer and carries it out. *)
         let* () =
-          match remote_run ~user ~host ~key_path ("test -f " ^ acme_file) with
-          | Ok _ ->
+          match
+            acme_file_state_of_probe
+              (remote_run ~user ~host ~key_path
+                 (acme_probe_command ~path:acme_file))
+          with
+          | Acme_file_undetermined message ->
+              Error
+                (Printf.sprintf
+                   "could not read whether %s exists on the server, so setup \
+                    will not act on whether it does: %s"
+                   acme_file message)
+          | Acme_file_present ->
               let cmd =
                 Printf.sprintf "sudo chown root:root %s && sudo chmod 600 %s"
                   acme_file acme_file
@@ -660,7 +724,7 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
                 (Printf.sprintf "ACME file permissions updated on server %s: %s"
                    ip_address acme_file);
               Ok ()
-          | Error _ ->
+          | Acme_file_absent ->
               let cmd =
                 Printf.sprintf
                   "sudo mkdir -p %s && sudo touch %s && sudo chown root:root \
@@ -688,15 +752,21 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
              ip_address);
         Ok ()
     | RequireCronCurl ->
-        (* The version comparison is a pure decision in [Curl_version]; this arm
-           only obtains the host's answer and reports the verdict. A curl that
-           cannot be run at all is indistinguishable here from one too old, and
-           both are rejections, so the SSH error text is passed through as the
-           output to be judged. *)
-        let output =
-          match remote_run ~user ~host ~key_path "curl --version" with
-          | Ok output -> output
-          | Error err -> err
+        (* The version comparison is a pure decision in [Curl_version] and what
+           counts as curl having answered is one in [cron_curl_verdict_of_probe];
+           this arm only obtains the host's reply and carries the verdict out. *)
+        let* output =
+          match
+            cron_curl_verdict_of_probe
+              (remote_run ~user ~host ~key_path "curl --version")
+          with
+          | Cron_curl_reported output -> Ok output
+          | Cron_curl_undetermined message ->
+              Error
+                (Printf.sprintf
+                   "could not read the curl version on the server, so setup \
+                    will not act on whether it can run the crontab command: %s"
+                   message)
         in
         let* () = Curl_version.supports_fail_with_body output in
         print_endline
@@ -994,12 +1064,46 @@ let setup_server config server =
                      ip_address reason));
           interpret ~user ~host ~key_path ~ip_address config actions)
 
+(* What one server's run produced: whether it converged, and what the host holds
+   afterwards. They are separate because a run that stopped part-way is exactly
+   when the second is worth reading, so neither may stand in for the other — the
+   plan's account of what it executed is the thing that was never a report of
+   the box. *)
+type server_outcome = {
+  converged : (unit, string) result;
+  report : Status_report.server_report;
+}
+
+(* The report is taken after the run, whatever the run returned. Its reads are
+   its own SSH connections and its own HTTP request, so none of them can change
+   what [setup_server] decided, and a read that failed becomes a cell rather
+   than an early return. *)
+let setup_and_report ~fetch config (server : Config_file.server) =
+  let converged = setup_server config server in
+  let reading = Status_gather.gather ~fetch server in
+  (* The wait is scoped by the reading rather than by the configuration: what
+     declares a healthcheck is a fact about the containers on the box, and a
+     declared component the host does not have is not something to wait for —
+     it is already the report's own row. Taking the reading first is what makes
+     the wait about the box as this run left it. *)
+  let waits =
+    Status_gather.health_waits
+      ~timeout_seconds:Container_health.wait_timeout_seconds server
+      reading.docker
+  in
+  {
+    converged;
+    report =
+      Status_gather.report_of_reading ~config ~address:server.ip_address ~waits
+        reading;
+  }
+
 let run () =
   match Config_file.read () with
   | Error message ->
       prerr_endline ("Error reading configuration: " ^ message);
       exit 1
-  | Ok config ->
+  | Ok config -> (
       let servers = Config_file.servers config in
       if servers = [] then (
         prerr_endline
@@ -1007,17 +1111,54 @@ let run () =
            configure a service with servers.";
         exit 1);
       print_endline "Setting up the servers...";
-      let results = List.map (setup_server config) servers in
+      let service_name =
+        match config.user_service with
+        | Some service -> Some service.name
+        | None -> None
+      in
+      let outcomes =
+        List.map
+          (setup_and_report
+             ~fetch:(Status.orchestrator_reading_standalone ~service_name)
+             config)
+          servers
+      in
       let errors =
         List.filter_map
-          (function
+          (fun outcome ->
+            match outcome.converged with
             | Error msg -> Some msg
             | Ok () -> None)
-          results
+          outcomes
       in
-      if errors <> [] then (
-        List.iter (fun msg -> prerr_endline ("Error: " ^ msg)) errors;
-        exit 1)
+      List.iter (fun msg -> prerr_endline ("Error: " ^ msg)) errors;
+      (* The failure above says which phases did not run; this says what is on
+         the box now. Both are printed, and this one last, because it is the
+         reading the operator acts on — and it is printed on the successful path
+         for the same reason, since a run that converged is not evidence that
+         what it converged is up. *)
+      print_newline ();
+      print_string
+        (Status_report.render_table
+           (List.map (fun outcome -> outcome.report) outcomes));
+      (* A component that declares a healthcheck and has not passed it is a run
+         that may not claim success, and the table above is where it is named:
+         a second wording for the same fact on standard error would say it
+         twice in two registers, which is the duplication one report exists to
+         remove. *)
+      let health_failed =
+        List.exists
+          (fun outcome -> Status_report.exit_failure outcome.report.rows)
+          outcomes
+      in
+      (* Every [exit] stays out here, where no handler is in scope to turn one
+         into a value. *)
+      match (errors, health_failed) with
+      | [], false -> ()
+      | [], true
+      | _ :: _, false
+      | _ :: _, true ->
+          exit 1)
 
 let cmd =
   let term = Cmdliner.Term.(const run $ const ()) in

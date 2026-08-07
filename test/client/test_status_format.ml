@@ -1,32 +1,56 @@
 open Alcotest
-module Status = Bondi_client.Cmd.Status
+module Status = Bondi_client.Orchestrator_status
+module Report = Bondi_client.Status_report
+module Inventory = Bondi_client.Host_inventory
+module Crontab = Bondi_client.Crontab_listing
 module Config_file = Bondi_client.Config_file
 
-(* --- Test helpers --- *)
+(* --- Test helpers ---
 
-let contains ~needle hay = Bondi_common.String_utils.contains ~needle hay
+   These cases date from when the orchestrator's HTTP response was the report's
+   only source, and they are kept unchanged in what they assert. What changed is
+   how they reach the renderer: the response is mapped onto the merged model and
+   rendered from there, so each case now also pins that nothing was lost on the
+   way through it.
 
-let mk_config ?user_service ?cron_jobs ?managed_containers () : Config_file.t =
-  {
-    user_service;
-    bondi_server = { version = "0.1.0" };
-    traefik = None;
-    cron_jobs;
-    alloy = None;
-    managed_containers;
-  }
+   The host's own reading is [Observed []] rather than a failed one: the SSH
+   source answered and has nothing, which leaves every assertion below about the
+   orchestrator's side of the report, as it was when these cases were written. *)
 
-let mk_managed_container name image tag : Config_file.managed_container =
-  {
-    name;
-    image;
-    tag;
-    restart = "unless-stopped";
-    network = Some "bondi-network";
-    ports = None;
-    env_vars = None;
-    secret_env_vars = None;
-  }
+let contains = Test_helpers.contains
+
+let render ~(config : Config_file.t) results =
+  Report.render_table
+    (List.map
+       (fun (address, (status : Status.comprehensive_status)) ->
+         {
+           Report.address;
+           rows =
+             Report.rows ~config ~docker:(Inventory.Observed [])
+               ~orchestrator:(Ok (Status.components_of status))
+               ~waits:[];
+           crontab = Crontab.No_section;
+           warnings = status.errors;
+         })
+       results)
+
+let render_json ~(config : Config_file.t) results =
+  Report.render_json
+    (List.map
+       (fun (address, (status : Status.comprehensive_status)) ->
+         {
+           Report.address;
+           rows =
+             Report.rows ~config ~docker:(Inventory.Observed [])
+               ~orchestrator:(Ok (Status.components_of status))
+               ~waits:[];
+           crontab = Crontab.No_section;
+           warnings = status.errors;
+         })
+       results)
+
+let mk_config = Client_fixtures.mk_config
+let mk_managed_container = Client_fixtures.mk_managed_container
 
 (* The lines of one section: its header, through to the blank line that ends it.
    Asserting a row is "under Infrastructure" means asserting membership here,
@@ -129,7 +153,7 @@ let test_format_table_full () =
         ]
       ()
   in
-  let result = Status.format_table ~config [ ("1.2.3.4", full_status) ] in
+  let result = render ~config [ ("1.2.3.4", full_status) ] in
   (* Should contain all section headers *)
   check bool "has Service header" true (contains result ~needle:"Service");
   check bool "has Cron Jobs header" true (contains result ~needle:"Cron Jobs");
@@ -162,7 +186,7 @@ let test_format_table_no_service () =
       errors = [];
     }
   in
-  let result = Status.format_table ~config [ ("1.2.3.4", status) ] in
+  let result = render ~config [ ("1.2.3.4", status) ] in
   check bool "no Service header" false (contains result ~needle:"Service");
   check bool "has Infrastructure header" true
     (contains result ~needle:"Infrastructure")
@@ -184,7 +208,7 @@ let test_format_table_not_found_service () =
       errors = [];
     }
   in
-  let result = Status.format_table ~config [ ("1.2.3.4", status) ] in
+  let result = render ~config [ ("1.2.3.4", status) ] in
   check bool "has Service header" true (contains result ~needle:"Service");
   check bool "has not found" true (contains result ~needle:"not found")
 
@@ -209,7 +233,7 @@ let test_format_table_not_found_cron () =
       errors = [];
     }
   in
-  let result = Status.format_table ~config [ ("1.2.3.4", status) ] in
+  let result = render ~config [ ("1.2.3.4", status) ] in
   check bool "has Cron Jobs header" true (contains result ~needle:"Cron Jobs");
   check bool "has not found for backup" true
     (contains result ~needle:"not found")
@@ -235,7 +259,7 @@ let test_format_table_cron_restart_na () =
       errors = [];
     }
   in
-  let result = Status.format_table ~config [ ("1.2.3.4", status) ] in
+  let result = render ~config [ ("1.2.3.4", status) ] in
   check bool "has N/A for restart count" true (contains result ~needle:"N/A")
 
 (* 6. test_format_table_errors — errors are displayed in table output *)
@@ -255,14 +279,16 @@ let test_format_table_errors () =
       errors = [ "Failed to read crontab: permission denied" ];
     }
   in
-  let result = Status.format_table ~config [ ("1.2.3.4", status) ] in
+  let result = render ~config [ ("1.2.3.4", status) ] in
   check bool "has Warnings header" true (contains result ~needle:"Warnings");
   check bool "has error message" true
     (contains result ~needle:"Failed to read crontab: permission denied")
 
 (* 7. test_format_json — JSON output matches expected structure *)
 let test_format_json () =
-  let result = Status.format_json [ ("1.2.3.4", full_status) ] in
+  let result =
+    render_json ~config:(mk_config ()) [ ("1.2.3.4", full_status) ]
+  in
   let json = Yojson.Safe.from_string result in
   (* Should be an object with the server IP as key *)
   match json with
@@ -302,14 +328,14 @@ let test_format_table_with_alloy () =
       errors = [];
     }
   in
-  let result = Status.format_table ~config [ ("1.2.3.4", status) ] in
+  let result = render ~config [ ("1.2.3.4", status) ] in
   check bool "has Infrastructure header" true
     (contains result ~needle:"Infrastructure");
   check bool "has bondi-alloy" true (contains result ~needle:"bondi-alloy");
   check bool "has grafana/alloy" true (contains result ~needle:"grafana/alloy");
   check bool "has v1.8.0 tag" true (contains result ~needle:"v1.8.0")
 
-(* 9. test_status_renders_managed_under_infrastructure — FR-4: a declared and
+(* 9. test_status_renders_managed_under_infrastructure — a declared and
    running managed container is a row in the Infrastructure section, not merely
    a string somewhere in the output. *)
 let mk_status ?(managed = []) () : Status.comprehensive_status =
@@ -343,8 +369,7 @@ let test_status_renders_managed_under_infrastructure () =
       ()
   in
   let result =
-    Status.format_table ~config
-      [ ("1.2.3.4", mk_status ~managed:[ managed_ibgateway ] ()) ]
+    render ~config [ ("1.2.3.4", mk_status ~managed:[ managed_ibgateway ] ()) ]
   in
   let infrastructure = section_lines ~header:"Infrastructure" result in
   (* Asserted against the container's own row rather than the section as a
@@ -365,7 +390,7 @@ let test_status_renders_managed_under_infrastructure () =
       check bool "not rendered as missing" false
         (section_has infrastructure ~needle:"not found")
 
-(* 10. test_status_renders_declared_not_running_as_missing — FR-4: a declared
+(* 10. test_status_renders_declared_not_running_as_missing — a declared
    container the server did not report is a "not found" row rather than an
    omission. The found container in the same fixture is the affirmative arm:
    without it, an implementation that rendered everything as missing would pass. *)
@@ -380,8 +405,7 @@ let test_status_renders_declared_not_running_as_missing () =
       ()
   in
   let result =
-    Status.format_table ~config
-      [ ("1.2.3.4", mk_status ~managed:[ managed_ibgateway ] ()) ]
+    render ~config [ ("1.2.3.4", mk_status ~managed:[ managed_ibgateway ] ()) ]
   in
   let infrastructure = section_lines ~header:"Infrastructure" result in
   let missing_row =

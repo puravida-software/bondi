@@ -20,7 +20,7 @@ let built ?name ?image ?tag ?restart ?network ?ports ?env () =
   | Error e -> fail ("expected a valid spec, got: " ^ M.error_to_string e)
 
 let base = built ()
-let contains ~needle hay = Bondi_common.String_utils.contains ~needle hay
+let contains = Test_helpers.contains
 
 let has_traefik_label labels =
   List.exists

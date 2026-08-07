@@ -17,12 +17,14 @@ the declared version, so the run reduces to the alloy phase.
   > printf '%s\n' "$1" >> "$SSH_ARGV_LOG"
   > cat > /dev/null
   > case "$1" in
+  >   *BONDI_ACME_PRESENT*) echo BONDI_ACME_PRESENT ;;
   >   'docker --version') echo 'Docker version 27.0.0, build deadbeef' ;;
   >   *'name=^/bondi-orchestrator$'*'{{.State}}'*)
   >     printf 'running\tmlopez1506/bondi-server:0.10.1\n' ;;
   >   *'ps -a --filter name=^/bondi-alloy$'*'{{.State}}'*)
   >     printf 'exited\tgrafana/alloy:v1.8.0\n' ;;
   >   *'--name bondi-alloy'*) echo 'd671990dc2318f4b' ;;
+  >   *'/var/spool/cron/crontabs/root'*) echo BONDI_CRONTAB_ABSENT ;;
   >   *) : ;;
   > esac
   > STUB
@@ -38,7 +40,8 @@ the declared version, so the run reduces to the alloy phase.
   >   port: 8080
   >   env_vars: {}
   >   servers:
-  >     - ip_address: 10.0.0.1
+  >     - ip_address: 127.0.0.1
+  >       port: 9
   >       ssh:
   >         user: deploy
   >         private_key_contents: "not-a-real-key"
@@ -53,19 +56,20 @@ the declared version, so the run reduces to the alloy phase.
   > EOF
 
 The stopped container is removed before the new one is run, and the setup
-completes rather than stopping on a name conflict.
+completes rather than stopping on a name conflict. The run's own lines are what
+this case is about, so they are taken here without the report that follows them.
 
-  $ bondi-client setup
+  $ bondi-client setup 2>&1 | head -10
   Setting up the servers...
-  Processing server: 10.0.0.1
-  bondi-orchestrator container is already running on server 10.0.0.1: 0.10.1, skipping...
-  Docker is already installed on server 10.0.0.1: Docker version 27.0.0, build deadbeef
-  Network bondi-network is present on server 10.0.0.1
-  ACME file permissions updated on server 10.0.0.1: /etc/traefik/acme/acme.json
-  Stopped bondi-alloy container on server 10.0.0.1
-  Removed bondi-alloy container and config on server 10.0.0.1
-  Alloy config written on server 10.0.0.1: /etc/bondi/alloy/config.alloy
-  bondi-alloy container started on server 10.0.0.1: d671990dc2318f4b
+  Processing server: 127.0.0.1
+  bondi-orchestrator container is already running on server 127.0.0.1: 0.10.1, skipping...
+  Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
+  Network bondi-network is present on server 127.0.0.1
+  ACME file permissions updated on server 127.0.0.1: /etc/traefik/acme/acme.json
+  Stopped bondi-alloy container on server 127.0.0.1
+  Removed bondi-alloy container and config on server 127.0.0.1
+  Alloy config written on server 127.0.0.1: /etc/bondi/alloy/config.alloy
+  bondi-alloy container started on server 127.0.0.1: d671990dc2318f4b
 
 The removal is what the incident needed a human for.
 

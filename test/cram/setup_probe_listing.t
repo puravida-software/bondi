@@ -20,6 +20,7 @@ listing.
   >   *'name=^/bondi-orchestrator$'*'{{.State}}'*)
   >     echo 'Connection closed by 10.0.0.1 port 22' >&2
   >     exit 255 ;;
+  >   *'/var/spool/cron/crontabs/root'*) echo BONDI_CRONTAB_ABSENT ;;
   >   *) : ;;
   > esac
   > STUB
@@ -35,7 +36,8 @@ listing.
   >   port: 8080
   >   env_vars: {}
   >   servers:
-  >     - ip_address: 10.0.0.1
+  >     - ip_address: 127.0.0.1
+  >       port: 9
   >       ssh:
   >         user: deploy
   >         private_key_contents: "not-a-real-key"
@@ -44,13 +46,33 @@ listing.
   >   version: "0.10.1"
   > EOF
 
-The run stops and reports which listing failed and what it said.
+The run stops and reports which listing failed and what it said. A run refused
+before it had a plan still reaches the report — the report's reads are its own
+and are taken whether or not the plan ran.
 
-  $ bondi-client setup 2>&1
-  Setting up the servers...
-  Processing server: 10.0.0.1
-  Error: server 10.0.0.1: could not list the bondi-orchestrator container on the server, so setup will not act on whether it is running: command failed (255): Connection closed by 10.0.0.1 port 22
+  $ bondi-client setup > out.log 2>&1
   [1]
+  $ sed 's/not reachable: .*/not reachable: <detail>/' out.log
+  Setting up the servers...
+  Processing server: 127.0.0.1
+  Error: server 127.0.0.1: could not list the bondi-orchestrator container on the server, so setup will not act on whether it is running: command failed (255): Connection closed by 10.0.0.1 port 22
+  
+  Server: 127.0.0.1
+  
+  Service
+    NAME                   SOURCE  IMAGE                            TAG          STATUS        RESTARTS  HEALTH
+    my-service             docker  -                                -            not found     -         -
+                           orch    not reachable: <detail>
+  
+  Infrastructure
+    NAME                   SOURCE  IMAGE                            TAG          STATUS        RESTARTS  HEALTH
+    bondi-orchestrator     docker  -                                -            not found     -         -
+                           orch    not reachable: <detail>
+  
+  Crontab
+    bondi section          docker  no Bondi section on the host
+
+
 
 No container was started under a name that was never checked. The affirmative
 arm is the listing count: the probe did run, so the absence below is the refusal

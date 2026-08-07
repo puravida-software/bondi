@@ -56,13 +56,22 @@ docker commit \
     --change 'ENTRYPOINT ["/usr/local/bin/bondi-server"]' \
     "$breaker" "$broken_image" > /dev/null
 
+# The rejection below is this check succeeding, and it reaches the terminal as a
+# stack of loader errors and the word "error" — which reads exactly like the run
+# having failed, on the one path where nothing is wrong. The banners say so
+# either side of it, because the output between them cannot be made to look
+# calm: it is a real binary failing to start, which is the whole point.
 echo "==> asserting that verification rejects it"
+echo "--- the diagnostics below are EXPECTED: a deliberately broken image is being rejected ---"
 if "$here/verify-server-image.sh" "$broken_image"; then
+    echo "--- end of expected diagnostics ---"
     {
         echo "error: verification passed on an image with $library removed."
         echo "The check cannot fail, so it is not a check. Fix it before publishing."
     } >&2
     exit 1
 fi
+echo "--- end of expected diagnostics: the rejection above is the result this check wanted ---"
 
 echo "ok: removing $library made verification fail, as it must"
+echo "ok: $image is verified, and its verification is proven able to fail"

@@ -1,7 +1,7 @@
 open Alcotest
 module Setup = Bondi_client.Cmd.Setup
 
-let contains ~needle hay = Bondi_common.String_utils.contains ~needle hay
+let contains = Test_helpers.contains
 
 (* A remote command that exits without draining its stdin closes the pipe while
    the payload is still being written. With SIGPIPE at its default disposition

@@ -4,7 +4,16 @@ import "hurl_tests/hurl.just"
 
 IMAGE_NAME := "mlopez1506/bondi-server"
 
+# The last thing printed is what the run means. Without it the gate ends on the
+# negative image check, whose success is a page of loader errors and the word
+# "error" — a passing run that reads as a failed one.
 default: build test fmt lint build-server-ci
+    @echo ""
+    @echo "================================================================"
+    @echo "  just: PASSED — build, test, fmt, lint, server image"
+    @echo "  Any 'error' lines above came from the negative image check,"
+    @echo "  which passes by rejecting an image it broke on purpose."
+    @echo "================================================================"
 
 # Verification sits before the push for the same reason it does in the release
 # workflow: nothing reaches the registry that has not been shown to run.
@@ -58,8 +67,12 @@ push-server TAG:
 server-docker:
     docker run --group-add $(stat -c %g /var/run/docker.sock) --name bondi-orchestrator -p 3030:3030 -v /var/run/docker.sock:/var/run/docker.sock --rm {{ IMAGE_NAME }}
 
+# ODOC_WARN_ERROR matches what CI's lint-doc action sets. Without it odoc
+# reports an unresolvable {!Reference} as a warning and exits 0, so the local
+# gate passes and CI fails on the same tree — which is how a broken cross-library
+# reference reaches a pull request.
 lint-doc:
-    opam exec -- dune build @doc
+    ODOC_WARN_ERROR=true opam exec -- dune build @doc
 
 lint-fmt:
     opam exec -- dune build @fmt

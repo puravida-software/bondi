@@ -480,6 +480,109 @@ let test_ensure_docker_verdict_is_satisfied_when_installed () =
     ~expected:(Setup.Docker_satisfied "Docker version 29.2.1, build 1234567")
     (Ok "Docker version 29.2.1, build 1234567\n")
 
+(* ------------------------------------------------------------------------- *)
+(* Cron curl verdict                                                          *)
+(* ------------------------------------------------------------------------- *)
+
+(* The crontab line uses --fail-with-body, so setup checks the host's curl
+   before the orchestrator starts. That check reads a version string, and a
+   probe that never ran has no version string in it. Folding the transport's own
+   error into curl's output told the operator that the host had reported
+   "command failed (255): Connection closed by …" but 7.76.0 is required — a
+   failure to ask, dressed up as a fact about curl. *)
+let test_cron_curl_probe_error_is_not_curls_answer () =
+  match Setup.cron_curl_verdict_of_probe (Error transport_error) with
+  | Setup.Cron_curl_reported output ->
+      failf "a probe that never ran is not curl's answer: %s" output
+  | Setup.Cron_curl_undetermined message ->
+      check bool "carries the probe's own text" true
+        (Bondi_common.String_utils.contains
+           ~needle:"Connection closed by 203.0.113.9 port 22" message)
+
+(* Two affirmative arms on the same builder, because a verdict that is never
+   curl's answer would satisfy the assertion above. A version the host printed
+   is one; so is the host's own report that the command does not exist, which
+   arrives on the error channel too and is a fact about curl rather than about
+   the read. *)
+let test_cron_curl_host_answers_are_curls_answer () =
+  (match
+     Setup.cron_curl_verdict_of_probe (Ok "curl 8.5.0 (x86_64) libcurl/8.5.0")
+   with
+  | Setup.Cron_curl_reported output ->
+      check bool "the version the host printed" true
+        (Bondi_common.String_utils.contains ~needle:"8.5.0" output)
+  | Setup.Cron_curl_undetermined message ->
+      failf "a version the host printed is curl's answer: %s" message);
+  match
+    Setup.cron_curl_verdict_of_probe
+      (Error "command failed (127): bash: curl: command not found")
+  with
+  | Setup.Cron_curl_reported output ->
+      check bool "and so is the host saying it has none" true
+        (Bondi_common.String_utils.contains ~needle:"command not found" output)
+  | Setup.Cron_curl_undetermined message ->
+      failf "a host reporting no curl has answered about curl: %s" message
+
+(* ------------------------------------------------------------------------- *)
+(* ACME file probe                                                            *)
+(* ------------------------------------------------------------------------- *)
+
+(* [test -f] reports an absent file by exiting non-zero, which is the channel a
+   dropped connection arrives on as well, so the answer and the failure to get
+   one were the same value. A blip on the read was answered with mkdir, touch,
+   chown and chmod against a file the host may already have had. The probe says
+   which it is on standard output, leaving the exit status to mean "the command
+   could be run on that host". *)
+let test_acme_probe_error_is_not_an_absent_file () =
+  match Setup.acme_file_state_of_probe (Error transport_error) with
+  | Setup.Acme_file_absent ->
+      fail "a read that never happened is not an absent file"
+  | Setup.Acme_file_present -> fail "nor a file the host said it has"
+  | Setup.Acme_file_undetermined message ->
+      check bool "carries the probe's own text" true
+        (Bondi_common.String_utils.contains
+           ~needle:"Connection closed by 203.0.113.9 port 22" message)
+
+(* The affirmative arms on the same builder: the host does say which, and the
+   two answers are told apart. Without them the assertion above would hold for a
+   probe that is never able to answer at all. *)
+let test_acme_probe_reports_what_the_host_said () =
+  (match
+     Setup.acme_file_state_of_probe (Ok (Setup.acme_file_present_marker ^ "\n"))
+   with
+  | Setup.Acme_file_present -> ()
+  | Setup.Acme_file_absent
+  | Setup.Acme_file_undetermined _ ->
+      fail "the host saying it has the file is the file being there");
+  match
+    Setup.acme_file_state_of_probe (Ok (Setup.acme_file_absent_marker ^ "\n"))
+  with
+  | Setup.Acme_file_absent -> ()
+  | Setup.Acme_file_present
+  | Setup.Acme_file_undetermined _ ->
+      fail "the host saying it does not have the file is the file being absent"
+
+(* An answer carrying neither marker never said which. Read as absence it
+   becomes a write against a host that was never asked. *)
+let test_acme_probe_without_a_marker_is_undetermined () =
+  match Setup.acme_file_state_of_probe (Ok "") with
+  | Setup.Acme_file_absent -> fail "silence is not an absent file"
+  | Setup.Acme_file_present -> fail "nor a present one"
+  | Setup.Acme_file_undetermined _ -> ()
+
+(* The command carries the whole distinction, so it is pinned here rather than
+   left to the one caller: it names the file, offers both answers, and the
+   client's reading of it is only as good as the command asking the question. *)
+let test_acme_probe_command_asks_for_both_answers () =
+  let command = Setup.acme_probe_command ~path:"/etc/traefik/acme/acme.json" in
+  let carries needle = Bondi_common.String_utils.contains ~needle command in
+  check bool "names the file it is asking about" true
+    (carries "/etc/traefik/acme/acme.json");
+  check bool "can say the host has it" true
+    (carries Setup.acme_file_present_marker);
+  check bool "and can say the host does not" true
+    (carries Setup.acme_file_absent_marker)
+
 let test_plan_always_includes_ensure_docker () =
   let config =
     make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
@@ -857,7 +960,7 @@ let test_managed_converged_plans_nothing () =
   in
   check_managed_actions ~expected:[] actions
 
-(* FR-5: a container that restarts itself is still observed, because the gather
+(* A container that restarts itself is still observed, because the gather
    lists stopped containers too. Dropping [-a] would make a mid-restart Gateway
    read as absent and get recreated. *)
 let test_managed_stopped_container_still_observed () =
@@ -1503,6 +1606,21 @@ let () =
             test_plan_requires_curl_when_cron_jobs_declared;
           test_case "omitted without cron jobs" `Quick
             test_plan_omits_curl_check_without_cron_jobs;
+          test_case "a failed probe is not curl's answer" `Quick
+            test_cron_curl_probe_error_is_not_curls_answer;
+          test_case "what the host said about curl is" `Quick
+            test_cron_curl_host_answers_are_curls_answer;
+        ] );
+      ( "acme probe",
+        [
+          test_case "a failed probe is not an absent file" `Quick
+            test_acme_probe_error_is_not_an_absent_file;
+          test_case "present and absent are told apart" `Quick
+            test_acme_probe_reports_what_the_host_said;
+          test_case "an answer with no marker is undetermined" `Quick
+            test_acme_probe_without_a_marker_is_undetermined;
+          test_case "the command asks for both answers" `Quick
+            test_acme_probe_command_asks_for_both_answers;
         ] );
       ( "network",
         [

@@ -1,0 +1,61 @@
+{
+  "service": {
+    "name": "my-service",
+    "image_name": "docker.io/library/alpine",
+    "tag": "latest",
+    "status": "running",
+    "restart_count": 0,
+    "created_at": "2026-08-04T04:42:36.325021634Z"
+  },
+  "cron_jobs": [
+    {
+      "name": "daily-close",
+      "image_name": "ghcr.io/org/close",
+      "tag": "2.1",
+      "status": "completed"
+    },
+    {
+      "name": "rebalance",
+      "image_name": "ghcr.io/org/rebalance",
+      "tag": "2.1",
+      "status": "scheduled"
+    }
+  ],
+  "infrastructure": {
+    "orchestrator": {
+      "name": "bondi-orchestrator",
+      "image_name": "docker.io/mlopez1506/bondi-server",
+      "tag": "latest",
+      "status": "running",
+      "restart_count": 0,
+      "created_at": "2026-08-04T04:42:43.278451972Z"
+    },
+    "traefik": {
+      "name": "bondi-traefik",
+      "image_name": "docker.io/library/alpine",
+      "tag": "latest",
+      "status": "running",
+      "restart_count": 0,
+      "created_at": "2026-08-04T04:42:36.252057476Z"
+    },
+    "alloy": {
+      "name": "bondi-alloy",
+      "image_name": "docker.io/library/alpine",
+      "tag": "latest",
+      "status": "running",
+      "restart_count": 0,
+      "created_at": "2026-08-04T04:42:36.411720501Z"
+    },
+    "managed": [
+      {
+        "name": "ibgateway",
+        "image_name": "docker.io/library/alpine",
+        "tag": "latest",
+        "status": "running",
+        "restart_count": 0,
+        "created_at": "2026-08-04T04:42:43.19089993Z"
+      }
+    ]
+  },
+  "errors": []
+}

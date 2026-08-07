@@ -11,7 +11,7 @@ let base_config : R.config =
     excluded_containers = [];
   }
 
-let contains ~needle hay = Bondi_common.String_utils.contains ~needle hay
+let contains = Test_helpers.contains
 
 (* --- collect_mode_of_string --- *)
 
