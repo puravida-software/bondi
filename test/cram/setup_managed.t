@@ -25,6 +25,7 @@ what reaches argv from what reaches stdin.
   >     if [ -n "$MANAGED_PS_FAILS" ]; then exit 7; fi
   >     cat "$MANAGED_PS" ;;
   >   *BONDI_ORCHESTRATOR_SERVING*) echo BONDI_ORCHESTRATOR_SERVING ;;
+  >   *'/var/spool/cron/crontabs/root'*) echo BONDI_CRONTAB_ABSENT ;;
   >   *) : ;;
   > esac
   > STUB
@@ -46,7 +47,8 @@ A declared managed container that the server does not have.
   >     image: example.com/healthcheck
   >     schedule: "*/5 * * * *"
   >     server:
-  >       ip_address: 10.0.0.1
+  >       ip_address: 127.0.0.1
+  >       port: 9
   >       ssh:
   >         user: deploy
   >         private_key_contents: "not-a-real-key"
@@ -64,15 +66,20 @@ A declared managed container that the server does not have.
   >     secret_env_vars:
   >       TWS_PASSWORD: hunter2
   > EOF
-  $ bondi-client setup
+
+Every run now ends on the report of what the host holds, which this file takes
+apart elsewhere; here the run's own lines are the subject, so they are taken
+without it.
+
+  $ bondi-client setup 2>&1 | head -8
   Setting up the servers...
-  Processing server: 10.0.0.1
-  Docker is already installed on server 10.0.0.1: Docker version 27.0.0, build deadbeef
-  Network bondi-network is present on server 10.0.0.1
-  curl on server 10.0.0.1 supports the crontab command: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
-  bondi-orchestrator is serving on server 10.0.0.1: mlopez1506/bondi-server:0.1.0
-  Wrote secret environment file on server 10.0.0.1: /etc/bondi/gateway/env
-  bondi-gateway container started on server 10.0.0.1: 
+  Processing server: 127.0.0.1
+  Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
+  Network bondi-network is present on server 127.0.0.1
+  curl on server 127.0.0.1 supports the crontab command: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
+  bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.1.0
+  Wrote secret environment file on server 127.0.0.1: /etc/bondi/gateway/env
+  bondi-gateway container started on server 127.0.0.1: 
 
 The env file is created under a umask that makes it mode 600 at creation, in a
 single root-owned command — never written readable and chmod'd afterwards.
@@ -122,22 +129,23 @@ directory — which holds its secrets — deleted.
   >     image: example.com/healthcheck
   >     schedule: "*/5 * * * *"
   >     server:
-  >       ip_address: 10.0.0.1
+  >       ip_address: 127.0.0.1
+  >       port: 9
   >       ssh:
   >         user: deploy
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
   > EOF
-  $ bondi-client setup
+  $ bondi-client setup 2>&1 | head -9
   Setting up the servers...
-  Processing server: 10.0.0.1
-  Docker is already installed on server 10.0.0.1: Docker version 27.0.0, build deadbeef
-  Network bondi-network is present on server 10.0.0.1
-  curl on server 10.0.0.1 supports the crontab command: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
-  bondi-orchestrator is serving on server 10.0.0.1: mlopez1506/bondi-server:0.1.0
-  Stopped bondi-gateway container on server 10.0.0.1
-  Removed bondi-gateway container on server 10.0.0.1
-  Removed config directory on server 10.0.0.1: /etc/bondi/gateway
+  Processing server: 127.0.0.1
+  Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
+  Network bondi-network is present on server 127.0.0.1
+  curl on server 127.0.0.1 supports the crontab command: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
+  bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.1.0
+  Stopped bondi-gateway container on server 127.0.0.1
+  Removed bondi-gateway container on server 127.0.0.1
+  Removed config directory on server 127.0.0.1: /etc/bondi/gateway
 
   $ grep 'rm -rf' ssh-argv.log
   sudo rm -rf '/etc/bondi/gateway'
@@ -160,7 +168,8 @@ container that may already exist.
   >     image: example.com/healthcheck
   >     schedule: "*/5 * * * *"
   >     server:
-  >       ip_address: 10.0.0.1
+  >       ip_address: 127.0.0.1
+  >       port: 9
   >       ssh:
   >         user: deploy
   >         private_key_contents: "not-a-real-key"
@@ -171,11 +180,36 @@ container that may already exist.
   >     tag: "10.48.1e"
   >     restart: unless-stopped
   > EOF
-  $ bondi-client setup
-  Setting up the servers...
-  Processing server: 10.0.0.1
-  Error: server 10.0.0.1: could not list managed containers on the server, so the declared ones cannot be converged: command failed (7): 
+
+A run refused before it had a plan still reaches the report, and the report says
+what that refusal leaves on the host: the declared container has no row from
+either source, which is the state the next run is being asked to converge.
+
+  $ bondi-client setup > out.log 2>&1
   [1]
+  $ sed 's/not reachable: .*/not reachable: <detail>/' out.log
+  Setting up the servers...
+  Processing server: 127.0.0.1
+  Error: server 127.0.0.1: could not list managed containers on the server, so the declared ones cannot be converged: command failed (7): 
+  
+  Server: 127.0.0.1
+  
+  Cron Jobs
+    NAME                   SOURCE  IMAGE                            TAG          STATUS        RESTARTS  HEALTH
+    healthcheck            docker  -                                -            not found     -         -
+                           orch    not reachable: <detail>
+  
+  Infrastructure
+    NAME                   SOURCE  IMAGE                            TAG          STATUS        RESTARTS  HEALTH
+    bondi-orchestrator     docker  -                                -            not found     -         -
+                           orch    not reachable: <detail>
+    bondi-gateway          docker  -                                -            not found     -         -
+                           orch    not reachable: <detail>
+  
+  Crontab
+    bondi section          docker  no Bondi section on the host
+
+
 
 Nothing was started, and no environment file was written.
 
@@ -202,19 +236,20 @@ converge, so the lookup does not matter.
   >     image: example.com/healthcheck
   >     schedule: "*/5 * * * *"
   >     server:
-  >       ip_address: 10.0.0.1
+  >       ip_address: 127.0.0.1
+  >       port: 9
   >       ssh:
   >         user: deploy
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
   > EOF
-  $ bondi-client setup
+  $ bondi-client setup 2>&1 | head -6
   Setting up the servers...
-  Processing server: 10.0.0.1
-  Docker is already installed on server 10.0.0.1: Docker version 27.0.0, build deadbeef
-  Network bondi-network is present on server 10.0.0.1
-  curl on server 10.0.0.1 supports the crontab command: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
-  bondi-orchestrator is serving on server 10.0.0.1: mlopez1506/bondi-server:0.1.0
+  Processing server: 127.0.0.1
+  Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
+  Network bondi-network is present on server 127.0.0.1
+  curl on server 127.0.0.1 supports the crontab command: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
+  bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.1.0
   $ unset MANAGED_PS_FAILS
 
 A container that declares no secrets still has its environment file written, so
@@ -234,7 +269,8 @@ old one on disk under a container that no longer references it.
   >     image: example.com/healthcheck
   >     schedule: "*/5 * * * *"
   >     server:
-  >       ip_address: 10.0.0.1
+  >       ip_address: 127.0.0.1
+  >       port: 9
   >       ssh:
   >         user: deploy
   >         private_key_contents: "not-a-real-key"
@@ -247,15 +283,15 @@ old one on disk under a container that no longer references it.
   >     env_vars:
   >       TRADING_MODE: paper
   > EOF
-  $ bondi-client setup
+  $ bondi-client setup 2>&1 | head -8
   Setting up the servers...
-  Processing server: 10.0.0.1
-  Docker is already installed on server 10.0.0.1: Docker version 27.0.0, build deadbeef
-  Network bondi-network is present on server 10.0.0.1
-  curl on server 10.0.0.1 supports the crontab command: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
-  bondi-orchestrator is serving on server 10.0.0.1: mlopez1506/bondi-server:0.1.0
-  Wrote secret environment file on server 10.0.0.1: /etc/bondi/gateway/env
-  bondi-gateway container started on server 10.0.0.1: 
+  Processing server: 127.0.0.1
+  Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
+  Network bondi-network is present on server 127.0.0.1
+  curl on server 127.0.0.1 supports the crontab command: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
+  bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.1.0
+  Wrote secret environment file on server 127.0.0.1: /etc/bondi/gateway/env
+  bondi-gateway container started on server 127.0.0.1: 
 
 The write happens under the same umask, and nothing is piped to it.
 
@@ -287,7 +323,8 @@ away from what the digest actually produces.
   >     image: example.com/healthcheck
   >     schedule: "*/5 * * * *"
   >     server:
-  >       ip_address: 10.0.0.1
+  >       ip_address: 127.0.0.1
+  >       port: 9
   >       ssh:
   >         user: deploy
   >         private_key_contents: "not-a-real-key"
@@ -319,13 +356,13 @@ Second run: same declaration, same hash. Nothing is stopped, removed, written or
 started.
 
   $ : > ssh-argv.log
-  $ bondi-client setup
+  $ bondi-client setup 2>&1 | head -6
   Setting up the servers...
-  Processing server: 10.0.0.1
-  Docker is already installed on server 10.0.0.1: Docker version 27.0.0, build deadbeef
-  Network bondi-network is present on server 10.0.0.1
-  curl on server 10.0.0.1 supports the crontab command: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
-  bondi-orchestrator is serving on server 10.0.0.1: mlopez1506/bondi-server:0.1.0
+  Processing server: 127.0.0.1
+  Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
+  Network bondi-network is present on server 127.0.0.1
+  curl on server 127.0.0.1 supports the crontab command: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
+  bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.1.0
   $ grep -c 'bondi-gateway' ssh-argv.log
   0
   [1]
@@ -339,8 +376,8 @@ fixture missing the code path.
 
   $ sed -i 's/tag: "10.48.1e"/tag: "10.49.0a"/' bondi.yaml
   $ : > ssh-argv.log
-  $ bondi-client setup | grep gateway
-  Stopped bondi-gateway container on server 10.0.0.1
-  Removed bondi-gateway container on server 10.0.0.1
-  Wrote secret environment file on server 10.0.0.1: /etc/bondi/gateway/env
-  bondi-gateway container started on server 10.0.0.1: 
+  $ bondi-client setup 2>&1 | grep -E 'gateway container|environment file'
+  Stopped bondi-gateway container on server 127.0.0.1
+  Removed bondi-gateway container on server 127.0.0.1
+  Wrote secret environment file on server 127.0.0.1: /etc/bondi/gateway/env
+  bondi-gateway container started on server 127.0.0.1: 

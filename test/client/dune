@@ -9,5 +9,14 @@
   test_deploy_helpers
   test_status_format
   test_curl_version
-  test_orchestrator_probe)
- (libraries alcotest bondi.client bondi.common yojson))
+  test_orchestrator_probe
+  test_host_inventory
+  test_container_health
+  test_crontab_listing
+  test_status_report
+  test_status_gather
+  test_status_decode
+  test_docker_common)
+ (deps
+  (glob_files fixtures/*.json))
+ (libraries alcotest bondi.client bondi.common test_helpers yojson))

@@ -1,201 +1,18 @@
-(** Output format for the status command. *)
 type output_format = Table | Json
-
-type component_status = {
-  name : string;
-  image_name : string;
-  tag : string;
-  status : string;
-  restart_count : int option; [@default None]
-  created_at : string option; [@default None]
-}
-[@@deriving yojson]
-(** Status of a single Bondi-managed component. *)
-
-type infrastructure_status = {
-  orchestrator : component_status option; [@default None]
-  traefik : component_status option; [@default None]
-  alloy : component_status option; [@default None]
-  managed : component_status list; [@default []]
-}
-[@@deriving yojson]
-(** Infrastructure components. *)
-
-type comprehensive_status = {
-  service : component_status option; [@default None]
-  cron_jobs : component_status list;
-  infrastructure : infrastructure_status;
-  errors : string list;
-}
-[@@deriving yojson]
-(** Full status response. *)
-
-module StringSet = Set.Make (String)
-
-(** Format a component status row for table output. *)
-let format_row (c : component_status) =
-  let restarts =
-    match c.restart_count with
-    | Some n -> string_of_int n
-    | None -> "N/A"
-  in
-  let created =
-    match c.created_at with
-    | Some s -> s
-    | None -> "-"
-  in
-  Printf.sprintf "  %-22s %-35s %-12s %-12s %-10s %s" c.name c.image_name c.tag
-    c.status restarts created
-
-(** Format a "not found" row for table output. *)
-let not_found_row name =
-  Printf.sprintf "  %-22s %-35s %-12s %-12s %-10s %s" name "-" "-" "not found"
-    "-" "-"
-
-(** Table column header line. *)
-let table_header =
-  Printf.sprintf "  %-22s %-35s %-12s %-12s %-10s %s" "NAME" "IMAGE" "TAG"
-    "STATUS" "RESTARTS" "CREATED"
-
-(** Render the service section lines. Returns empty list if no service
-    configured. *)
-let service_section ~(config : Config_file.t) (status : comprehensive_status) =
-  match config.user_service with
-  | None -> []
-  | Some svc ->
-      let row =
-        match status.service with
-        | Some s -> format_row s
-        | None -> not_found_row svc.name
-      in
-      [ "Service"; table_header; row; "" ]
-
-(** Render the cron jobs section lines. Returns empty list if no cron jobs
-    configured. *)
-let cron_jobs_section ~(config_cron_names : string list)
-    (status : comprehensive_status) =
-  match config_cron_names with
-  | [] -> []
-  | _ ->
-      let found_names =
-        List.fold_left
-          (fun s (c : component_status) -> StringSet.add c.name s)
-          StringSet.empty status.cron_jobs
-      in
-      let found_rows =
-        List.map (fun (c : component_status) -> format_row c) status.cron_jobs
-      in
-      let missing_rows =
-        List.filter_map
-          (fun name ->
-            if StringSet.mem name found_names then None
-            else Some (not_found_row name))
-          config_cron_names
-      in
-      [ "Cron Jobs"; table_header ] @ found_rows @ missing_rows @ [ "" ]
-
-(** Render the managed container rows of the infrastructure section: the
-    containers the server reported, followed by a "not found" row for each one
-    declared in [bondi.yaml] that it did not. Mirrors the cron section's
-    found/missing diff. *)
-let managed_rows ~(config_managed_names : string list)
-    (status : comprehensive_status) =
-  let found_names =
-    List.fold_left
-      (fun s (c : component_status) -> StringSet.add c.name s)
-      StringSet.empty status.infrastructure.managed
-  in
-  let found_rows =
-    List.map
-      (fun (c : component_status) -> format_row c)
-      status.infrastructure.managed
-  in
-  let missing_rows =
-    List.filter_map
-      (fun name ->
-        if StringSet.mem name found_names then None
-        else Some (not_found_row name))
-      config_managed_names
-  in
-  found_rows @ missing_rows
-
-(** Render the infrastructure section lines. *)
-let infrastructure_section ~(config_managed_names : string list)
-    (status : comprehensive_status) =
-  let orch_row =
-    match status.infrastructure.orchestrator with
-    | Some c -> format_row c
-    | None -> not_found_row "bondi-orchestrator"
-  in
-  let traefik_row =
-    match status.infrastructure.traefik with
-    | Some c -> format_row c
-    | None -> not_found_row "bondi-traefik"
-  in
-  let alloy_row =
-    match status.infrastructure.alloy with
-    | Some c -> [ format_row c ]
-    | None -> []
-  in
-  [ "Infrastructure"; table_header; orch_row; traefik_row ]
-  @ alloy_row
-  @ managed_rows ~config_managed_names status
-  @ [ "" ]
-
-(** Render the warnings section lines. Returns empty list if no errors. *)
-let warnings_section (status : comprehensive_status) =
-  match status.errors with
-  | [] -> []
-  | errors ->
-      ("Warnings" :: List.map (fun e -> Printf.sprintf "  %s" e) errors)
-      @ [ "" ]
-
-(** Pure: render status results as a human-readable table. Adds "not found" rows
-    for components in config but missing from the server response (REQ-F8). *)
-let format_table ~(config : Config_file.t)
-    (results : (string * comprehensive_status) list) =
-  let config_cron_names =
-    match config.cron_jobs with
-    | Some jobs -> List.map (fun (j : Config_file.cron_job) -> j.name) jobs
-    | None -> []
-  in
-  (* Declared names are matched against the server's reported container names,
-     which carry the [bondi-] prefix the setup phase gives them. *)
-  let config_managed_names =
-    match config.managed_containers with
-    | Some containers ->
-        List.map
-          (fun (m : Config_file.managed_container) ->
-            Bondi_common.Managed_container.container_name_of m.name)
-          containers
-    | None -> []
-  in
-  let lines =
-    List.concat_map
-      (fun (ip, status) ->
-        [ Printf.sprintf "Server: %s" ip; "" ]
-        @ service_section ~config status
-        @ cron_jobs_section ~config_cron_names status
-        @ infrastructure_section ~config_managed_names status
-        @ warnings_section status)
-      results
-  in
-  String.concat "\n" lines
-
-(** Pure: render status results as JSON. *)
-let format_json (results : (string * comprehensive_status) list) =
-  let json =
-    `Assoc
-      (List.map
-         (fun (ip, status) -> (ip, comprehensive_status_to_yojson status))
-         results)
-  in
-  Yojson.Safe.pretty_to_string json
 
 let read_body_string body =
   Eio.Buf_read.(of_flow ~max_size:max_int body |> take_all)
 
-let fetch_status ~client ip_address ~port ~service_name =
+(* A fixed bound on one request to one orchestrator, not user configuration. A
+   host that refuses the connection answers at once; one that drops the packets
+   — a firewalled port is an ordinary way for "the orchestrator is down" to
+   present — answers never, and this call has no deadline of its own. Both
+   commands that make it print a report at the end of their work, so an
+   unbounded wait here is the report being lost on exactly the failure it exists
+   to describe. *)
+let fetch_timeout_seconds = 10.0
+
+let fetch_status ~clock ~client ip_address ~port ~service_name =
   let base_url = Printf.sprintf "http://%s:%d/api/v1/status" ip_address port in
   let url =
     match service_name with
@@ -206,34 +23,64 @@ let fetch_status ~client ip_address ~port ~service_name =
   in
   let uri = Uri.of_string url in
   try
-    let resp, body =
-      Eio.Switch.run (fun sw -> Cohttp_eio.Client.get ~sw client uri)
+    (* The body is read inside the bound as well as the request: a server that
+       accepts the connection and then stalls part-way through its response
+       holds the reader open just as long as one that never answers. *)
+    let status, body_str =
+      Eio.Time.with_timeout_exn clock fetch_timeout_seconds (fun () ->
+          let resp, body =
+            Eio.Switch.run (fun sw -> Cohttp_eio.Client.get ~sw client uri)
+          in
+          (Cohttp.Response.status resp, read_body_string body))
     in
-    let status = Cohttp.Response.status resp in
-    let body_str = read_body_string body in
     match status with
-    | `OK ->
-        let json = Yojson.Safe.from_string body_str in
-        comprehensive_status_of_yojson json
-        |> Result.map_error (fun msg ->
-            Printf.sprintf "error decoding status response from server %s: %s"
-              ip_address msg)
+    | `OK -> Orchestrator_status.reading_of_body ~ip_address body_str
     | _ ->
+        (* The server answered, and what it answered with is the evidence. This
+           is not a source that could not be reached. *)
         Error
-          (Printf.sprintf "Non-OK response from server %s: %s" ip_address
-             body_str)
+          (Status_report.Not_understood
+             (Printf.sprintf "%s answered %s: %s" ip_address
+                (Cohttp.Code.string_of_status status)
+                body_str))
   with
+  (* Named before the catch-all so the bound reports itself in its own words:
+     the exception's name says nothing an operator can act on, and "took too
+     long" is a different instruction from "refused the connection". *)
+  | Eio.Time.Timeout ->
+      Error
+        (Status_report.Not_consulted
+           (Printf.sprintf "server %s did not answer within %.0f seconds"
+              ip_address fetch_timeout_seconds))
+  (* Re-raised rather than caught. A cancellation is the caller withdrawing the
+     question, not the server failing to answer it, and turning one into a cell
+     in the report is how Ctrl-C comes to print a table instead of stopping. *)
+  | Eio.Cancel.Cancelled _ as cancelled -> raise cancelled
   | exn ->
       Error
-        (Printf.sprintf "Error calling status endpoint on server %s: %s"
-           ip_address (Printexc.to_string exn))
+        (Status_report.Not_consulted
+           (Printf.sprintf "Error calling status endpoint on server %s: %s"
+              ip_address (Printexc.to_string exn)))
+
+let orchestrator_reading ~clock ~client ~service_name
+    (server : Config_file.server) =
+  let port =
+    Option.value ~default:Bondi_common.Defaults.server_port server.port
+  in
+  fetch_status ~clock ~client server.ip_address ~port ~service_name
+
+let orchestrator_reading_standalone ~service_name server =
+  Eio_main.run @@ fun env ->
+  orchestrator_reading ~clock:(Eio.Stdenv.clock env)
+    ~client:(Cohttp_eio.Client.make ~https:None (Eio.Stdenv.net env))
+    ~service_name server
 
 let run output_format () =
   match Config_file.read () with
   | Error message ->
       prerr_endline ("Error reading configuration: " ^ message);
       exit 1
-  | Ok config ->
+  | Ok config -> (
       let service_name =
         match config.user_service with
         | Some service -> Some service.name
@@ -242,30 +89,29 @@ let run output_format () =
       Eio_main.run @@ fun env ->
       let net = Eio.Stdenv.net env in
       let client = Cohttp_eio.Client.make ~https:None net in
-      let status_per_server =
-        List.fold_left
-          (fun acc (server : Config_file.server) ->
-            let port =
-              Option.value ~default:Bondi_common.Defaults.server_port
-                server.port
-            in
-            match
-              fetch_status ~client server.ip_address ~port ~service_name
-            with
-            | Ok status -> (server.ip_address, status) :: acc
-            | Error message ->
-                prerr_endline message;
-                acc)
-          []
+      let reports =
+        List.map
+          (fun (server : Config_file.server) ->
+            (* This command reports a health state and never waits for one: a
+               wait costs a bound per component, and an operator asking what is
+               running is not asking anyone to hold still while it settles. *)
+            Status_gather.report_of_reading ~config ~address:server.ip_address
+              ~waits:[]
+              (Status_gather.gather
+                 ~fetch:
+                   (orchestrator_reading ~clock:(Eio.Stdenv.clock env) ~client
+                      ~service_name)
+                 server))
           (Config_file.servers config)
-        |> List.rev
       in
       let output =
         match output_format with
-        | Table -> format_table ~config status_per_server
-        | Json -> format_json status_per_server
+        | Table -> Status_report.render_table reports
+        | Json -> Status_report.render_json reports
       in
-      if output <> "" then print_string output
+      match String.equal output "" with
+      | true -> ()
+      | false -> print_string output)
 
 let output_format_arg =
   let formats = [ ("json", Json); ("table", Table) ] in

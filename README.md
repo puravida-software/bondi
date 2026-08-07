@@ -42,6 +42,15 @@ brew install bondi
 brew upgrade bondi
 ```
 
+> **Read [INSTALLATION.md](INSTALLATION.md) before relying on the above.** Homebrew
+> is not available everywhere Bondi is used; where it is not, the CLI is a manual
+> install and does *not* follow a release. That doc also covers the four separate
+> places a Bondi version lives (tap, workstation CLI, orchestrator image, and each
+> consuming repo's `bondi_server.version`), how to tell which of them a given fix
+> needs, and why `bondi --version` is not sufficient to establish what you are
+> running. **The tap is currently broken on Apple silicon** — the formula points at
+> a macOS asset no recent release publishes.
+
 2. Initialise the project config file
 
 Make sure you are inside the project directory, then run:

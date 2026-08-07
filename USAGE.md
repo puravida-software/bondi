@@ -185,8 +185,34 @@ This will:
 2. Install Docker if it is not already installed
 3. Create the ACME directory for TLS certificates
 4. Pull and run the bondi-orchestrator container
+5. Wait for every container that declares a healthcheck to pass it
+6. Print the same table `bondi status` prints, describing the server as the run left it
 
 You only need to run `bondi setup` once per server, or again when you change the `bondi_server.version` or add features that require server-side changes (like Alloy).
+
+#### What setup reports when it finishes
+
+The table is reached on every exit path, including a run that aborted part-way through. A run that stopped early still prints what it managed on its way there, then the failure, then the state of the box — so "which phases did not run" and "what is actually on the server now" are both answered instead of the second being left to a manual check. See [Checking status](#checking-status) for how to read the table.
+
+#### Waiting for health
+
+After the plan has converged, `setup` reads the containers the server is running and waits on each one whose image declares a healthcheck. Containers the server says have no check are not waited on.
+
+Each wait is bounded at **120 seconds**, per container, measured against the server's own clock. The loop runs on the server, so the bound costs one round-trip rather than one per attempt. It ends early as soon as the container passes, or as soon as it stops running — a container that has already died will not start passing. Only containers that are running when the report is taken are waited on: a cron job's container sits stopped between its runs, and there is nothing there for a wait to observe.
+
+A container that does not pass inside the bound is named in the `HEALTH` column and **the run exits non-zero**:
+
+```
+Service
+  NAME                   SOURCE  IMAGE                            TAG          STATUS        RESTARTS  HEALTH
+  my-api                 docker  ghcr.io/acme/my-api              v2.0.0       running       0         did not pass its healthcheck within 120s
+```
+
+The other cells a wait can produce are `unhealthy: failing streak N`, `stopped before it passed its healthcheck`, and `health could not be read: …`. All of them fail the run; `healthy` and `no healthcheck defined` do not.
+
+The bound is not tunable from `bondi.yaml`. It is a ceiling on how long a slow-but-healthy component is allowed, not an expected wait — `service.health_timeout` is a different setting and bounds a blue-green deployment, not `setup`.
+
+Note that `bondi status` never waits. It reports whatever health state the server holds at the moment it is asked; waiting is `setup`'s behaviour alone.
 
 ### Deploy
 
@@ -212,7 +238,7 @@ After deploying, verify everything is running:
 bondi status
 ```
 
-This shows a table with your service, infrastructure components (orchestrator, Traefik), and their current state.
+This shows a table with your service, cron jobs, infrastructure components (orchestrator, Traefik), and their current state — read from the server over SSH and from the orchestrator over HTTP, with each source's account kept separate. See [Checking status](#checking-status) for the columns.
 
 ---
 
@@ -535,6 +561,8 @@ service:
 
 To stop collecting logs, remove the `alloy` section from `bondi.yaml` and run `bondi setup` again. Bondi will stop and remove the Alloy container and clean up its configuration on the server.
 
+If that run could not list the server's containers, it has nothing to remove the Alloy container *from* and passes over it — so a `bondi-alloy` can outlive the `alloy:` block that created it, still shipping logs with credentials your config no longer declares. It is not silent: the report `setup` prints at the end lists it in the Infrastructure section flagged `[undeclared]`, because the server is running a container nothing asks for. Check that flag after a withdrawal, and run `bondi setup` again to clear it.
+
 ---
 
 ## 5. Managed Containers
@@ -624,24 +652,79 @@ This shows all Bondi-managed components across your servers in a table:
 Server: 203.0.113.10
 
 Service
-  NAME                   IMAGE                               TAG          STATUS       RESTARTS   CREATED
-  my-api                 ghcr.io/acme/my-api                 v2.0.0       running      0          2025-01-15T10:30:00Z
+  NAME                   SOURCE  IMAGE                            TAG          STATUS        RESTARTS  HEALTH
+  my-api                 both    ghcr.io/acme/my-api              v2.0.0       running       0         healthy
+
+Cron Jobs
+  NAME                   SOURCE  IMAGE                            TAG          STATUS        RESTARTS  HEALTH
+  daily-close            docker  example.com/daily-close          1.0.0        exited        0         no healthcheck defined  [disagreement]
+                         orch    example.com/daily-close          1.0.0        completed     0         -
 
 Infrastructure
-  NAME                   IMAGE                               TAG          STATUS       RESTARTS   CREATED
-  bondi-orchestrator     mlopez1506/bondi-server              0.0.0        running      0          2025-01-15T10:00:00Z
-  bondi-traefik          traefik                              v3.6.8       running      0          2025-01-15T10:00:00Z
-  bondi-alloy            grafana/alloy                        v1.8.0       running      0          2025-01-15T10:00:00Z
-  bondi-gateway          ghcr.io/acme/ib-gateway              10.48.1e     running      0          2025-01-15T10:05:00Z
+  NAME                   SOURCE  IMAGE                            TAG          STATUS        RESTARTS  HEALTH
+  bondi-orchestrator     both    mlopez1506/bondi-server          0.10.3       running       0         no healthcheck defined
+  bondi-traefik          both    traefik                          v3.6.8       running       0         no healthcheck defined
+  bondi-alloy            both    grafana/alloy                    v1.8.0       running       0         no healthcheck defined
+  bondi-gateway          both    ghcr.io/acme/ib-gateway          10.48.1e     running       0         healthy
+  legacy-worker          docker  old/worker                       1.2          running       3         no healthcheck defined  [undeclared]
+
+Crontab
+  bondi section          docker  1 jobs (daily-close)
 ```
 
-Managed containers appear in the Infrastructure section, discovered on the server by label. A container you have declared in `bondi.yaml` that the server did not report shows as `not found` — that usually means `bondi setup` has not been run since you added it.
+Managed containers appear in the Infrastructure section, discovered on the server by label. A container you have declared in `bondi.yaml` that neither source reports shows as `not found` — that usually means `bondi setup` has not been run since you added it.
+
+#### The SOURCE column
+
+The table is read from two places and they are never blended into one answer:
+
+- **`docker`** — the containers on the server, read over SSH. This is ground truth about the box.
+- **`orch`** — the orchestrator's own report, fetched over HTTP. It holds what only the orchestrator knows, such as whether a cron job's last run `completed`.
+- **`both`** — the two agree on image, tag and status, so they share one line. The restart count is not compared: a count read a second later legitimately differs.
+
+Where the two disagree, the component gets one line per source and the row is flagged `[disagreement]`. That is the report's finding, not a defect in it — the two sources drifting apart is a state nothing else detects, so nothing is reconciled behind your back.
+
+A source that could not be consulted says so in its own words rather than reporting an absence:
+
+```
+  my-api                 docker  not read: Missing ssh configuration for server 203.0.113.10
+                         orch    not reachable: Error calling status endpoint on server 203.0.113.10
+```
+
+`not read` and `not reachable` mean the question was never answered — different from `not found`, which is a source answering that it does not have the component. A row where SSH could not be read but the orchestrator could is flagged `[unverified]`: it is the orchestrator's account with nothing to check it against.
+
+`[undeclared]` marks a container one of the sources reports that no `bondi.yaml` entry asks for — a service renamed without the old one being removed, or an Alloy container left behind by a withdrawn `alloy:` block. Nothing removes it for you; the flag exists so it stops being invisible.
+
+#### The HEALTH column
+
+`HEALTH` replaces the old `CREATED` column and reports the container's own Docker healthcheck, never its liveness:
+
+| Cell | Meaning |
+| --- | --- |
+| `healthy` | the container's healthcheck passed |
+| `unhealthy` | it ran and failed |
+| `starting` | inside its start period, no verdict yet |
+| `no healthcheck defined` | the image declares none, so there is nothing to pass |
+| `no health recorded` | it declares one, and Docker has no result yet |
+| `could not be read: …` | the inspection failed — no claim about the container either way |
+
+A container that is up is not a container that works, so `running` and `healthy` are separate facts and a run that could not read health never renders as healthy.
+
+Bondi never adds a healthcheck of its own — it reports whichever one the image declares, so `no healthcheck defined` for `bondi-traefik` and `bondi-alloy` above is the upstream images saying nothing about their own health, not Bondi failing to ask. Adding a `HEALTHCHECK` to your service's own image is what makes `setup` wait for it.
+
+#### The Crontab row
+
+`setup` writes the cron entries it manages into a marked section of the server's crontab, and that file is a different fact from the `cron_jobs` you declared. The `Crontab` row reports what is actually in the section: a job count and the job names (`1 jobs (daily-close)`), `0 jobs`, `no Bondi section on the host`, `markers malformed: …` where the `BEGIN`/`END` markers are unbalanced, or `not read: …`.
+
+Only counts, names and positions are ever printed. Crontab lines are never shown, in the table or in the JSON — each one carries the orchestrator API secret in plaintext.
 
 For machine-readable output:
 
 ```bash
 bondi status --output json
 ```
+
+Each row carries `declaration`, `disagreement`, `unverified`, and a separate `docker` and `orchestrator` object, so the provenance in the table is in the JSON too.
 
 ### Redeploying Traefik
 

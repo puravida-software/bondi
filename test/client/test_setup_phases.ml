@@ -23,9 +23,7 @@ let phase_string = function
 
 let phase action = Setup.phase_of_action action
 let phases actions = List.map phase actions
-
-let contains ~needle haystack =
-  Bondi_common.String_utils.contains ~needle haystack
+let contains = Test_helpers.contains
 
 (* ------------------------------------------------------------------------- *)
 (* Which phase an action belongs to                                          *)

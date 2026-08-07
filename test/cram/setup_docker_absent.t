@@ -23,6 +23,7 @@ succeed, so the run reaches the install rather than stopping earlier.
   >     echo "$probes" > "$DOCKER_PROBES"
   >     echo 'bash: docker: command not found' >&2
   >     exit 127 ;;
+  >   *'/var/spool/cron/crontabs/root'*) echo BONDI_CRONTAB_ABSENT ;;
   >   *) : ;;
   > esac
   > STUB
@@ -40,7 +41,8 @@ succeed, so the run reaches the install rather than stopping earlier.
   >   port: 8080
   >   env_vars: {}
   >   servers:
-  >     - ip_address: 10.0.0.1
+  >     - ip_address: 127.0.0.1
+  >       port: 9
   >       ssh:
   >         user: deploy
   >         private_key_contents: "not-a-real-key"
@@ -54,8 +56,8 @@ host did give it.
 
   $ bondi-client setup 2>&1 | head -4
   Setting up the servers...
-  Processing server: 10.0.0.1
-  Docker not found on server 10.0.0.1
+  Processing server: 127.0.0.1
+  Docker not found on server 127.0.0.1
   Installing Docker...
 
 The installer was issued exactly once.

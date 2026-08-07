@@ -1,7 +1,7 @@
 open Alcotest
 module Probe = Bondi_client.Orchestrator_probe
 
-let contains ~needle hay = Bondi_common.String_utils.contains ~needle hay
+let contains = Test_helpers.contains
 
 (* The defect this module exists to prevent: `docker run -d` answers with a
    container id as soon as the container is created, which says nothing about

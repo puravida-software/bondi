@@ -4,7 +4,16 @@ import "hurl_tests/hurl.just"
 
 IMAGE_NAME := "mlopez1506/bondi-server"
 
+# The last thing printed is what the run means. Without it the gate ends on the
+# negative image check, whose success is a page of loader errors and the word
+# "error" — a passing run that reads as a failed one.
 default: build test fmt lint build-server-ci
+    @echo ""
+    @echo "================================================================"
+    @echo "  just: PASSED — build, test, fmt, lint, server image"
+    @echo "  Any 'error' lines above came from the negative image check,"
+    @echo "  which passes by rejecting an image it broke on purpose."
+    @echo "================================================================"
 
 # Verification sits before the push for the same reason it does in the release
 # workflow: nothing reaches the registry that has not been shown to run.
