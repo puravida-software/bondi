@@ -68,11 +68,18 @@ let with_temp_key contents f =
       Unix.chmod path 0o600;
       f path)
 
+(* Shares Docker_common's option set rather than restating a subset of it.
+   This spelling had BatchMode and StrictHostKeyChecking but not ConnectTimeout
+   or the keepalives, so setup -- the command that makes by far the most SSH
+   calls -- was the one with no bound on a connection that hangs.
+
+   Multiplexing matters most here: setup issues 31 of these, and each one paid a
+   full handshake. See Docker_common.multiplex_options. *)
 let ssh_command ~user ~host ~key_path cmd =
   let destination = user ^ "@" ^ host in
-  Printf.sprintf
-    "ssh -i %s -o BatchMode=yes -o StrictHostKeyChecking=accept-new %s -- %s"
-    (Filename.quote key_path)
+  Printf.sprintf "ssh -i %s %s %s %s -- %s" (Filename.quote key_path)
+    (String.concat " " Docker_common.ssh_options)
+    (String.concat " " (Docker_common.multiplex_options ()))
     (Filename.quote destination)
     (Filename.quote cmd)
 
@@ -218,6 +225,80 @@ let phase_of_action : action -> Setup_phases.phase = function
    cannot see it. *)
 let orchestrator_ps_command =
   "ps -a --filter name=^/bondi-orchestrator$ --format '{{.State}}\t{{.Image}}'"
+
+(* ------------------------------------------------------------------------- *)
+(* Orchestrator run command (pure, testable)                                  *)
+(* ------------------------------------------------------------------------- *)
+
+(* The publish address is the security boundary for this API, and nothing else
+   is. The orchestrator mounts the host Docker socket, so reaching it is
+   equivalent to root on the box; -p 3030:3030 published that to the internet
+   on every host bondi has ever set up.
+
+   Default 127.0.0.1. Cron is unaffected -- lib/server/crontab.ml calls
+   http://localhost:3030 from the host, which is the published mapping. Remote
+   callers use a tunnel:  ssh -N -L 3030:127.0.0.1:3030 root@<box>
+
+   Non-loopback is allowed but not unauthenticated: without api_token the API
+   is open, and an open API on a public address is remote root. Refusing here
+   is the point -- a warning would be scrolled past and the box would sit
+   exposed, which is exactly how this shipped. *)
+let orchestrator_bind_address (config : Config_file.t) =
+  Option.value config.bondi_server.bind_address ~default:"127.0.0.1"
+
+let orchestrator_run_command (config : Config_file.t) : (string, string) result
+    =
+  let bind = orchestrator_bind_address config in
+  if
+    (not (Bondi_common.Net.is_loopback bind))
+    && config.bondi_server.api_token = None
+  then
+    Error
+      (Printf.sprintf
+         "bondi_server.bind_address is %s, which is reachable from outside \
+          this host, and bondi_server.api_token is not set. The orchestrator \
+          mounts the host Docker socket, so an unauthenticated public bind is \
+          remote root on this machine. Either remove bind_address (defaults to \
+          127.0.0.1 and is reached with: ssh -N -L 3030:127.0.0.1:3030 \
+          root@<box>), or set api_token."
+         bind)
+  else
+    let volume_mounts, user_flag =
+      match config.cron_jobs with
+      | Some jobs when jobs <> [] ->
+          ( " -v /var/spool/cron/crontabs:/var/spool/cron/crontabs",
+            " --user root" )
+      | _ -> ("", "")
+    in
+    let token_env =
+      match config.bondi_server.api_token with
+      | Some t -> " -e BONDI_API_TOKEN=" ^ Filename.quote t
+      | None -> ""
+    in
+    let image = "mlopez1506/bondi-server:" ^ config.bondi_server.version in
+    (* No --rm: a container that dies on startup erases itself under it, leaving
+       no container, no logs and no error for either the operator or the
+       readiness check. *)
+    Ok
+      (Printf.sprintf
+         "docker run -d --name bondi-orchestrator -p %s:3030:3030 -v \
+          /var/run/docker.sock:/var/run/docker.sock%s%s%s --group-add $(stat \
+          -c %%g /var/run/docker.sock) --label bondi.managed=true --label \
+          bondi.type=infrastructure --label bondi.logs=true %s"
+         bind volume_mounts user_flag token_env image)
+
+(* What the host reports its published binding as, so setup can check that what
+   it asked for is what it got rather than assuming the run command took. *)
+let orchestrator_port_command =
+  "docker inspect bondi-orchestrator -f '{{range $p, $c := \
+   .HostConfig.PortBindings}}{{range $c}}{{.HostIp}}{{end}}{{end}}'"
+
+let published_binding_matches ~expected output =
+  let got = String.trim output in
+  (* Docker normalises an empty HostIp to "all interfaces". Treat it as 0.0.0.0
+     rather than as agreement with whatever was asked for. *)
+  let got = if got = "" then "0.0.0.0" else got in
+  if got = expected then Ok () else Error got
 
 let orchestrator_version_of_image image =
   let prefix = "mlopez1506/bondi-server:" in
@@ -803,26 +884,29 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
              ip_address);
         Ok ()
     | RunServer ->
-        let volume_mounts, user_flag =
-          match config.cron_jobs with
-          | Some jobs when jobs <> [] ->
-              ( " -v /var/spool/cron/crontabs:/var/spool/cron/crontabs",
-                " --user root" )
-          | _ -> ("", "")
-        in
         let image = "mlopez1506/bondi-server:" ^ config.bondi_server.version in
-        (* No --rm: a container that dies on startup erases itself under it,
-           leaving no container, no logs and no error for either the operator or
-           the readiness check below. *)
-        let run_cmd =
-          "docker run -d --name bondi-orchestrator -p 3030:3030 -v \
-           /var/run/docker.sock:/var/run/docker.sock" ^ volume_mounts
-          ^ user_flag
-          ^ " --group-add $(stat -c %g /var/run/docker.sock) --label \
-             bondi.managed=true --label bondi.type=infrastructure --label \
-             bondi.logs=true " ^ image
-        in
+        let* run_cmd = orchestrator_run_command config in
         let* _ = remote_run ~user ~host ~key_path run_cmd in
+        (* Assert the posture rather than assume the run command took. This is
+           the step whose absence let an undeclared loopback binding be reverted
+           silently on 2026-08-29: the container came back healthy on 0.0.0.0
+           and nothing said the exposure had changed. A readiness probe answers
+           "is it up", which is a different question. *)
+        let expected = orchestrator_bind_address config in
+        let* published =
+          remote_run ~user ~host ~key_path orchestrator_port_command
+        in
+        let* () =
+          match published_binding_matches ~expected published with
+          | Ok () -> Ok ()
+          | Error got ->
+              Error
+                (Printf.sprintf
+                   "orchestrator published on %s but bondi.yaml asks for %s -- \
+                    refusing to report success on a posture that was not \
+                    applied"
+                   got expected)
+        in
         (* [docker run -d] reports that the container was created, which is not
            the same fact as the server being up. The verdict is a pure decision
            in [Orchestrator_probe]; this arm obtains the host's answer, and

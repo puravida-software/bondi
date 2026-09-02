@@ -36,6 +36,7 @@ only have stopped on the probe that arm broke.
   >     if [ -n "$DOCKER_DROPS_SECOND" ] && [ "$probes" -ge 2 ]; then drop; fi
   >     echo 'Docker version 29.2.1, build deadbeef' ;;
   >   *'/var/spool/cron/crontabs/root'*) echo BONDI_CRONTAB_ABSENT ;;
+  >   *'PortBindings'*) echo '127.0.0.1' ;;
   >   *) : ;;
   > esac
   > STUB

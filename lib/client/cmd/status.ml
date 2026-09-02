@@ -62,12 +62,38 @@ let fetch_status ~clock ~client ip_address ~port ~service_name =
            (Printf.sprintf "Error calling status endpoint on server %s: %s"
               ip_address (Printexc.to_string exn)))
 
+(* Same reasoning as the deploy path: the orchestrator answers on loopback only,
+   so a status read from another machine goes through a forwarded port. A server
+   declared without [ssh] is dialled directly -- correct for localhost and for a
+   tunnel the operator opened themselves.
+
+   A tunnel that never came up is [Not_consulted], not [Not_understood]: nothing
+   was obtained from the box at all, and the distinction is what tells an
+   operator whether to look at their key or at the orchestrator. *)
 let orchestrator_reading ~clock ~client ~service_name
     (server : Config_file.server) =
   let port =
     Option.value ~default:Bondi_common.Defaults.server_port server.port
   in
-  fetch_status ~clock ~client server.ip_address ~port ~service_name
+  (* A loopback address is the box itself: the published port is already
+     reachable and forwarding loopback to loopback buys nothing. *)
+  match
+    if Bondi_common.Net.is_loopback server.ip_address then None else server.ssh
+  with
+  | None -> fetch_status ~clock ~client server.ip_address ~port ~service_name
+  | Some ssh -> (
+      match
+        Ssh_tunnel.with_tunnel ~ssh ~host:server.ip_address ~remote_port:port
+          (fun local_port ->
+            Ok
+              (fetch_status ~clock ~client "127.0.0.1" ~port:local_port
+                 ~service_name))
+      with
+      | Ok reading -> reading
+      | Error msg ->
+          Error
+            (Status_report.Not_consulted
+               (Printf.sprintf "%s: %s" server.ip_address msg)))
 
 let orchestrator_reading_standalone ~service_name server =
   Eio_main.run @@ fun env ->

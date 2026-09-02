@@ -114,6 +114,7 @@ let cron_job_on_network ~name ~network : Simple.cron_job =
     schedule = "0 0 * * *";
     network;
     env_vars = None;
+    secret_env_vars = None;
     registry_user = None;
     registry_pass = None;
     alert_sinks = None;
@@ -389,6 +390,7 @@ let alerting_config_cron_job () : Client_config.cron_job =
     schedule = "* * * * *";
     network = None;
     env_vars = None;
+    secret_env_vars = None;
     registry_user = None;
     registry_pass = None;
     alert_sinks =

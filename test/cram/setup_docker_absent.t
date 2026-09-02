@@ -24,6 +24,7 @@ succeed, so the run reaches the install rather than stopping earlier.
   >     echo 'bash: docker: command not found' >&2
   >     exit 127 ;;
   >   *'/var/spool/cron/crontabs/root'*) echo BONDI_CRONTAB_ABSENT ;;
+  >   *'PortBindings'*) echo '127.0.0.1' ;;
   >   *) : ;;
   > esac
   > STUB

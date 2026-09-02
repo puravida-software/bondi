@@ -1,10 +1,10 @@
 module Report = Bondi_client.Status_report
 
-let mk_config ?user_service ?cron_jobs ?managed_containers () :
-    Bondi_client.Config_file.t =
+let mk_config ?user_service ?cron_jobs ?managed_containers ?bind_address
+    ?api_token () : Bondi_client.Config_file.t =
   {
     user_service;
-    bondi_server = { version = "0.1.0" };
+    bondi_server = { version = "0.1.0"; bind_address; api_token };
     traefik = None;
     cron_jobs;
     alloy = None;

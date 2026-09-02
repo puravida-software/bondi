@@ -83,7 +83,7 @@ let config : Config_file.t =
           poll_interval = None;
           logs = None;
         };
-    bondi_server = { version = "0.10.3" };
+    bondi_server = { version = "0.10.3"; bind_address = None; api_token = None };
     traefik = None;
     cron_jobs = None;
     alloy = None;

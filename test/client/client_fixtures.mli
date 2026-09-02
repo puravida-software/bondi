@@ -9,6 +9,8 @@ val mk_config :
   ?user_service:Bondi_client.Config_file.user_service ->
   ?cron_jobs:Bondi_client.Config_file.cron_job list ->
   ?managed_containers:Bondi_client.Config_file.managed_container list ->
+  ?bind_address:string ->
+  ?api_token:string ->
   unit ->
   Bondi_client.Config_file.t
 (** A configuration declaring only what the caller names.

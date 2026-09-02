@@ -38,6 +38,7 @@ runs below, so the exit code can only have followed from it.
   >     printf '/bondi-orchestrator\tundeclared\t\t0\t2026-08-01T09:00:00.222222222Z\n'
   >     printf '/bondi-gateway\tundeclared\t\t0\t2026-08-01T09:30:00.444444444Z\n' ;;
   >   *'/var/spool/cron/crontabs/root'*) echo BONDI_CRONTAB_ABSENT ;;
+  >   *'PortBindings'*) echo '127.0.0.1' ;;
   >   *) : ;;
   > esac
   > STUB

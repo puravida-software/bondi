@@ -21,6 +21,7 @@ listing.
   >     echo 'Connection closed by 10.0.0.1 port 22' >&2
   >     exit 255 ;;
   >   *'/var/spool/cron/crontabs/root'*) echo BONDI_CRONTAB_ABSENT ;;
+  >   *'PortBindings'*) echo '127.0.0.1' ;;
   >   *) : ;;
   > esac
   > STUB

@@ -39,6 +39,7 @@ inspection says has a healthcheck to answer for. This host's checks pass.
   >     echo '# BEGIN BONDI CRON'
   >     echo "0 6 * * * curl -s -X POST -d '{\"job\":\"daily-close\",\"secret\":\"s3cr3t\"}' http://127.0.0.1:3030/api/v1/run"
   >     echo '# END BONDI CRON' ;;
+  >   *'PortBindings'*) echo '127.0.0.1' ;;
   >   *) : ;;
   > esac
   > STUB

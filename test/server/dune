@@ -16,7 +16,10 @@
   test_docker_client
   test_blue_green_plan
   test_alloy_config
-  test_alert_delivery)
+  test_alert_delivery
+  test_auth
+  test_server_config
+  test_cron_secrets)
  (modules
   test_env
   test_simple_plan
@@ -27,7 +30,10 @@
   test_docker_client
   test_blue_green_plan
   test_alloy_config
-  test_alert_delivery)
+  test_alert_delivery
+  test_auth
+  test_server_config
+  test_cron_secrets)
  (libraries
   alcotest
   bondi.client
