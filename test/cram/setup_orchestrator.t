@@ -37,6 +37,7 @@ leaves a running one.
   >   'docker ps -aq | while read -r id'*)
   >     printf '/bondi-orchestrator\tundeclared\t\t0\t2026-08-01T09:00:00.222222222Z\n' ;;
   >   *'/var/spool/cron/crontabs/root'*) echo BONDI_CRONTAB_ABSENT ;;
+  >   *'PortBindings'*) echo "${PUBLISHED_ON-127.0.0.1}" ;;
   >   *) : ;;
   > esac
   > STUB
@@ -185,3 +186,39 @@ in exactly the state wanted.
 
   $ grep -c 'could not be removed' ssh-argv.log
   1
+
+
+The publish address is declared in bondi.yaml, and setup checks what the host
+actually published rather than trusting that `docker run` applied it.
+
+Until 2026-08-29 setup ran `-p 3030:3030` unconditionally, publishing an
+unauthenticated API that mounts the host Docker socket on every interface. One
+box had been closed by a loopback binding applied by hand and recorded nowhere;
+a later setup converged that box against bondi.yaml, which did not mention the
+binding, and silently re-exposed a production orchestrator. The run reported
+success and the readiness probe agreed, because "is it up" and "who can reach
+it" are different questions. These two assertions are that difference.
+
+  $ : > "$ORCHESTRATOR_PS"
+  $ : > ssh-argv.log
+  $ bondi-client setup > /dev/null 2>&1
+  $ grep -o -- '-p 127.0.0.1:3030:3030' ssh-argv.log | head -1
+  -p 127.0.0.1:3030:3030
+
+The wide form is never emitted.
+
+  $ grep -c -- '-p 3030:3030' ssh-argv.log || true
+  0
+
+When the host reports a binding other than the one asked for, setup fails and
+names both. Docker reports "every interface" as an empty HostIp, which must read
+as 0.0.0.0 rather than as agreement with the request -- otherwise the check
+passes on exactly the configuration it exists to catch.
+
+  $ : > "$ORCHESTRATOR_PS"
+  $ PUBLISHED_ON=0.0.0.0 bondi-client setup 2>&1 | grep -o 'orchestrator published on .* asks for [0-9.]*'
+  orchestrator published on 0.0.0.0 but bondi.yaml asks for 127.0.0.1
+
+  $ : > "$ORCHESTRATOR_PS"
+  $ PUBLISHED_ON= bondi-client setup 2>&1 | grep -o 'orchestrator published on .* asks for [0-9.]*'
+  orchestrator published on 0.0.0.0 but bondi.yaml asks for 127.0.0.1

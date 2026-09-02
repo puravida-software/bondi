@@ -17,6 +17,7 @@ The stub records every SSH call so the absence of one can be asserted.
   > case "$1" in
   >   'docker --version') echo 'Docker version 29.2.1, build deadbeef' ;;
   >   *'/var/spool/cron/crontabs/root'*) echo BONDI_CRONTAB_ABSENT ;;
+  >   *'PortBindings'*) echo '127.0.0.1' ;;
   >   *) : ;;
   > esac
   > STUB

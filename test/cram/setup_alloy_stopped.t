@@ -25,6 +25,7 @@ the declared version, so the run reduces to the alloy phase.
   >     printf 'exited\tgrafana/alloy:v1.8.0\n' ;;
   >   *'--name bondi-alloy'*) echo 'd671990dc2318f4b' ;;
   >   *'/var/spool/cron/crontabs/root'*) echo BONDI_CRONTAB_ABSENT ;;
+  >   *'PortBindings'*) echo '127.0.0.1' ;;
   >   *) : ;;
   > esac
   > STUB

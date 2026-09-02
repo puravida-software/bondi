@@ -30,7 +30,24 @@ type user_service = {
 }
 [@@deriving yojson]
 
-type bondi_server = { version : string } [@@deriving yojson]
+(* [bind_address] is the host address the orchestrator's port is published on,
+   and it is the only thing that decides whether the API faces the internet.
+   Absent means 127.0.0.1: reachable from the box (which is how cron calls it)
+   and from an SSH tunnel, and from nowhere else.
+
+   It is declared here rather than applied by hand because `bondi setup`
+   converges the whole box against this file. A binding applied outside it
+   survives only until the next setup -- that happened on 2026-08-29, silently,
+   and re-exposed a production orchestrator that had been closed for months.
+
+   [api_token], when set, is required as a bearer token on every route except
+   /health. Setting a non-loopback [bind_address] without it is refused. *)
+type bondi_server = {
+  version : string;
+  bind_address : string option; [@default None]
+  api_token : string option; [@default None]
+}
+[@@deriving yojson]
 
 type traefik = { domain_name : string; image : string; acme_email : string }
 [@@deriving yojson]
@@ -57,6 +74,9 @@ type cron_job = {
   schedule : string;
   network : string option; [@default None]
   env_vars : string_map option; [@default None]
+  (* Written to a mode-600 file on the box instead of into the crontab line.
+     See lib/server/cron_secrets.ml for why the distinction exists. *)
+  secret_env_vars : string_map option; [@default None]
   registry_user : string option; [@default None]
   registry_pass : string option; [@default None]
   alert_sinks : Alert.sinks option; [@default None]

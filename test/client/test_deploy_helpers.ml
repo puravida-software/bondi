@@ -46,7 +46,7 @@ let test_parse_name_tag_colon_in_tag () =
 let mk_config ?user_service ?cron_jobs () : Config_file.t =
   {
     user_service;
-    bondi_server = { version = "0.1.0" };
+    bondi_server = { version = "0.1.0"; bind_address = None; api_token = None };
     traefik = None;
     cron_jobs;
     alloy = None;
@@ -77,6 +77,7 @@ let mk_cron_job ?network ?alert_sinks ?exit_code_severities name ip :
     schedule = "* * * * *";
     network;
     env_vars = None;
+    secret_env_vars = None;
     registry_user = None;
     registry_pass = None;
     alert_sinks;

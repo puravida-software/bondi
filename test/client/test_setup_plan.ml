@@ -125,7 +125,8 @@ let make_config ?(alloy = None) ?(managed_containers = None) ~user_service
     ~cron_jobs ~version () =
   {
     Config_file.user_service;
-    Config_file.bondi_server = { Config_file.version };
+    Config_file.bondi_server =
+      { Config_file.version; bind_address = None; api_token = None };
     Config_file.traefik = None;
     Config_file.cron_jobs;
     Config_file.alloy;
@@ -721,6 +722,7 @@ let test_plan_cron_jobs_force_restart () =
       Config_file.schedule = "0 0 * * *";
       Config_file.network = None;
       Config_file.env_vars = None;
+      Config_file.secret_env_vars = None;
       Config_file.registry_user = None;
       Config_file.registry_pass = None;
       Config_file.alert_sinks = None;
@@ -776,6 +778,7 @@ let test_plan_cron_only_no_acme () =
       Config_file.schedule = "0 0 * * *";
       Config_file.network = None;
       Config_file.env_vars = None;
+      Config_file.secret_env_vars = None;
       Config_file.registry_user = None;
       Config_file.registry_pass = None;
       Config_file.alert_sinks = None;
@@ -817,6 +820,7 @@ let test_plan_requires_curl_when_cron_jobs_declared () =
       Config_file.schedule = "0 0 * * *";
       Config_file.network = None;
       Config_file.env_vars = None;
+      Config_file.secret_env_vars = None;
       Config_file.registry_user = None;
       Config_file.registry_pass = None;
       Config_file.alert_sinks = None;

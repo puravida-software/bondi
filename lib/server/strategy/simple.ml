@@ -25,6 +25,7 @@ type cron_job = {
   schedule : string;
   network : string option; [@default None]
   env_vars : string_map option; [@default None]
+  secret_env_vars : string_map option; [@default None]
   registry_user : string option; [@default None]
   registry_pass : string option; [@default None]
   alert_sinks : Alert.sinks option; [@default None]

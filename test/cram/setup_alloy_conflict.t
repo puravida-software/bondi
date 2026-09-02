@@ -26,6 +26,7 @@ succeeds, so the failure is genuinely mid-plan.
   >     echo 'docker: Error response from daemon: Conflict. The container name "/bondi-alloy" is already in use by container "d671990dc231".' >&2
   >     exit 125 ;;
   >   *'/var/spool/cron/crontabs/root'*) echo BONDI_CRONTAB_ABSENT ;;
+  >   *'PortBindings'*) echo '127.0.0.1' ;;
   >   *) : ;;
   > esac
   > STUB

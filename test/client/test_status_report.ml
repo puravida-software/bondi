@@ -362,6 +362,7 @@ let cron_config =
           schedule = "0 0 * * *";
           network = None;
           env_vars = None;
+          secret_env_vars = None;
           registry_user = None;
           registry_pass = None;
           alert_sinks = None;

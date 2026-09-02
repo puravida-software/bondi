@@ -23,11 +23,36 @@ val ssh_options : string list
     not of any one call site, and a call site spelling them differently is the
     defect. *)
 
+val multiplex_options : unit -> string list
+(** SSH options that reuse one connection across many commands.
+
+    [bondi setup] issues 31 separate ssh invocations; measured on 2026-09-02 a
+    cold connection costs 2.48s and a multiplexed one 0.39s, so this is the
+    difference between roughly 77 seconds of handshake per setup and roughly 15.
+
+    The control socket is created in a private mode-700 directory named after
+    the calling process. Anyone able to open that socket can multiplex onto the
+    connection it holds, which is root on a deploy box; on the runner fleet all
+    agents share one uid, so a predictable path in a shared /tmp would let one
+    repo's job ride another's deployment connection.
+
+    Not folded into {!ssh_options} because a tunnel does not want it. *)
+
 val decode_private_key : string -> string
 (** The key material as it must be written to disk.
 
     A key is carried in the configuration either base64-encoded or verbatim, and
     a value that does not decode is one of the latter rather than a failure. *)
+
+val with_temp_key : string -> (string -> 'a) -> 'a
+(** [with_temp_key contents f] writes the decoded key to a mode-600 temporary
+    file, calls [f] with its path, and removes it on every path out including an
+    exception from [f].
+
+    Exposed for [Ssh_tunnel], which needs the same key on disk for a forward
+    rather than for a remote command. Key material must not outlive the call
+    that needs it, and duplicating the write-then-delete is how one copy gets
+    left behind. *)
 
 val command_output :
   command:string -> Config_file.server -> (string, string) result

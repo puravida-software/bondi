@@ -5,6 +5,7 @@ type deploy_cron_job = {
   schedule : string;
   network : string option; [@default None]
   env_vars : Config_file.string_map option; [@default None]
+  secret_env_vars : Config_file.string_map option; [@default None]
   registry_user : string option; [@default None]
   registry_pass : string option; [@default None]
   alert_sinks : Bondi_common.Alert.sinks option; [@default None]
@@ -60,6 +61,38 @@ let post_deploy ~client ip_address ~port payload =
         (Printf.sprintf "Error calling deploy endpoint on server %s: %s"
            ip_address (Printexc.to_string exn))
 
+(* The orchestrator is published on loopback, so the only way in from another
+   machine is a forwarded port. Going through SSH is also what encrypts this
+   request: the payload below carries env_vars, registry_user and registry_pass,
+   and over plain HTTP to a public address those crossed the internet in the
+   clear on every deploy.
+
+   A server declared without [ssh] is dialled directly, which is correct for a
+   box reached over a tunnel the operator opened themselves, and for localhost
+   in development. It is NOT a fallback for a missing key: without [ssh] there
+   is nothing to authenticate with, so there is no tunnel to attempt. *)
+let post_deploy_via_ssh ~client (server : Config_file.server) ~port payload =
+  (* A loopback address is the box itself -- bondi running on the machine it is
+     deploying to. The orchestrator's published port is already reachable there,
+     and forwarding loopback to loopback would only add an SSH round trip and a
+     key that does not need to exist. *)
+  match
+    if Bondi_common.Net.is_loopback server.ip_address then None else server.ssh
+  with
+  | None ->
+      print_endline
+        (Printf.sprintf "Deploying to server: %s at http://%s:%d/api/v1/deploy"
+           server.ip_address server.ip_address port);
+      post_deploy ~client server.ip_address ~port payload
+  | Some ssh ->
+      print_endline
+        (Printf.sprintf
+           "Deploying to server: %s over an SSH tunnel to 127.0.0.1:%d"
+           server.ip_address port);
+      Ssh_tunnel.with_tunnel ~ssh ~host:server.ip_address ~remote_port:port
+        (fun local_port ->
+          post_deploy ~client "127.0.0.1" ~port:local_port payload)
+
 let parse_name_tag s : (string * string, string) result =
   match String.split_on_char ':' s with
   | [] -> Error "missing tag (expected name:tag)"
@@ -76,6 +109,7 @@ let cron_job_to_deploy (j : Config_file.cron_job) ~image : deploy_cron_job =
     schedule = j.schedule;
     network = j.network;
     env_vars = j.env_vars;
+    secret_env_vars = j.secret_env_vars;
     registry_user = j.registry_user;
     registry_pass = j.registry_pass;
     alert_sinks = j.alert_sinks;
@@ -251,11 +285,7 @@ let run force_traefik_redeploy deployments =
               Option.value ~default:Bondi_common.Defaults.server_port
                 server.port
             in
-            print_endline
-              (Printf.sprintf
-                 "Deploying to server: %s at http://%s:%d/api/v1/deploy"
-                 ip_address ip_address port);
-            post_deploy ~client ip_address ~port base_payload)
+            post_deploy_via_ssh ~client server ~port base_payload)
           servers
       in
       match

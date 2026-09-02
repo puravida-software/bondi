@@ -26,9 +26,16 @@ let outcome_of_result : (int, string) result -> Alert.outcome = function
   | Ok exit_code -> Alert.Exited exit_code
   | Error msg -> Alert.Start_failed msg
 
-let env_vars_to_list = function
-  | None -> None
-  | Some env -> Some (List.map (fun (k, v) -> k ^ "=" ^ v) env)
+(* The crontab line carries only the non-secret environment; the rest is read
+   from the job's mode-600 file, written at deploy time. A job with no file --
+   one deployed before this existed -- runs on what the line carries, rather
+   than failing, so the change is not a flag day for already-scheduled jobs. *)
+let env_for_job ~job env_vars =
+  let plain = Option.value env_vars ~default:[] in
+  let secret = Cron_secrets.read_env_file job in
+  match Cron_secrets.merge ~plain ~secret with
+  | [] -> None
+  | entries -> Some entries
 
 let networking_conf_of_network :
     string option -> Docker.Client.networking_config option = function
@@ -74,7 +81,7 @@ let run_opts ~container_name ~full_image payload :
   let config : Docker.Client.container_config =
     {
       image = Some full_image;
-      env = env_vars_to_list payload.env_vars;
+      env = env_for_job ~job:payload.job payload.env_vars;
       cmd = None;
       entrypoint = None;
       hostname = None;

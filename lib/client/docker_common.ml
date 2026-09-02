@@ -64,11 +64,61 @@ let ssh_options =
     "-o ServerAliveCountMax=4";
   ]
 
+(* One SSH connection reused across a command's many round trips.
+   `bondi setup` issues 31 separate ssh invocations. Measured against the
+   trading box on 2026-09-02: 2.48s each cold, 0.39s multiplexed -- about 77
+   seconds of pure handshake per setup, versus about 15. The server side was
+   already clean (usedns no, gssapiauthentication no); this was entirely a
+   missing client option.
+
+   The socket lives in a private mode-700 directory named after this process,
+   not at a predictable path in a shared /tmp. Whoever can open a control socket
+   can multiplex onto the connection it holds -- which is root on a deploy box.
+   On the runner fleet every agent runs as the same uid, so a shared, guessable
+   path would let any repo's job ride another job's deployment connection. The
+   directory is removed at exit; a master that outlives it is unreachable and
+   expires on ControlPersist. *)
+let control_dir =
+  lazy
+    (let dir =
+       Filename.concat
+         (Filename.get_temp_dir_name ())
+         (Printf.sprintf "bondi-ssh-%d" (Unix.getpid ()))
+     in
+     (try Unix.mkdir dir 0o700 with
+     | Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+     at_exit (fun () ->
+         (try
+            Array.iter
+              (fun f ->
+                try Unix.unlink (Filename.concat dir f) with
+                | _ -> ())
+              (Sys.readdir dir)
+          with
+         | _ -> ());
+         try Unix.rmdir dir with
+         | _ -> ());
+     dir)
+
+(* Kept apart from [ssh_options] because not every caller wants it: an SSH
+   tunnel is one long-lived connection that gains nothing from multiplexing, and
+   routing it through a shared master would make tearing it down a question of
+   channels rather than of killing a process. *)
+let multiplex_options () =
+  let dir = Lazy.force control_dir in
+  [
+    "-o ControlMaster=auto";
+    Printf.sprintf "-o ControlPath=%s"
+      (Filename.quote (Filename.concat dir "c"));
+    "-o ControlPersist=30";
+  ]
+
 let remote_run ~user ~host ~key_path cmd =
   let destination = user ^ "@" ^ host in
   let ssh_cmd =
-    Printf.sprintf "ssh -i %s %s %s -- %s" (Filename.quote key_path)
+    Printf.sprintf "ssh -i %s %s %s %s -- %s" (Filename.quote key_path)
       (String.concat " " ssh_options)
+      (String.concat " " (multiplex_options ()))
       (Filename.quote destination)
       (Filename.quote cmd)
   in

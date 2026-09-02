@@ -59,6 +59,27 @@ let registry_auth (input : Simple.deploy_input) =
       | Error _ -> None)
   | _ -> None
 
+(* Secrets never enter the crontab line -- Crontab.run_payload_of_cron_job does
+   not carry secret_env_vars, deliberately -- so they are placed on the box
+   here, at deploy time, and read back by Run when the job fires.
+
+   Every declared job is written even when it declares no secrets, so that
+   withdrawing a credential truncates the file rather than leaving the last one
+   behind for the next run to pick up. *)
+let write_cron_secrets (cron_jobs : Simple.cron_job list option) :
+    (unit, string) result =
+  let write (c : Simple.cron_job) =
+    Cron_secrets.write_env_file ~name:c.name
+      (Option.value c.secret_env_vars ~default:[])
+  in
+  List.fold_left
+    (fun acc job ->
+      match acc with
+      | Error _ -> acc
+      | Ok () -> write job)
+    (Ok ())
+    (Option.value cron_jobs ~default:[])
+
 let registry_auth_for_cron (c : Simple.cron_job) =
   match (c.registry_user, c.registry_pass) with
   | Some user, Some pass -> (
@@ -200,10 +221,19 @@ let interpret ~client ~net (actions : deploy_action list) :
         let* () = pull_cron_images jobs in
         run rest
     | UpsertCrontab cron_jobs :: rest -> (
-        match Crontab.upsert cron_jobs with
-        | Ok () -> run rest
+        (* The secret files are written before the crontab, not after: a line
+           that fires against a missing file runs the job without its
+           credentials, which fails somewhere inside the container and reports
+           as the job being broken. Writing first means the only ordering
+           failure is a crontab that was not updated, which reports as itself. *)
+        match write_cron_secrets cron_jobs with
         | Error msg ->
-            Error ("Deploy succeeded but crontab update failed: " ^ msg))
+            Error ("Deploy succeeded but writing cron secrets failed: " ^ msg)
+        | Ok () -> (
+            match Crontab.upsert cron_jobs with
+            | Ok () -> run rest
+            | Error msg ->
+                Error ("Deploy succeeded but crontab update failed: " ^ msg)))
   in
   run actions
 

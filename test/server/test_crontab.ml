@@ -73,6 +73,7 @@ let mk_cron_job ?network ?alert_sinks ?exit_code_severities ~name ~image
     schedule;
     network;
     env_vars = None;
+    secret_env_vars = None;
     registry_user = None;
     registry_pass = None;
     alert_sinks;
