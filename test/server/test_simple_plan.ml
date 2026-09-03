@@ -90,7 +90,11 @@ let test_plan_with_existing_workload () =
         List.exists
           (function
             | Simple.StopAndRemoveContainer _ -> true
-            | _ -> false)
+            | Simple.CreateNetwork _
+            | Simple.EnsureTraefik _
+            | Simple.PullImage _
+            | Simple.RunWorkload _ ->
+                false)
           actions
       in
       check bool "includes StopAndRemoveContainer for workload" true
@@ -140,13 +144,22 @@ let test_plan_with_registry_auth () =
         List.find_opt
           (function
             | Simple.PullImage _ -> true
-            | _ -> false)
+            | Simple.CreateNetwork _
+            | Simple.EnsureTraefik _
+            | Simple.StopAndRemoveContainer _
+            | Simple.RunWorkload _ ->
+                false)
           actions
       in
       match pull with
       | Some (Simple.PullImage { with_auth; _ }) ->
           check bool "PullImage uses auth" true with_auth
-      | _ -> Alcotest.fail "expected PullImage with auth")
+      | Some (Simple.CreateNetwork _)
+      | Some (Simple.EnsureTraefik _)
+      | Some (Simple.StopAndRemoveContainer _)
+      | Some (Simple.RunWorkload _)
+      | None ->
+          Alcotest.fail "expected PullImage with auth")
 
 let test_plan_cron_only_skips_workload () =
   let input =
@@ -167,7 +180,10 @@ let test_plan_cron_only_skips_workload () =
             | Simple.PullImage _
             | Simple.RunWorkload _ ->
                 true
-            | _ -> false)
+            | Simple.CreateNetwork _
+            | Simple.EnsureTraefik _
+            | Simple.StopAndRemoveContainer _ ->
+                false)
           actions
       in
       check bool "no workload actions when traefik_domain_name is None" false
@@ -177,8 +193,42 @@ let extract_workload_labels actions =
   List.find_map
     (function
       | Simple.RunWorkload { config; _ } -> config.labels
-      | _ -> None)
+      | Simple.CreateNetwork _
+      | Simple.EnsureTraefik _
+      | Simple.StopAndRemoveContainer _
+      | Simple.PullImage _ ->
+          None)
     actions
+
+let extract_workload_host_config actions =
+  List.find_map
+    (function
+      | Simple.RunWorkload { host_config; _ } -> Some host_config
+      | Simple.CreateNetwork _
+      | Simple.EnsureTraefik _
+      | Simple.StopAndRemoveContainer _
+      | Simple.PullImage _ ->
+          None)
+    actions
+
+let check_planned_restart_policy msg (host_config : Docker.host_config) =
+  match host_config.restart_policy with
+  | None -> Alcotest.fail (msg ^ ": no restart policy planned")
+  | Some policy ->
+      check string (msg ^ ": policy name") "unless-stopped" policy.name;
+      check (option int)
+        (msg ^ ": no maximum retry count")
+        None policy.maximum_retry_count
+
+let test_run_workload_carries_restart_policy () =
+  let context = { Simple.current_traefik = None; current_workload = None } in
+  match Simple.plan minimal_input context with
+  | Error e -> Alcotest.fail ("plan failed: " ^ e)
+  | Ok actions -> (
+      match extract_workload_host_config actions with
+      | None -> Alcotest.fail "expected a RunWorkload action"
+      | Some host_config ->
+          check_planned_restart_policy "planned workload" host_config)
 
 let test_deploy_adds_bondi_managed_label () =
   let context = { Simple.current_traefik = None; current_workload = None } in
@@ -241,6 +291,11 @@ let () =
         [
           test_case "skips workload when traefik_domain_name is None" `Quick
             test_plan_cron_only_skips_workload;
+        ] );
+      ( "restart policy",
+        [
+          test_case "run workload carries the policy" `Quick
+            test_run_workload_carries_restart_policy;
         ] );
       ( "container labels",
         [

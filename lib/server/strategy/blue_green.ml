@@ -27,6 +27,7 @@ type action =
   | RunNewContainer of {
       container_name : string;
       config : Docker.Client.container_config;
+      host_config : Docker.Client.host_config;
       networking_conf : Docker.Client.networking_config;
     }
   | WaitForHealthy of {
@@ -52,6 +53,14 @@ let ( let* ) = Result.bind
 
 let plan (config : blue_green_config) (context : blue_green_context) :
     deploy_plan =
+  let host_config : Docker.Client.host_config =
+    {
+      binds = None;
+      port_bindings = None;
+      network_mode = None;
+      restart_policy = Some Docker.Restart_policy.bondi_managed;
+    }
+  in
   let cleanup =
     match context.orphaned_new_container with
     | Some container ->
@@ -66,6 +75,7 @@ let plan (config : blue_green_config) (context : blue_green_context) :
             {
               container_name = config.temp_container_name;
               config = config.config;
+              host_config;
               networking_conf = config.networking_conf;
             };
           WaitForHealthy
@@ -90,6 +100,7 @@ let plan (config : blue_green_config) (context : blue_green_context) :
             {
               container_name = config.container_name;
               config = config.config;
+              host_config;
               networking_conf = config.networking_conf;
             };
           WaitForHealthy
@@ -144,7 +155,8 @@ let wait_for_healthy ~clock ~client ~net ~container_name ~poll_interval ~timeout
            container_name)
     else
       let* inspect =
-        Docker.Client.inspect_container client ~net ~container_id:container_name
+        Docker.Client.inspect_container client ~net ~clock
+          ~container_id:container_name
       in
       match inspect.state.health with
       | Some { status = "healthy"; _ } -> Ok ()
@@ -174,12 +186,13 @@ let interpret ~clock ~client ~net (plan : deploy_plan) : (unit, string) result =
         let* () = Docker.Client.stop_container client ~net ~container_id in
         let* () = Docker.Client.remove_container client ~net ~container_id in
         run rest
-    | RunNewContainer { container_name; config; networking_conf } :: rest ->
+    | RunNewContainer { container_name; config; host_config; networking_conf }
+      :: rest ->
         let opts : Docker.Client.run_image_options =
           {
             container_name;
             config;
-            host_config = None;
+            host_config = Some host_config;
             networking_conf = Some networking_conf;
           }
         in

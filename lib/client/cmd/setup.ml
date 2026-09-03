@@ -281,11 +281,12 @@ let orchestrator_run_command (config : Config_file.t) : (string, string) result
        readiness check. *)
     Ok
       (Printf.sprintf
-         "docker run -d --name bondi-orchestrator -p %s:3030:3030 -v \
-          /var/run/docker.sock:/var/run/docker.sock%s%s%s --group-add $(stat \
-          -c %%g /var/run/docker.sock) --label bondi.managed=true --label \
-          bondi.type=infrastructure --label bondi.logs=true %s"
-         bind volume_mounts user_flag token_env image)
+         "docker run -d --name bondi-orchestrator --restart %s -p %s:3030:3030 \
+          -v /var/run/docker.sock:/var/run/docker.sock%s%s%s --group-add \
+          $(stat -c %%g /var/run/docker.sock) --label bondi.managed=true \
+          --label bondi.type=infrastructure --label bondi.logs=true %s"
+         Bondi_common.Defaults.bondi_restart_policy bind volume_mounts user_flag
+         token_env image)
 
 (* What the host reports its published binding as, so setup can check that what
    it asked for is what it got rather than assuming the run command took. *)
@@ -299,6 +300,62 @@ let published_binding_matches ~expected output =
      rather than as agreement with whatever was asked for. *)
   let got = if got = "" then "0.0.0.0" else got in
   if got = expected then Ok () else Error got
+
+(* What the host reports the orchestrator's applied restart policy as. Docker's
+   default is `no`, so a container created before this flag existed, one whose
+   flag the daemon dropped, and one a human cleared by hand all read the same
+   from here -- and on 2026-09-02 all three containers Bondi starts on its own
+   initiative were found at `no` on a live box with a pending kernel reboot.
+   Creation is therefore not the only moment the policy can be checked. *)
+let orchestrator_restart_command =
+  "docker inspect bondi-orchestrator -f '{{.HostConfig.RestartPolicy.Name}}'"
+
+(* docker update writes HostConfig.RestartPolicy.Name on the running container:
+   same pid, same StartedAt, no signal -- measured 2026-09-02 against Docker
+   29.x. That is what makes correcting the policy cheap enough to do on every
+   run rather than only when the container happens to need recreating for some
+   other reason; recreating it would drop TLS for every site on the box to
+   change a flag. *)
+let orchestrator_restart_update_command ~policy =
+  Printf.sprintf "docker update --restart=%s bondi-orchestrator" policy
+
+let declared_restart_matches ~expected output =
+  let got = String.trim output in
+  (* A container carrying no policy prints `no`, not an empty name -- observed
+     2026-09-02. So empty output never means "no policy": it means nothing was
+     read at all, which a removed container, an unreadable answer and an ssh
+     stub with no arm for this command all produce. Naming it as an absence
+     keeps the failure message from reporting a policy the host never stated,
+     and keeps silence from reading as agreement. *)
+  let got = if got = "" then "(none reported)" else got in
+  if got = expected then Ok () else Error got
+
+(* Whether to correct the policy is a decision, so it lives here rather than in
+   the ssh arm that acts on it, and it is expressed in terms of the same matcher
+   that asserts the re-read -- one rule, applied before and after the write.
+   Both constructors carry everything the caller needs, so the caller matches
+   rather than deciding again. *)
+type restart_convergence =
+  | Restart_policy_already_applied
+  | Restart_policy_needs_update of { observed : string; command : string }
+  | Restart_policy_unreadable
+
+let orchestrator_restart_convergence ~expected observed =
+  (* Read from the raw output rather than from the matcher's rendering of it:
+     the distinction between "nothing was read" and "the host reported a policy
+     that differs" is what decides whether a container exists to correct, and it
+     must not depend on a display string. A removed container, an unreadable
+     answer and an ssh stub with no arm all print empty. *)
+  if String.trim observed = "" then Restart_policy_unreadable
+  else
+    match declared_restart_matches ~expected observed with
+    | Ok () -> Restart_policy_already_applied
+    | Error got ->
+        Restart_policy_needs_update
+          {
+            observed = got;
+            command = orchestrator_restart_update_command ~policy:expected;
+          }
 
 let orchestrator_version_of_image image =
   let prefix = "mlopez1506/bondi-server:" in
@@ -971,12 +1028,13 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
             in
             let run_cmd =
               Printf.sprintf
-                "docker run -d --name bondi-alloy --restart unless-stopped -v \
+                "docker run -d --name bondi-alloy --restart %s -v \
                  /var/run/docker.sock:/var/run/docker.sock:ro -v \
                  /etc/bondi/alloy/config.alloy:/etc/bondi/alloy/config.alloy:ro \
                  --label bondi.managed=true --label bondi.type=infrastructure \
                  --label bondi.logs=false -e GRAFANA_CLOUD_INSTANCE_ID=%s -e \
                  GRAFANA_CLOUD_API_KEY=%s %s run /etc/bondi/alloy/config.alloy"
+                Bondi_common.Defaults.bondi_restart_policy
                 (Filename.quote alloy.grafana_cloud.instance_id)
                 (Filename.quote alloy.grafana_cloud.api_key)
                 image
@@ -1088,6 +1146,64 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
   in
   run actions
 
+(* Docker's default restart policy is `no`, so creation is not the only moment a
+   container's policy can be wrong: a docker-ce upgrade, a daemon crash or a
+   `docker update` run by hand all leave a healthy container that will not
+   survive the next reboot, and none of them is visible from the run command
+   this tool issued. A box converged by `bondi setup` was found at `no` on
+   2026-09-02 for exactly that reason. So the applied policy is read from the
+   host on every run rather than only where something else happened to force a
+   recreation, corrected where it differs, and read again -- `docker update`
+   accepting the command is not the same fact as the daemon having applied it,
+   which is the assumption the run command's own flag already makes.
+
+   The correction is in place: the policy is a mutable field on a running
+   container, so the pid and StartedAt are untouched -- measured 2026-09-02
+   against Docker 29.x, not reasoned from the documentation. Recreating the
+   orchestrator to change a flag would drop TLS for every site on the box. *)
+let converge_orchestrator_restart_policy ~user ~host ~key_path ~ip_address =
+  let expected = Bondi_common.Defaults.bondi_restart_policy in
+  let* reported =
+    remote_run ~user ~host ~key_path orchestrator_restart_command
+  in
+  match orchestrator_restart_convergence ~expected reported with
+  | Restart_policy_already_applied -> Ok ()
+  (* Nothing was read, so there is nothing to correct: a `docker update` here
+     would be issued against a container the host never reported, and the run
+     would fail on whatever raw text Docker returned instead of on what setup
+     was attempting. *)
+  | Restart_policy_unreadable ->
+      Error
+        (Printf.sprintf
+           "bondi-orchestrator restart policy on server %s could not be read \
+            -- `%s` reported nothing, which is what a removed or unreadable \
+            container looks like, so its restart policy was left alone rather \
+            than corrected blind"
+           ip_address orchestrator_restart_command)
+  | Restart_policy_needs_update { observed; command } ->
+      let* _ = remote_run ~user ~host ~key_path command in
+      let* applied =
+        remote_run ~user ~host ~key_path orchestrator_restart_command
+      in
+      let* () =
+        declared_restart_matches ~expected applied
+        |> Result.map_error (fun got ->
+            Printf.sprintf
+              "bondi-orchestrator restart policy on server %s is still %s \
+               after asking for %s -- refusing to report success on a posture \
+               that was not applied"
+              ip_address got expected)
+      in
+      (* Operator-visible on purpose: a box that needed correcting is a box
+         whose containers would not have come back, and naming both policies is
+         what makes the line a reading rather than a reassurance. *)
+      print_endline
+        (Printf.sprintf
+           "bondi-orchestrator restart policy on server %s was %s, corrected \
+            to %s without restarting it"
+           ip_address observed expected);
+      Ok ()
+
 (* ------------------------------------------------------------------------- *)
 (* Entry point                                                               *)
 (* ------------------------------------------------------------------------- *)
@@ -1146,7 +1262,21 @@ let setup_server config server =
                      "bondi-orchestrator on server %s: %s, stopping to \
                       restart..."
                      ip_address reason));
-          interpret ~user ~host ~key_path ~ip_address config actions)
+          let* () =
+            interpret ~user ~host ~key_path ~ip_address config actions
+          in
+          match context.docker_status with
+          (* A host that had no Docker holds no container this run did not just
+             create, and it was created by a command that carries the flag. The
+             convergence exists for containers that predate the run; here there
+             are none. *)
+          | Docker_not_installed _ -> Ok ()
+          (* [plan_for_config] has already refused a Docker version it could not
+             read, so this arm is never reached with one. *)
+          | Docker_undetermined _ -> Ok ()
+          | Docker_installed _ ->
+              converge_orchestrator_restart_policy ~user ~host ~key_path
+                ~ip_address)
 
 (* What one server's run produced: whether it converged, and what the host holds
    afterwards. They are separate because a run that stopped part-way is exactly

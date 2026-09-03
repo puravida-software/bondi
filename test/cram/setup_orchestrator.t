@@ -24,6 +24,12 @@ leaves a running one.
   >   *'name=^/bondi-orchestrator$'*'{{.State}}'*) cat "$ORCHESTRATOR_PS" ;;
   >   *BONDI_ORCHESTRATOR_SERVING*)
   >     if [ -n "$ORCHESTRATOR_DIES" ]; then echo BONDI_ORCHESTRATOR_UNREACHABLE; else echo BONDI_ORCHESTRATOR_SERVING; fi ;;
+  >   # Both of the arms below answer a `docker inspect`. The restart-policy
+  >   # query is matched first, on the substring only it carries, so it cannot
+  >   # be answered by the container-health arm however either command's flags
+  >   # come to be spelled -- today they differ only by `-f` versus `--format`,
+  >   # which is a thin thing for the dispatch to rest on.
+  >   *'RestartPolicy'*) cat "$RESTART_POLICY" ;;
   >   *'docker inspect --format'*'State.Status'*)
   >     echo 'status=exited exit=127 oom=false error='
   >     echo '--- last 50 log lines ---'
@@ -38,6 +44,9 @@ leaves a running one.
   >     printf '/bondi-orchestrator\tundeclared\t\t0\t2026-08-01T09:00:00.222222222Z\n' ;;
   >   *'/var/spool/cron/crontabs/root'*) echo BONDI_CRONTAB_ABSENT ;;
   >   *'PortBindings'*) echo "${PUBLISHED_ON-127.0.0.1}" ;;
+  >   'docker update'*)
+  >     if [ -n "$RESTART_UPDATE_STICKS" ]; then printf 'unless-stopped\n' > "$RESTART_POLICY"; fi
+  >     echo bondi-orchestrator ;;
   >   *) : ;;
   > esac
   > STUB
@@ -51,6 +60,13 @@ operating system's own and is normalised where it appears.
   $ export SSH_ARGV_LOG="$PWD/ssh-argv.log"
   $ export ORCHESTRATOR_PS="$PWD/orchestrator-ps.txt"
   $ : > "$ORCHESTRATOR_PS"
+
+The host's own account of the orchestrator's restart policy, which the stub
+answers from a file so that `docker update` can change it -- a policy that
+sticks and one that does not are the two halves of the assertion below.
+
+  $ export RESTART_POLICY="$PWD/restart-policy.txt"
+  $ printf 'unless-stopped\n' > "$RESTART_POLICY"
   $ cat > bondi.yaml <<'EOF'
   > service:
   >   name: my-service
@@ -222,3 +238,62 @@ passes on exactly the configuration it exists to catch.
   $ : > "$ORCHESTRATOR_PS"
   $ PUBLISHED_ON= bondi-client setup 2>&1 | grep -o 'orchestrator published on .* asks for [0-9.]*'
   orchestrator published on 0.0.0.0 but bondi.yaml asks for 127.0.0.1
+
+
+Docker's default restart policy is `no`, so a host reboot, a docker-ce upgrade
+or a daemon crash silently removes a container that was never given one. The run
+command's flag is not evidence that the flag took: on 2026-09-02 an audit found
+an orchestrator at `no` on a box `bondi setup` had converged. So the applied
+policy is read from the host on every run, not only when the container happens
+to need recreating for some other reason.
+
+An orchestrator already carrying the declared policy is left alone -- no `docker
+update` reaches the host at all. The inspect is counted too, so that the absent
+update is known to be a decision this run took rather than a phase it never
+reached.
+
+  $ printf 'running\tmlopez1506/bondi-server:0.10.1\n' > "$ORCHESTRATOR_PS"
+  $ printf 'unless-stopped\n' > "$RESTART_POLICY"
+  $ : > ssh-argv.log
+  $ bondi-client setup > out.log 2>&1
+  $ grep -c 'RestartPolicy' ssh-argv.log
+  1
+  $ grep -c 'docker update' ssh-argv.log
+  0
+  [1]
+  $ grep -c 'restart policy' out.log
+  0
+  [1]
+
+The affirmative half of that pair: the same stub and the same bondi.yaml,
+differing only in what the host reports, and now the update does reach it. The
+correction is applied in place -- the orchestrator is not stopped, removed or
+re-run, because recreating it would drop TLS for every site on the box to change
+a flag. The policy is read a second time afterwards, since `docker update`
+accepting the command is not the same fact as the daemon having applied it.
+
+  $ printf 'running\tmlopez1506/bondi-server:0.10.1\n' > "$ORCHESTRATOR_PS"
+  $ printf 'no\n' > "$RESTART_POLICY"
+  $ : > ssh-argv.log
+  $ RESTART_UPDATE_STICKS=1 bondi-client setup > out.log 2>&1
+  $ grep 'restart policy' out.log
+  bondi-orchestrator restart policy on server 127.0.0.1 was no, corrected to unless-stopped without restarting it
+  $ grep -c 'docker update --restart=unless-stopped bondi-orchestrator' ssh-argv.log
+  1
+  $ grep -c 'RestartPolicy' ssh-argv.log
+  2
+  $ grep -c 'docker stop\|docker rm\|docker run' ssh-argv.log
+  0
+  [1]
+
+A host that still reports the old policy after the update fails the run and
+names both what it reported and what was asked for. Accepting the update as
+proof of itself is the same assumption the run command's flag already made.
+
+  $ printf 'running\tmlopez1506/bondi-server:0.10.1\n' > "$ORCHESTRATOR_PS"
+  $ printf 'no\n' > "$RESTART_POLICY"
+  $ : > ssh-argv.log
+  $ bondi-client setup > out.log 2>&1
+  [1]
+  $ grep 'still' out.log
+  Error: bondi-orchestrator restart policy on server 127.0.0.1 is still no after asking for unless-stopped -- refusing to report success on a posture that was not applied

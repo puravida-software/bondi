@@ -57,6 +57,32 @@ let test_run_opts_absent_network () =
   check_networking_conf "absent payload network reaches the run options"
     ~expected:None ~actual:opts.networking_conf
 
+let show_restart_policy (host_config : Docker.host_config option) =
+  match host_config with
+  | None -> "no host config"
+  | Some config -> (
+      match config.restart_policy with
+      | None -> "host config without a restart policy"
+      | Some policy -> "restart policy " ^ policy.name)
+
+let test_cron_run_container_declares_no_restart_policy () =
+  let opts : Docker.run_image_options =
+    Run.run_opts ~container_name:"nightly-1" ~full_image:"myapp:v1"
+      (mk_payload ~network:"bondi-network" ())
+  in
+  (* Affirmative arm on the same value: if the cron labels are there, the
+     options really were built by [run_opts] for a cron container, so the
+     absence asserted below is a property of the planner and not of a fixture
+     that quietly stopped reaching it. *)
+  (match opts.config.labels with
+  | None -> Alcotest.fail "expected cron labels on the run options"
+  | Some labels ->
+      Alcotest.check Alcotest.bool "planned as a cron container" true
+        (List.mem ("bondi.type", "cron") labels));
+  Alcotest.check Alcotest.string
+    "a one-shot cron container carries no restart policy" "no host config"
+    (show_restart_policy opts.host_config)
+
 let test_networking_conf_none_when_network_absent () =
   check_networking_conf "absent network produces no networking config"
     ~expected:None
@@ -426,5 +452,7 @@ let () =
             test_run_opts_carries_network;
           Alcotest.test_case "absent network" `Quick
             test_run_opts_absent_network;
+          Alcotest.test_case "cron container declares no restart policy" `Quick
+            test_cron_run_container_declares_no_restart_policy;
         ] );
     ]

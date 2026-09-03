@@ -106,6 +106,10 @@ type deploy_action =
   | EnsureCronNetwork
   | PullCronImages of Simple.cron_job list
   | UpsertCrontab of Simple.cron_job list option
+  | UpdateRestartPolicy of {
+      container_id : string;
+      restart_policy : Docker.Client.restart_policy;
+    }
 
 type deploy_error = Invalid_request of string | Orchestrator_failure of string
 
@@ -192,11 +196,62 @@ let cron_plan (input : Simple.deploy_input) :
       let* network_actions = cron_network_action jobs in
       Ok (network_actions @ [ PullCronImages jobs; UpsertCrontab (Some jobs) ])
 
+(* The reverse proxy's restart policy is decided here rather than inside a
+   strategy. It is a property of the box, not of how the service is rolled
+   forward, and only one of the two strategies goes near the proxy at all, so a
+   strategy is the one place the decision cannot live without reaching half the
+   deploys.
+
+   Converged in place, never by recreating: rebuilding the proxy to change one
+   mutable field would drop TLS for every site on the box. *)
+type traefik_policy_context = {
+  traefik : Docker.Client.container option;
+  applied_policy : Docker.Client.restart_policy option;
+      (* The policy the daemon reports on the running proxy, not the one it was
+         asked for. [None] when there is no proxy, when the daemon reports no
+         policy, and when the read failed. *)
+}
+
+(* A proxy that is about to be replaced is left alone: the container planned to
+   replace it is created with the policy already on it. Only the simple strategy
+   replaces it -- blue-green rolls the service forward and refers to no Traefik
+   container at all (observed 2026-09-02: no occurrence of "traefik" in
+   lib/server/strategy/blue_green.ml) -- so under blue-green a proxy at the
+   wrong policy is corrected whatever image it is running. *)
+let traefik_will_be_replaced ~strategy (input : Simple.deploy_input)
+    (traefik : Docker.Client.container) =
+  match strategy with
+  | Blue_green -> false
+  | Simple -> Simple.should_redeploy_traefik input traefik
+
+(* The gate is the one the deploy path already applied: a bondi.yaml that
+   declares no reverse proxy converges none, even on a box that is running one.
+   That box is corrected by declaring the proxy again, and widening the gate
+   would have Bondi write to a container the configuration in hand does not
+   claim. *)
+let traefik_policy_plan ~strategy (input : Simple.deploy_input)
+    (context : traefik_policy_context) : deploy_action list =
+  match context.traefik with
+  | None -> []
+  | Some traefik ->
+      if not (Simple.should_run_traefik input) then []
+      else if traefik_will_be_replaced ~strategy input traefik then []
+      else if Docker.Restart_policy.applied_matches context.applied_policy then
+        []
+      else
+        [
+          UpdateRestartPolicy
+            {
+              container_id = traefik.id;
+              restart_policy = Docker.Restart_policy.bondi_managed;
+            };
+        ]
+
 (* ------------------------------------------------------------------------- *)
 (* Phase 2: Interpreter                                                      *)
 (* ------------------------------------------------------------------------- *)
 
-let interpret ~client ~net (actions : deploy_action list) :
+let interpret ~clock ~client ~net (actions : deploy_action list) :
     (unit, string) result =
   let rec pull_cron_images = function
     | [] -> Ok ()
@@ -234,6 +289,12 @@ let interpret ~client ~net (actions : deploy_action list) :
             | Ok () -> run rest
             | Error msg ->
                 Error ("Deploy succeeded but crontab update failed: " ^ msg)))
+    | UpdateRestartPolicy { container_id; restart_policy } :: rest ->
+        let* () =
+          Docker.Client.update_container client ~net ~clock ~container_id
+            ~restart_policy
+        in
+        run rest
   in
   run actions
 
@@ -307,6 +368,43 @@ let deploy_workload ~clock ~client ~net ~strategy input =
   | Blue_green -> Strategy.Blue_green.deploy ~clock ~client ~net ~input
   | Simple -> Simple.deploy ~clock ~client ~net input
 
+(* Phase 1 for the proxy. The container listing carries no [HostConfig], so the
+   applied policy comes from an inspect of the id the listing returned. An
+   inspect Bondi could not make reports no policy rather than failing the run:
+   the deploy must not be blocked by a read of a policy field, and reporting
+   nothing already counts as non-compliant, so the proxy is converged instead.
+   The failure is logged where it happens, so an inspect failing on every deploy
+   is discoverable rather than invisible. *)
+let gather_traefik_policy ~clock ~client ~net :
+    (traefik_policy_context, string) result =
+  let* traefik =
+    Docker.Client.get_container_by_image_name client ~net ~image_name:"traefik"
+  in
+  match traefik with
+  | None -> Ok { traefik = None; applied_policy = None }
+  | Some container ->
+      let inspection =
+        Docker.Client.inspect_container client ~net ~clock
+          ~container_id:container.id
+      in
+      (match inspection with
+      | Ok _ -> ()
+      | Error msg ->
+          Dream.log
+            "could not read the restart policy of container %s: %s -- treating \
+             it as non-compliant"
+            container.id msg);
+      Ok
+        {
+          traefik = Some container;
+          applied_policy = Docker.Restart_policy.of_inspect inspection;
+        }
+
+let converge_traefik_restart_policy ~clock ~client ~net ~strategy input :
+    (unit, string) result =
+  let* context = gather_traefik_policy ~clock ~client ~net in
+  interpret ~clock ~client ~net (traefik_policy_plan ~strategy input context)
+
 (* Everything below the plan is Bondi acting on the caller's behalf, so a
    failure there is Bondi's fault by construction. [cron_plan] is the one step
    that can fail on what the caller wrote, and it classifies its own error. *)
@@ -323,7 +421,7 @@ let run_deploy ~clock ~net input =
   match input.Simple.service_name with
   | None ->
       (* Cron-only deploy: skip main image pull and workload deployment *)
-      let* () = orchestrator_step (interpret ~client ~net actions) in
+      let* () = orchestrator_step (interpret ~clock ~client ~net actions) in
       Ok
         (build_response ~strategy:Simple ~strategy_reason:"cron-only deploy"
            input)
@@ -331,10 +429,17 @@ let run_deploy ~clock ~net input =
       let* strategy, strategy_reason =
         orchestrator_step (select_strategy_and_prepare ~client ~net input)
       in
+      (* Before the workload moves, and outside the strategy dispatch: both
+         strategies leave the proxy running, so neither is a place this can be
+         done once. *)
+      let* () =
+        orchestrator_step
+          (converge_traefik_restart_policy ~clock ~client ~net ~strategy input)
+      in
       let* () =
         orchestrator_step (deploy_workload ~clock ~client ~net ~strategy input)
       in
-      let* () = orchestrator_step (interpret ~client ~net actions) in
+      let* () = orchestrator_step (interpret ~clock ~client ~net actions) in
       Ok (build_response ~strategy ~strategy_reason input)
 
 let route ~clock ~net =

@@ -71,3 +71,12 @@ was read as a transport failure.
 
   $ grep -c 'docker --version' ssh-argv.log
   2
+
+A host with no Docker holds no container that predates this run, so the
+restart-policy convergence is skipped entirely rather than asked about. The two
+counts above are taken from the same log and are non-zero, so this zero is the
+inspect being absent rather than the log being empty.
+
+  $ grep -c 'RestartPolicy' ssh-argv.log
+  0
+  [1]

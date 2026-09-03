@@ -1,4 +1,5 @@
 module Deploy = Bondi_server__Deploy
+module Docker = Bondi_server__Docker__Client
 module Simple = Bondi_server__Strategy__Simple
 module Crontab = Bondi_server__Crontab
 module Run = Bondi_server__Run
@@ -36,6 +37,9 @@ let action_string = function
       match jobs with
       | None -> "UpsertCrontab(None)"
       | Some jobs -> "UpsertCrontab(" ^ string_of_int (List.length jobs) ^ ")")
+  | Deploy.UpdateRestartPolicy { container_id; restart_policy } ->
+      "UpdateRestartPolicy(" ^ container_id ^ "," ^ restart_policy.Docker.name
+      ^ ")"
 
 let planned_actions ~context input =
   match Deploy.cron_plan input with
@@ -536,6 +540,106 @@ let test_deploy_input_logs_flag () =
     (Alcotest.option Alcotest.bool)
     "logs defaults to None" None decoded2.logs
 
+(* ------------------------------------------------------------------------- *)
+(* Traefik restart policy                                                    *)
+(* ------------------------------------------------------------------------- *)
+
+(* The running proxy as the container listing reports it, with the policy the
+   daemon says it applied. Every arm below is this fixture; only the image tag,
+   the applied policy and the strategy differ, so an absence assertion cannot
+   pass by failing to reach the proxy path at all. *)
+let traefik_policy_context ~traefik_image ~policy :
+    Deploy.traefik_policy_context =
+  {
+    traefik =
+      Some
+        (Server_test_helpers.mk_container ~id:"traefik-1" ~image:traefik_image
+           ~names:[ "/bondi-traefik" ] ());
+    applied_policy = policy;
+  }
+
+(* The Engine always reports MaximumRetryCount, including for a policy that
+   cannot carry one [observed — 2026-09-02], so a fixture omitting it would not
+   be what plan reads. *)
+let applied_policy name : Docker.restart_policy =
+  { name; maximum_retry_count = Some 0 }
+
+let policy_actions ~strategy ?(input = minimal_input) context =
+  List.map action_string (Deploy.traefik_policy_plan ~strategy input context)
+
+let converged = [ "UpdateRestartPolicy(traefik-1,unless-stopped)" ]
+
+let test_traefik_at_the_wrong_policy_plans_an_update () =
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "converges the running proxy in place" converged
+    (policy_actions ~strategy:Deploy.Simple
+       (traefik_policy_context ~traefik_image:"traefik:v3.3.0"
+          ~policy:(Some (applied_policy "no"))))
+
+(* The daemon reporting no policy at all is a rejection, not agreement: an
+   answer that says nothing -- including an inspect that could not be read at
+   all -- is not evidence that the container is compliant. *)
+let test_traefik_with_no_reported_policy_plans_an_update () =
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "an unreported policy is not a pass" converged
+    (policy_actions ~strategy:Deploy.Simple
+       (traefik_policy_context ~traefik_image:"traefik:v3.3.0" ~policy:None))
+
+let test_traefik_at_the_declared_policy_plans_no_update () =
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "leaves a compliant proxy alone" []
+    (policy_actions ~strategy:Deploy.Simple
+       (traefik_policy_context ~traefik_image:"traefik:v3.3.0"
+          ~policy:(Some (applied_policy "unless-stopped"))))
+
+(* The simple strategy replaces a proxy whose tag no longer matches, and the
+   replacement is created with the policy already on it. The affirmative arm on
+   this exact fixture is the blue-green case below, which plans the update: the
+   emptiness here is caused by the replacement, not by the fixture failing to
+   reach the proxy path. *)
+let test_traefik_the_simple_strategy_will_replace_plans_no_update () =
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "a replaced proxy is not also updated" []
+    (policy_actions ~strategy:Deploy.Simple
+       (traefik_policy_context ~traefik_image:"traefik:v2.0"
+          ~policy:(Some (applied_policy "no"))))
+
+(* Blue-green never touches the proxy, so nothing is going to replace it and its
+   image tag decides nothing here. This is the arm that a strategy-local
+   convergence cannot have: on a box whose image declares a HEALTHCHECK the
+   proxy would stay at its wrong policy for as long as the box lives. *)
+let test_traefik_under_blue_green_is_converged_whatever_its_image () =
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "blue-green converges the proxy it does not redeploy" converged
+    (policy_actions ~strategy:Deploy.Blue_green
+       (traefik_policy_context ~traefik_image:"traefik:v2.0"
+          ~policy:(Some (applied_policy "no"))))
+
+let test_no_traefik_running_plans_no_update () =
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "nothing to converge" []
+    (policy_actions ~strategy:Deploy.Simple
+       { Deploy.traefik = None; applied_policy = None })
+
+(* The residue of the existing gate, pinned rather than assumed: a bondi.yaml
+   that declares no reverse proxy converges none, even on a box that is running
+   one. A box in that state is corrected by declaring the proxy again. *)
+let test_traefik_not_declared_plans_no_update () =
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "an undeclared proxy is left alone" []
+    (policy_actions ~strategy:Deploy.Simple
+       ~input:
+         { minimal_input with traefik_image = None; traefik_acme_email = None }
+       (traefik_policy_context ~traefik_image:"traefik:v3.3.0"
+          ~policy:(Some (applied_policy "no"))))
+
 let () =
   Alcotest.run "Deploy"
     [
@@ -605,5 +709,22 @@ let () =
             test_deployment_strategy_of_string_unknown;
           Alcotest.test_case "string_of_deployment_strategy roundtrip" `Quick
             test_string_of_deployment_strategy;
+        ] );
+      ( "traefik restart policy",
+        [
+          Alcotest.test_case "the wrong policy plans an update" `Quick
+            test_traefik_at_the_wrong_policy_plans_an_update;
+          Alcotest.test_case "no reported policy plans an update" `Quick
+            test_traefik_with_no_reported_policy_plans_an_update;
+          Alcotest.test_case "the declared policy plans no update" `Quick
+            test_traefik_at_the_declared_policy_plans_no_update;
+          Alcotest.test_case "a proxy simple will replace plans no update"
+            `Quick test_traefik_the_simple_strategy_will_replace_plans_no_update;
+          Alcotest.test_case "blue-green converges the proxy it never replaces"
+            `Quick test_traefik_under_blue_green_is_converged_whatever_its_image;
+          Alcotest.test_case "no proxy running plans no update" `Quick
+            test_no_traefik_running_plans_no_update;
+          Alcotest.test_case "an undeclared proxy plans no update" `Quick
+            test_traefik_not_declared_plans_no_update;
         ] );
     ]

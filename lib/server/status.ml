@@ -190,7 +190,7 @@ let plan ~(service_name : string option) (ctx : status_context) :
 
 (** Inspect a container by name, returning the container + inspect pair if
     found. *)
-let inspect_by_name client ~net ~container_name =
+let inspect_by_name client ~net ~clock ~container_name =
   match Docker.Client.get_container_by_name client ~net ~container_name with
   | Error msg ->
       Dream.log "failed to look up container %s: %s" container_name msg;
@@ -198,7 +198,8 @@ let inspect_by_name client ~net ~container_name =
   | Ok None -> None
   | Ok (Some container) -> (
       match
-        Docker.Client.inspect_container client ~net ~container_id:container.id
+        Docker.Client.inspect_container client ~net ~clock
+          ~container_id:container.id
       with
       | Ok inspect -> Some (container, inspect)
       | Error msg ->
@@ -206,20 +207,21 @@ let inspect_by_name client ~net ~container_name =
           None)
 
 (** Impure: inspect Docker containers and read crontab. *)
-let gather ~client ~net ~(service_name : string option) : status_context =
+let gather ~client ~net ~clock ~(service_name : string option) : status_context
+    =
   let service_inspection =
     match service_name with
     | None -> None
-    | Some name -> inspect_by_name client ~net ~container_name:name
+    | Some name -> inspect_by_name client ~net ~clock ~container_name:name
   in
   let orchestrator_inspection =
-    inspect_by_name client ~net ~container_name:"bondi-orchestrator"
+    inspect_by_name client ~net ~clock ~container_name:"bondi-orchestrator"
   in
   let traefik_inspection =
-    inspect_by_name client ~net ~container_name:"bondi-traefik"
+    inspect_by_name client ~net ~clock ~container_name:"bondi-traefik"
   in
   let alloy_inspection =
-    inspect_by_name client ~net ~container_name:"bondi-alloy"
+    inspect_by_name client ~net ~clock ~container_name:"bondi-alloy"
   in
   (* A failed listing is reported rather than rendered as an empty set: the
      client shows anything it does not hear about as "not found", which reads
@@ -232,7 +234,7 @@ let gather ~client ~net ~(service_name : string option) : status_context =
         ( List.filter_map
             (fun (container : Docker.Client.container) ->
               match
-                Docker.Client.inspect_container client ~net
+                Docker.Client.inspect_container client ~net ~clock
                   ~container_id:container.id
               with
               | Ok inspect -> Some (container, inspect)
@@ -261,7 +263,7 @@ let gather ~client ~net ~(service_name : string option) : status_context =
         | Ok None -> None
         | Ok (Some container) -> (
             match
-              Docker.Client.inspect_container client ~net
+              Docker.Client.inspect_container client ~net ~clock
                 ~container_id:container.id
             with
             | Ok inspect -> Some (job.name, inspect)
@@ -282,13 +284,13 @@ let gather ~client ~net ~(service_name : string option) : status_context =
     managed_error;
   }
 
-let route ~client ~net =
+let route ~client ~net ~clock =
   Dream.get "/status" @@ fun req ->
   let open Lwt.Infix in
   let service_name = Dream.query req "service" in
   Lwt.catch
     (fun () ->
-      (Lwt_eio.run_eio @@ fun () -> gather ~client ~net ~service_name)
+      (Lwt_eio.run_eio @@ fun () -> gather ~client ~net ~clock ~service_name)
       >>= fun ctx ->
       let status = plan ~service_name ctx in
       List.iter (fun e -> Dream.log "status warning: %s" e) status.errors;

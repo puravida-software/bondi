@@ -96,13 +96,26 @@ let test_plan_uses_configured_drain_period () =
     List.find_opt
       (function
         | Blue_green.DrainGracePeriod _ -> true
-        | _ -> false)
+        | Blue_green.CleanupOrphanedContainer _
+        | Blue_green.RunNewContainer _
+        | Blue_green.WaitForHealthy _
+        | Blue_green.DisconnectFromNetwork _
+        | Blue_green.StopAndRemoveContainer _
+        | Blue_green.RenameContainer _ ->
+            false)
       plan.success_path
   in
   match drain_action with
   | Some (Blue_green.DrainGracePeriod { seconds }) ->
       check (float 0.01) "drain period" 5.0 seconds
-  | _ -> Alcotest.fail "expected DrainGracePeriod action"
+  | Some (Blue_green.CleanupOrphanedContainer _)
+  | Some (Blue_green.RunNewContainer _)
+  | Some (Blue_green.WaitForHealthy _)
+  | Some (Blue_green.DisconnectFromNetwork _)
+  | Some (Blue_green.StopAndRemoveContainer _)
+  | Some (Blue_green.RenameContainer _)
+  | None ->
+      Alcotest.fail "expected DrainGracePeriod action"
 
 let test_plan_default_drain_period () =
   let config =
@@ -116,13 +129,26 @@ let test_plan_default_drain_period () =
     List.find_opt
       (function
         | Blue_green.DrainGracePeriod _ -> true
-        | _ -> false)
+        | Blue_green.CleanupOrphanedContainer _
+        | Blue_green.RunNewContainer _
+        | Blue_green.WaitForHealthy _
+        | Blue_green.DisconnectFromNetwork _
+        | Blue_green.StopAndRemoveContainer _
+        | Blue_green.RenameContainer _ ->
+            false)
       plan.success_path
   in
   match drain_action with
   | Some (Blue_green.DrainGracePeriod { seconds }) ->
       check (float 0.01) "default drain period" 2.0 seconds
-  | _ -> Alcotest.fail "expected DrainGracePeriod action"
+  | Some (Blue_green.CleanupOrphanedContainer _)
+  | Some (Blue_green.RunNewContainer _)
+  | Some (Blue_green.WaitForHealthy _)
+  | Some (Blue_green.DisconnectFromNetwork _)
+  | Some (Blue_green.StopAndRemoveContainer _)
+  | Some (Blue_green.RenameContainer _)
+  | None ->
+      Alcotest.fail "expected DrainGracePeriod action"
 
 let test_plan_temp_container_name () =
   let plan = Blue_green.plan base_config context_with_workload in
@@ -130,13 +156,26 @@ let test_plan_temp_container_name () =
     List.find_opt
       (function
         | Blue_green.RunNewContainer _ -> true
-        | _ -> false)
+        | Blue_green.CleanupOrphanedContainer _
+        | Blue_green.WaitForHealthy _
+        | Blue_green.DisconnectFromNetwork _
+        | Blue_green.DrainGracePeriod _
+        | Blue_green.StopAndRemoveContainer _
+        | Blue_green.RenameContainer _ ->
+            false)
       plan.success_path
   in
   match run_action with
   | Some (Blue_green.RunNewContainer { container_name; _ }) ->
       check string "temp container name" "my-service-new" container_name
-  | _ -> Alcotest.fail "expected RunNewContainer action"
+  | Some (Blue_green.CleanupOrphanedContainer _)
+  | Some (Blue_green.WaitForHealthy _)
+  | Some (Blue_green.DisconnectFromNetwork _)
+  | Some (Blue_green.DrainGracePeriod _)
+  | Some (Blue_green.StopAndRemoveContainer _)
+  | Some (Blue_green.RenameContainer _)
+  | None ->
+      Alcotest.fail "expected RunNewContainer action"
 
 let test_plan_traefik_labels_on_new_container () =
   let plan = Blue_green.plan base_config context_with_workload in
@@ -144,7 +183,13 @@ let test_plan_traefik_labels_on_new_container () =
     List.find_opt
       (function
         | Blue_green.RunNewContainer _ -> true
-        | _ -> false)
+        | Blue_green.CleanupOrphanedContainer _
+        | Blue_green.WaitForHealthy _
+        | Blue_green.DisconnectFromNetwork _
+        | Blue_green.DrainGracePeriod _
+        | Blue_green.StopAndRemoveContainer _
+        | Blue_green.RenameContainer _ ->
+            false)
       plan.success_path
   in
   match run_action with
@@ -158,7 +203,50 @@ let test_plan_traefik_labels_on_new_container () =
         | None -> false
       in
       check bool "has traefik labels" true has_traefik_enable
-  | _ -> Alcotest.fail "expected RunNewContainer action"
+  | Some (Blue_green.CleanupOrphanedContainer _)
+  | Some (Blue_green.WaitForHealthy _)
+  | Some (Blue_green.DisconnectFromNetwork _)
+  | Some (Blue_green.DrainGracePeriod _)
+  | Some (Blue_green.StopAndRemoveContainer _)
+  | Some (Blue_green.RenameContainer _)
+  | None ->
+      Alcotest.fail "expected RunNewContainer action"
+
+let extract_new_container_host_config (actions : Blue_green.action list) =
+  List.find_map
+    (function
+      | Blue_green.RunNewContainer { host_config; _ } -> Some host_config
+      | Blue_green.CleanupOrphanedContainer _
+      | Blue_green.WaitForHealthy _
+      | Blue_green.DisconnectFromNetwork _
+      | Blue_green.DrainGracePeriod _
+      | Blue_green.StopAndRemoveContainer _
+      | Blue_green.RenameContainer _ ->
+          None)
+    actions
+
+let check_planned_restart_policy msg (host_config : Docker.host_config) =
+  match host_config.restart_policy with
+  | None -> Alcotest.fail (msg ^ ": no restart policy planned")
+  | Some policy ->
+      check string (msg ^ ": policy name") "unless-stopped" policy.name;
+      check (option int)
+        (msg ^ ": no maximum retry count")
+        None policy.maximum_retry_count
+
+let check_restart_policy_for msg context =
+  let plan = Blue_green.plan base_config context in
+  match extract_new_container_host_config plan.success_path with
+  | None -> Alcotest.fail (msg ^ ": expected a RunNewContainer action")
+  | Some host_config -> check_planned_restart_policy msg host_config
+
+(* [Blue_green.plan] builds [RunNewContainer] at two separate sites - the
+   temp-container arm taken when a workload is already running, and the
+   direct-name arm taken when none is. Both are asserted, because a policy set
+   only at one site ships a workload without one on the other path. *)
+let test_run_new_container_carries_restart_policy () =
+  check_restart_policy_for "replacing a running workload" context_with_workload;
+  check_restart_policy_for "no existing workload" empty_context
 
 let test_plan_orphan_cleanup () =
   let orphan =
@@ -172,9 +260,12 @@ let test_plan_orphan_cleanup () =
     }
   in
   let plan = Blue_green.plan base_config context in
-  let first_action = List.hd plan.success_path in
-  check string "first action is cleanup" "CleanupOrphanedContainer(orphan-id)"
-    (action_string first_action)
+  match plan.success_path with
+  | [] -> Alcotest.fail "expected a non-empty success path"
+  | first_action :: _ ->
+      check string "first action is cleanup"
+        "CleanupOrphanedContainer(orphan-id)"
+        (action_string first_action)
 
 let mk_health_log output exit_code : Docker.health_log_entry =
   { output; exit_code }
@@ -257,6 +348,11 @@ let () =
         [
           test_case "labels on new container" `Quick
             test_plan_traefik_labels_on_new_container;
+        ] );
+      ( "restart policy",
+        [
+          test_case "new container carries the policy" `Quick
+            test_run_new_container_carries_restart_policy;
         ] );
       ( "orphan cleanup",
         [
