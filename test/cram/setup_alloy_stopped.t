@@ -26,6 +26,10 @@ the declared version, so the run reduces to the alloy phase.
   >   *'--name bondi-alloy'*) echo 'd671990dc2318f4b' ;;
   >   *'/var/spool/cron/crontabs/root'*) echo BONDI_CRONTAB_ABSENT ;;
   >   *'PortBindings'*) echo '127.0.0.1' ;;
+  >   # The host's applied restart policy. Without this arm the command falls
+  >   # through to *) and answers nothing, which setup reads as a refusal to
+  >   # report rather than as agreement.
+  >   *'RestartPolicy'*) echo unless-stopped ;;
   >   *) : ;;
   > esac
   > STUB
@@ -81,4 +85,13 @@ Its affirmative arm is the listing itself: without `-a` a stopped container is
 not reported, so the state the removal answers to would never be read.
 
   $ grep -c -F -- 'ps -a --filter name=^/bondi-alloy$' ssh-argv.log
+  1
+
+The run command that reaches the host declares a restart policy. Without it the
+sidecar is gone after a host reboot or a docker-ce upgrade and logs stop
+shipping silently, with nothing on the box saying so. The policy is spelled out
+rather than built from the shared constant on purpose: through the constant this
+would pass for whatever value the constant takes, including `always`.
+
+  $ grep -c -F -- 'docker run -d --name bondi-alloy --restart unless-stopped' ssh-argv.log
   1

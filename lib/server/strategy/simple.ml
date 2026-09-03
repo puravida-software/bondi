@@ -71,6 +71,7 @@ type action =
   | RunWorkload of {
       container_name : string;
       config : Docker.Client.container_config;
+      host_config : Docker.Client.host_config;
       networking_conf : Docker.Client.networking_config;
     }
 
@@ -282,6 +283,14 @@ let plan (input : deploy_input) (context : deploy_context) :
                     {
                       container_name = name;
                       config = service_cfg;
+                      host_config =
+                        {
+                          binds = None;
+                          port_bindings = None;
+                          network_mode = None;
+                          restart_policy =
+                            Some Docker.Restart_policy.bondi_managed;
+                        };
                       networking_conf = default_networking_config;
                     }
                   :: !actions;
@@ -305,7 +314,7 @@ let wait_for_traefik ~clock ~client ~net ~container_id : (unit, string) result =
         Result.map
           (fun (inspect : Docker.Client.inspect_response) ->
             inspect.state.status)
-          (Docker.Client.inspect_container client ~net ~container_id)
+          (Docker.Client.inspect_container client ~net ~clock ~container_id)
       in
       match state with
       | Ok "running" -> Ok ()
@@ -377,12 +386,13 @@ let interpret ~clock ~client ~net (actions : action list) :
           else Docker.Client.pull_image_no_auth client ~net ~image ~tag
         in
         run rest
-    | RunWorkload { container_name; config; networking_conf } :: rest ->
+    | RunWorkload { container_name; config; host_config; networking_conf }
+      :: rest ->
         let opts : Docker.Client.run_image_options =
           {
             container_name;
             config;
-            host_config = None;
+            host_config = Some host_config;
             networking_conf = Some networking_conf;
           }
         in

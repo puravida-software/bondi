@@ -16,6 +16,8 @@
   test_docker_client
   test_blue_green_plan
   test_alloy_config
+  test_traefik_config
+  test_restart_policy
   test_alert_delivery
   test_auth
   test_server_config
@@ -30,6 +32,8 @@
   test_docker_client
   test_blue_green_plan
   test_alloy_config
+  test_traefik_config
+  test_restart_policy
   test_alert_delivery
   test_auth
   test_server_config
@@ -40,6 +44,7 @@
   bondi.common
   bondi.server
   dream
+  eio
   eio.mock
   server_test_helpers
   yojson))

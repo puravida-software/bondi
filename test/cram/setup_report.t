@@ -40,6 +40,10 @@ inspection says has a healthcheck to answer for. This host's checks pass.
   >     echo "0 6 * * * curl -s -X POST -d '{\"job\":\"daily-close\",\"secret\":\"s3cr3t\"}' http://127.0.0.1:3030/api/v1/run"
   >     echo '# END BONDI CRON' ;;
   >   *'PortBindings'*) echo '127.0.0.1' ;;
+  >   # The host's applied restart policy. Without this arm the command falls
+  >   # through to *) and answers nothing, which setup reads as a refusal to
+  >   # report rather than as agreement.
+  >   *'RestartPolicy'*) echo unless-stopped ;;
   >   *) : ;;
   > esac
   > STUB

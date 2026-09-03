@@ -39,24 +39,17 @@ type inspect_state = {
 }
 [@@deriving yojson { strict = false }]
 
-type inspect_response = {
-  created_at : string; [@key "Created"]
-  restart_count : int; [@key "RestartCount"]
-  state : inspect_state; [@key "State"]
-}
-[@@deriving yojson { strict = false }]
-
 type restart_policy = {
   name : string; [@key "Name"]
   maximum_retry_count : int option; [@key "MaximumRetryCount"] [@default None]
 }
-[@@deriving yojson]
+[@@deriving yojson { strict = false }]
 
 type port_binding = {
   host_ip : string option; [@key "HostIp"] [@default None]
   host_port : string option; [@key "HostPort"] [@default None]
 }
-[@@deriving yojson]
+[@@deriving yojson { strict = false }]
 
 type port_bindings = (string * port_binding list) list
 
@@ -140,7 +133,15 @@ type host_config = {
   network_mode : string option; [@key "NetworkMode"] [@default None]
   restart_policy : restart_policy option; [@key "RestartPolicy"] [@default None]
 }
-[@@deriving yojson]
+[@@deriving yojson { strict = false }]
+
+type inspect_response = {
+  created_at : string; [@key "Created"]
+  restart_count : int; [@key "RestartCount"]
+  state : inspect_state; [@key "State"]
+  host_config : host_config option; [@key "HostConfig"] [@default None]
+}
+[@@deriving yojson { strict = false }]
 
 type networking_config = {
   endpoints_config : endpoints_config option;
@@ -301,6 +302,34 @@ let json_body : Yojson.Safe.t -> Cohttp.Header.t * Cohttp_eio.Body.t =
   let body_str = Yojson.Safe.to_string json in
   let headers = Cohttp.Header.init_with "Content-Type" "application/json" in
   (headers, Cohttp_eio.Body.of_string body_str)
+
+(* A fixed infrastructure bound on one Engine request, not user configuration.
+   The daemon answers a container inspect or update in milliseconds; a socket
+   that accepts the connection and then stalls has no deadline of its own, and
+   both of these run inside a request a client is holding open. It covers the
+   request and the body read together, because a daemon that answers and then
+   stops mid-body holds the reader open just as long as one that never answers.
+
+   Not every endpoint belongs under a bound: [/containers/{id}/wait] blocks by
+   design until the container exits, which is how a cron run's exit code is
+   collected, and [/images/create] streams a pull whose duration is the image's
+   size over the network. Those two are why the bound is per endpoint here and
+   not inside [call]. Being per endpoint also means the bound reaches only the
+   endpoints that opt in, which today are [inspect_container] and
+   [update_container]; every other Engine call this client makes — listing,
+   creating, starting, stopping, removing and renaming containers, image
+   inspect, and the network calls — is not bounded yet. *)
+let engine_request_timeout_seconds = 10.0
+
+let with_request_bound ~clock ~what f =
+  try Eio.Time.with_timeout_exn clock engine_request_timeout_seconds f with
+  (* Named on its own, with no catch-all beside it: every other exception —
+     cancellation included — propagates exactly as it did before the bound
+     existed. Only the deadline this function introduced is reported by it. *)
+  | Eio.Time.Timeout ->
+      Error
+        (Printf.sprintf "docker %s did not answer within %.0f seconds" what
+           engine_request_timeout_seconds)
 
 let normalize_container_name : string -> string =
  fun name ->
@@ -488,16 +517,46 @@ let stop_container :
 let inspect_container :
     t ->
     net:_ Eio.Net.t ->
+    clock:_ Eio.Time.clock ->
     container_id:string ->
     (inspect_response, string) result =
- fun t ~net ~container_id ->
+ fun t ~net ~clock ~container_id ->
   let* json =
-    call_json t ~net `GET ("/containers/" ^ container_id ^ "/json") []
+    with_request_bound ~clock ~what:("inspect of container " ^ container_id)
+      (fun () ->
+        call_json t ~net `GET ("/containers/" ^ container_id ^ "/json") [])
   in
   inspect_response_of_yojson json
   |> Result.map_error (fun msg ->
       Printf.sprintf "failed to parse inspect response for container %s: %s"
         container_id msg)
+
+type update_container_request = {
+  restart_policy : restart_policy; [@key "RestartPolicy"]
+}
+[@@deriving to_yojson]
+
+(** Writes the restart policy on an existing container. The daemon applies it to
+    the container record in place, so a running container keeps its process and
+    its start time; re-sending the policy it already has is a no-op. *)
+let update_container :
+    t ->
+    net:_ Eio.Net.t ->
+    clock:_ Eio.Time.clock ->
+    container_id:string ->
+    restart_policy:restart_policy ->
+    (unit, string) result =
+ fun t ~net ~clock ~container_id ~restart_policy ->
+  let payload = update_container_request_to_yojson { restart_policy } in
+  let headers, body = json_body payload in
+  let* _ =
+    with_request_bound ~clock ~what:("update of container " ^ container_id)
+      (fun () ->
+        call_json ~headers ~body t ~net `POST
+          ("/containers/" ^ container_id ^ "/update")
+          [])
+  in
+  Ok ()
 
 type wait_response = { status_code : int [@key "StatusCode"] }
 [@@deriving yojson]

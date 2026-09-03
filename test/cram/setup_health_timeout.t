@@ -39,6 +39,10 @@ runs below, so the exit code can only have followed from it.
   >     printf '/bondi-gateway\tundeclared\t\t0\t2026-08-01T09:30:00.444444444Z\n' ;;
   >   *'/var/spool/cron/crontabs/root'*) echo BONDI_CRONTAB_ABSENT ;;
   >   *'PortBindings'*) echo '127.0.0.1' ;;
+  >   # The host's applied restart policy. Without this arm the command falls
+  >   # through to *) and answers nothing, which setup reads as a refusal to
+  >   # report rather than as agreement.
+  >   *'RestartPolicy'*) echo unless-stopped ;;
   >   *) : ;;
   > esac
   > STUB

@@ -2,3 +2,4 @@ let traefik_image = "traefik:v3.6.8"
 let alloy_image = "grafana/alloy:v1.8.0"
 let server_port = 3030
 let network_name = "bondi-network"
+let bondi_restart_policy = "unless-stopped"

@@ -27,6 +27,13 @@ succeeds, so the failure is genuinely mid-plan.
   >     exit 125 ;;
   >   *'/var/spool/cron/crontabs/root'*) echo BONDI_CRONTAB_ABSENT ;;
   >   *'PortBindings'*) echo '127.0.0.1' ;;
+  >   # The host's applied restart policy. The conflict run below aborts in the
+  >   # alloy phase and never gets as far as asking for it; the arm is here for
+  >   # the alloy-withdrawn run at the end of the file, which completes its plan
+  >   # and does ask. Without it that command falls through to *) and answers
+  >   # nothing, which setup reads as a refusal to report rather than as
+  >   # agreement.
+  >   *'RestartPolicy'*) echo unless-stopped ;;
   >   *) : ;;
   > esac
   > STUB

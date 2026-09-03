@@ -76,7 +76,7 @@ let get_docker_config (config : config) : docker_config =
       binds = Some docker_binds;
       port_bindings = Some docker_port_bindings;
       network_mode = None;
-      restart_policy = None;
+      restart_policy = Some Restart_policy.bondi_managed;
     }
   in
   { container_config; host_config }

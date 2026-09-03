@@ -185,14 +185,46 @@ This will:
 2. Install Docker if it is not already installed
 3. Create the ACME directory for TLS certificates
 4. Pull and run the bondi-orchestrator container
-5. Wait for every container that declares a healthcheck to pass it
-6. Print the same table `bondi status` prints, describing the server as the run left it
+5. Read back the restart policy the server actually applied to the orchestrator, and correct it in place if it is not `unless-stopped`
+6. Wait for every container that declares a healthcheck to pass it
+7. Print the same table `bondi status` prints, describing the server as the run left it
 
 You only need to run `bondi setup` once per server, or again when you change the `bondi_server.version` or add features that require server-side changes (like Alloy).
 
 #### What setup reports when it finishes
 
 The table is reached on every exit path, including a run that aborted part-way through. A run that stopped early still prints what it managed on its way there, then the failure, then the state of the box — so "which phases did not run" and "what is actually on the server now" are both answered instead of the second being left to a manual check. See [Checking status](#checking-status) for how to read the table.
+
+#### Restart policy
+
+Docker's default restart policy is `no`: the container is neither started when the daemon starts nor restarted when its process dies. A host reboot, a `docker-ce` upgrade or a daemon crash therefore takes the container down and leaves it down until somebody notices.
+
+Bondi gives every container it starts on its own initiative the `unless-stopped` policy — the orchestrator, the Traefik reverse proxy, the Alloy sidecar and your deployed service under both strategies. `unless-stopped` brings the container back whenever the daemon starts, unless you stopped it yourself with `docker stop`: a container you deliberately stopped stays stopped across a reboot.
+
+Two kinds of container are exempt, both deliberately:
+
+- **Cron job containers get no restart policy at all.** A scheduled run is a one-shot job whose exit code is the result. A policy would restart a finished job forever.
+- **Managed containers use the policy you declared.** The `restart` field on a managed container is yours; Bondi neither overrides it nor supplies a fallback you did not ask for.
+
+There is no setting for the policy on the orchestrator, the reverse proxy or your service, and no environment variable for it. The only thing a knob there could do is set it wrong.
+
+`setup` does not treat the flag on a `docker run` as evidence that the flag took. On every run it reads back what the server applied to the orchestrator. If that differs, it corrects it in place with `docker update` — the orchestrator is not stopped, removed or re-run, so no site on the box loses TLS while a flag changes — and says so:
+
+```
+bondi-orchestrator restart policy on server 203.0.113.10 was no, corrected to unless-stopped without restarting it
+```
+
+It then reads the policy a second time, because a server accepting the correction is not the same fact as a server having applied it. If the second read still disagrees, **the run exits non-zero**:
+
+```
+Error: bondi-orchestrator restart policy on server 203.0.113.10 is still no after asking for unless-stopped -- refusing to report success on a posture that was not applied
+```
+
+This is what converges a server that predates the behaviour: run `bondi setup` again and a container created without a policy is corrected where it stands, with no downtime and nothing to do by hand. The read-back is skipped only when Docker is not yet installed on the server, since in that case `setup` has just installed it and created the orchestrator in the same run.
+
+The Traefik reverse proxy is handled on the server rather than over SSH: every `bondi deploy` of a service reads the policy Traefik is actually running with and corrects it in place if it differs, without redeploying it. The read happens before the service moves and outside the choice of deployment strategy, so a blue-green box converges its proxy exactly as a simple one does.
+
+Two kinds of deploy do not reach it. A cron-only deploy declares no service and leaves the proxy alone, as it always has. A `bondi.yaml` that no longer declares `traefik_image`, `traefik_domain_name` and `traefik_acme_email` converges no proxy either — Bondi corrects the reverse proxy it is asked to run, not one it is told nothing about. Declaring them again corrects the box on the next deploy.
 
 #### Waiting for health
 
