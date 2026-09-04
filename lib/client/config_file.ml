@@ -242,6 +242,40 @@ let validate_alloy_collect config =
           | Ok _ -> Ok config
           | Error msg -> Error msg))
 
+(* The credentials reach the host as a [KEY=VALUE] environment file, and
+   [docker run --env-file] reads one record per line with no quoting or
+   escaping syntax. A control character in a value is therefore not data: a
+   newline ends the record and whatever follows declares a variable nobody
+   wrote. The values are rejected here, where the configuration is read, rather
+   than escaped where the file is rendered -- there is no escape --env-file
+   would decode -- so every later reader of an [alloy] block holds values it
+   can write verbatim. The message names the variable and never the value,
+   which is a credential.
+
+   An [=] inside a value is left alone: --env-file takes everything after the
+   first [=] to the end of the line as the value, so an [=] beyond it reshapes
+   nothing. *)
+let validate_alloy_credentials config =
+  match config.alloy with
+  | None -> Ok config
+  | Some alloy -> (
+      let offending =
+        List.find_opt
+          (fun (_, value) -> Bondi_common.String_utils.has_control_char value)
+          [
+            ("GRAFANA_CLOUD_INSTANCE_ID", alloy.grafana_cloud.instance_id);
+            ("GRAFANA_CLOUD_API_KEY", alloy.grafana_cloud.api_key);
+          ]
+      in
+      match offending with
+      | None -> Ok config
+      | Some (variable, _) ->
+          Error
+            (Printf.sprintf
+               "invalid Grafana Cloud credential for %s: values may not \
+                contain control characters"
+               variable))
+
 let read () =
   match read_file config_file_name with
   | Error message -> Error message
@@ -265,5 +299,6 @@ let read () =
             |> Result.map_error (fun msg -> "invalid bondi.yaml: " ^ msg)
           in
           let* config = validate_alloy_collect config in
+          let* config = validate_alloy_credentials config in
           let* _ = managed_containers config in
           Ok config)

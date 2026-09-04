@@ -7,4 +7,4 @@
   test_managed_container
   test_alert
   test_test_helpers)
- (libraries alcotest bondi.common test_helpers))
+ (libraries alcotest bondi.common test_helpers unix))

@@ -139,3 +139,15 @@ let generate (config : config) : string =
       add "\t}\n");
   add "}\n";
   Buffer.contents buf
+
+(* The values are written literally. [docker run --env-file] reads a value as
+   everything after the first [=] to the end of the line and has no quoting or
+   escaping syntax at all, so there is nothing correct to escape to -- a value
+   carrying a control character would declare a variable nobody wrote. That is
+   why the guard is a rejection at the boundary instead: the client's config
+   reader refuses such a value when it reads the [alloy] block, so what reaches
+   here is already a value this format can carry. The pair of names is kept in
+   the order [generate] reads them. *)
+let env_file_contents (config : config) : string =
+  Printf.sprintf "GRAFANA_CLOUD_INSTANCE_ID=%s\nGRAFANA_CLOUD_API_KEY=%s\n"
+    config.grafana_cloud_instance_id config.grafana_cloud_api_key

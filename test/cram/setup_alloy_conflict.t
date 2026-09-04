@@ -22,6 +22,23 @@ succeeds, so the failure is genuinely mid-plan.
   >   *'name=^/bondi-orchestrator$'*'{{.State}}'*)
   >     printf 'running\tmlopez1506/bondi-server:0.10.1\n' ;;
   >   *'ps -a --filter name=^/bondi-alloy$'*'{{.State}}'*) : ;;
+  >   # The mode the host reports for the config file after it was written. This
+  >   # file is not about the mode, so the arm answers the declared value and the
+  >   # run carries on to the conflict it exists to cover. Without it the probe
+  >   # falls through to *) and answers nothing, which setup reads as a refusal
+  >   # to report -- and the run would then fail on the read-back, before it ever
+  >   # reached the conflict.
+  >   *'sudo stat -c %04a'*) echo 0640 ;;
+  >   # The credentials write. Its output is not consulted by the client, so this
+  >   # arm answers nothing on purpose rather than leaving the command to reach
+  >   # *) where a reader cannot tell a considered silence from an unhandled
+  >   # command.
+  >   #
+  >   # It matches the write and only the write. The run command below names the
+  >   # same file through --env-file, so an arm matching the path alone would
+  >   # swallow it -- case takes the first match -- and this file's conflict
+  >   # would never be raised at all.
+  >   *'cat > '*'/etc/bondi/alloy/env'*) : ;;
   >   *'--name bondi-alloy'*)
   >     echo 'docker: Error response from daemon: Conflict. The container name "/bondi-alloy" is already in use by container "d671990dc231".' >&2
   >     exit 125 ;;
@@ -89,6 +106,7 @@ rather than a phase name they have to translate into one.
   Network bondi-network is present on server 127.0.0.1
   ACME file permissions updated on server 127.0.0.1: /etc/traefik/acme/acme.json
   Alloy config written on server 127.0.0.1: /etc/bondi/alloy/config.alloy
+  Wrote Alloy credentials file on server 127.0.0.1: /etc/bondi/alloy/env
   Error: command failed (125): docker: Error response from daemon: Conflict. The container name "/bondi-alloy" is already in use by container "d671990dc231".
   setup stopped part-way through the alloy phase on server 127.0.0.1, so these phases did not run: managed containers.
   

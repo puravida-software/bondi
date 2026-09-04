@@ -37,3 +37,6 @@ let starts_with ~prefix value =
   let len_prefix = String.length prefix in
   String.length value >= len_prefix
   && String.equal (String.sub value 0 len_prefix) prefix
+
+let has_control_char value =
+  String.exists (fun c -> Char.code c < 0x20 || Char.code c = 0x7f) value

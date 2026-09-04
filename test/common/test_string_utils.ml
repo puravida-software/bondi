@@ -99,6 +99,23 @@ let test_last_index_of_char_in_empty_value () =
   check (option int) "an empty value holds no character" None
     (S.last_index_of_char "" '/')
 
+let test_has_control_char_newline () =
+  check bool "a newline is a control character" true
+    (S.has_control_char "value\nKEY=injected")
+
+let test_has_control_char_equals_sign () =
+  check bool "an equals sign is not a control character" false
+    (S.has_control_char "glc_eyJvIjoiMT==")
+
+let test_has_control_char_plain_value () =
+  check bool "an ordinary value has none" false (S.has_control_char "123456")
+
+let test_has_control_char_delete () =
+  check bool "DEL is a control character" true (S.has_control_char "a\x7fb")
+
+let test_has_control_char_empty () =
+  check bool "the empty string has none" false (S.has_control_char "")
+
 let () =
   run "String_util"
     [
@@ -150,5 +167,13 @@ let () =
           test_case "an absent character" `Quick test_last_index_of_char_absent;
           test_case "an empty value" `Quick
             test_last_index_of_char_in_empty_value;
+        ] );
+      ( "has_control_char",
+        [
+          test_case "a newline" `Quick test_has_control_char_newline;
+          test_case "an equals sign" `Quick test_has_control_char_equals_sign;
+          test_case "an ordinary value" `Quick test_has_control_char_plain_value;
+          test_case "a DEL byte" `Quick test_has_control_char_delete;
+          test_case "an empty string" `Quick test_has_control_char_empty;
         ] );
     ]

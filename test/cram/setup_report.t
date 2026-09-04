@@ -103,6 +103,7 @@ lines the run printed on its way there are unchanged.
   curl on server 127.0.0.1 supports the crontab command: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
   ACME file permissions updated on server 127.0.0.1: /etc/traefik/acme/acme.json
   bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.10.3
+  No alloy is configured for server 127.0.0.1: /etc/bondi/alloy is not on the host
   Wrote secret environment file on server 127.0.0.1: /etc/bondi/gateway/env
   bondi-gateway container started on server 127.0.0.1: a1b2c3d4e5f6
   
