@@ -7,7 +7,9 @@ let run () =
       let outputs =
         List.map
           (fun server ->
-            match Docker_common.docker_command_output ~command:"ps" server with
+            match
+              Remote_exec.docker_command_output_text ~command:"ps" server
+            with
             | Ok output ->
                 Ok
                   (Printf.sprintf "[docker ps] Server: %s\n%s"

@@ -19,13 +19,13 @@ let reading_of_reads ~listing ~inspection ~crontab ~orchestrator =
 let gather ~fetch server =
   reading_of_reads
     ~listing:
-      (Docker_common.docker_command_output
-         ~command:Host_inventory.listing_command server)
+      (Remote_exec.docker_command_output ~command:Host_inventory.listing_command
+         server)
     ~inspection:
-      (Docker_common.docker_command_output
+      (Remote_exec.docker_command_output
          ~command:Host_inventory.inspection_command server)
     ~crontab:
-      (Docker_common.command_output ~command:Crontab_listing.read_command server)
+      (Remote_exec.command_output ~command:Crontab_listing.read_command server)
     ~orchestrator:(fetch server)
 
 let health_waits ~timeout_seconds server docker =
@@ -33,7 +33,7 @@ let health_waits ~timeout_seconds server docker =
     (fun container_name ->
       ( container_name,
         Container_health.verdict_of_output
-          (Docker_common.command_output
+          (Remote_exec.command_output
              ~command:
                (Container_health.wait_command ~container_name ~timeout_seconds)
              server) ))

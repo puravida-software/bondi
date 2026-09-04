@@ -73,9 +73,22 @@ let timed_out_of_detail detail =
   | None ->
       Unreadable "the host stopped waiting without naming the bound it waited"
 
+(* Two failures an operator resolves in different places, and the wait cannot
+   report a verdict for either. A host that ran the wait and exited non-zero has
+   said something about itself -- the command always exits 0 by construction, so
+   a non-zero exit is the host's own report that something on it is wrong. A
+   host that was never reached has said nothing, and giving both the same
+   sentence sends an operator to the key when the answer is on the box. *)
+let unreadable_of_failure failure =
+  if Remote_exec.ran_on_host failure then
+    Unreadable
+      (Printf.sprintf "the wait ran on the host and failed: %s"
+         (Remote_exec.message failure))
+  else Unreadable (Remote_exec.message failure)
+
 let verdict_of_output reading =
   match reading with
-  | Error message -> Unreadable message
+  | Error failure -> unreadable_of_failure failure
   | Ok output -> (
       let marked (marker, of_detail) =
         Option.map of_detail (detail_after ~marker output)

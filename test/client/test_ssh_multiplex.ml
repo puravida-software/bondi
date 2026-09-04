@@ -1,8 +1,21 @@
 open Alcotest
-module Docker_common = Bondi_client.Docker_common
+module Remote_exec = Bondi_client.Remote_exec
 
-let contains ~needle s = Bondi_common.String_utils.contains ~needle s
-let joined () = String.concat " " (Docker_common.multiplex_options ())
+let contains = Test_helpers.contains
+let joined () = String.concat " " (Remote_exec.multiplex_options ())
+
+(* The ControlPath option located by name rather than by position. An index into
+   the option list is a claim about the order that nothing enforces: insert one
+   option ahead of it and both assertions below quietly move to the wrong
+   string, which is the failure they exist to catch. *)
+let control_path_option () =
+  match
+    List.find_opt
+      (fun option -> contains ~needle:"ControlPath=" option)
+      (Remote_exec.multiplex_options ())
+  with
+  | Some option -> option
+  | None -> Alcotest.fail "the option set carries no ControlPath"
 
 let test_reuses_one_connection () =
   let s = joined () in
@@ -15,19 +28,21 @@ let test_reuses_one_connection () =
    master simply never starts, so every command silently falls back to a full
    handshake and the option appears to do nothing. *)
 let test_path_is_short_enough () =
-  let dir = List.nth (Docker_common.multiplex_options ()) 1 in
+  let dir = control_path_option () in
   check bool ("under the sun_path limit: " ^ dir) true (String.length dir < 100)
 
 (* Whoever can open the socket can multiplex onto the connection it holds, which
    is root on a deploy box. All 16 fleet agents run as one uid, so a predictable
    path in a shared /tmp would let one repo's job ride another's deploy. *)
 let test_socket_dir_is_private () =
-  let opt = List.nth (Docker_common.multiplex_options ()) 1 in
+  let opt = control_path_option () in
   let path =
-    let i = String.index opt '=' in
-    String.sub opt (i + 1) (String.length opt - i - 1)
-    |> String.split_on_char '\''
-    |> String.concat ""
+    match String.index_opt opt '=' with
+    | None -> Alcotest.fail ("ControlPath option carries no '=': " ^ opt)
+    | Some i ->
+        String.sub opt (i + 1) (String.length opt - i - 1)
+        |> String.split_on_char '\''
+        |> String.concat ""
   in
   let dir = Filename.dirname path in
   check bool "directory exists" true (Sys.file_exists dir);
@@ -38,8 +53,8 @@ let test_socket_dir_is_private () =
 
 let test_stable_within_a_process () =
   check (list string) "same options on every call"
-    (Docker_common.multiplex_options ())
-    (Docker_common.multiplex_options ())
+    (Remote_exec.multiplex_options ())
+    (Remote_exec.multiplex_options ())
 
 (* A tunnel is one long-lived connection; routing it through a shared master
    would make teardown a question of channels rather than killing a process. *)

@@ -17,7 +17,7 @@ let run container_name =
         List.map
           (fun server ->
             match
-              Docker_common.docker_command_output
+              Remote_exec.docker_command_output_text
                 ~command:("logs " ^ container_name) server
             with
             | Ok output ->

@@ -5,9 +5,12 @@ on the second used to be read as "Docker is not installed" and answered by
 piping get.docker.com into root's shell, which restarts the daemon and every
 container with it — on a host whose Docker was already current.
 
-Every probe this file covers is the same shape: a command that could not be run
-at all is not the host's answer to what it was asked. The three arms below are
-the three places setup asks something of a host and can be told nothing.
+Every probe the first three arms cover is the same shape: a command that could
+not be run at all is not the host's answer to what it was asked. They are the
+three places setup asks something of a host and can be told nothing. The fourth
+arm is the opposite case — the host ran the probe and failed — and it is here
+because the two arrive on the same channel and are reported by the same
+sentence.
 
   $ ROOT="$PWD"
 
@@ -23,9 +26,29 @@ only have stopped on the probe that arm broke.
   > printf '%s\n' "$1" >> "$SSH_ARGV_LOG"
   > cat > /dev/null
   > drop() { echo 'Connection closed by 10.0.0.1 port 22' >&2; exit 255; }
+  > # What ssh itself writes on the first connection to a host, because
+  > # StrictHostKeyChecking=accept-new announces the key it accepted. It goes to
+  > # standard error, it is followed by an ordinary answer, and the call exits
+  > # zero: nothing here failed.
+  > noisy() {
+  >   if [ -n "$NOISY_SUCCESS" ]; then
+  >     echo "Warning: Permanently added '127.0.0.1' (ED25519) to the list of known hosts." >&2
+  >   fi
+  > }
+  > noisy
+  > # The host answers on standard output and fails, saying why on standard
+  > # error. The caller collects the two streams separately and joins them, so
+  > # the order they are reported in is fixed there and not by what this stub
+  > # happens to flush first.
+  > half_answered() {
+  >   echo BONDI_ACME_ABSENT
+  >   echo 'mesg: ttyname failed: Inappropriate ioctl for device' >&2
+  >   exit 1
+  > }
   > case "$1" in
   >   *BONDI_ACME_PRESENT*)
   >     [ -n "$ACME_DROPS" ] && drop
+  >     [ -n "$ACME_HALF_ANSWERS" ] && half_answered
   >     echo BONDI_ACME_PRESENT ;;
   >   'curl --version')
   >     [ -n "$CURL_DROPS" ] && drop
@@ -35,6 +58,11 @@ only have stopped on the probe that arm broke.
   >     echo "$probes" > "$DOCKER_PROBES"
   >     if [ -n "$DOCKER_DROPS_SECOND" ] && [ "$probes" -ge 2 ]; then drop; fi
   >     echo 'Docker version 29.2.1, build deadbeef' ;;
+  >   *'name=^/bondi-orchestrator$'*'{{.State}}'*)
+  >     if [ -n "$NOISY_SUCCESS" ]; then
+  >       printf 'running\tmlopez1506/bondi-server:0.10.1\n'
+  >     fi ;;
+  >   *'RestartPolicy'*) echo unless-stopped ;;
   >   *'/var/spool/cron/crontabs/root'*) echo BONDI_CRONTAB_ABSENT ;;
   >   *'PortBindings'*) echo '127.0.0.1' ;;
   >   *) : ;;
@@ -202,3 +230,89 @@ act on a reading nobody took rather than a phase that was never reached.
   $ grep -c 'sudo chown root:root' ssh-argv.log
   0
   [1]
+
+The fourth arm, and the one that is not about a transport failure at all. Here
+the host ran the probe and answered it, and the call failed anyway: the answer
+went to standard output and the reason to standard error. Both reach the
+operator. A shape that reported the error stream alone would have shown only a
+warning about a terminal, which explains nothing, and discarded the one line
+that says what the host actually found.
+
+  $ : > "$SSH_ARGV_LOG"
+  $ echo 0 > "$DOCKER_PROBES"
+  $ unset ACME_DROPS
+  $ export ACME_HALF_ANSWERS=1
+  $ bondi-client setup > out.log 2>&1
+  [1]
+  $ grep -A2 '^Error:' out.log
+  Error: could not read whether /etc/traefik/acme/acme.json exists on the server, so setup will not act on whether it does: command failed (1): BONDI_ACME_ABSENT
+  mesg: ttyname failed: Inappropriate ioctl for device
+  setup stopped part-way through the ACME file phase on server 127.0.0.1, so these phases did not run: orchestrator, alloy.
+
+The code inside that sentence is the host's own — 1 — where each of the three
+arms above reports 255, which is ssh's code for never having got there. The
+probe was asked exactly once, so the sentence is this arm's answer rather than
+an earlier phase's.
+
+  $ grep -c 'BONDI_ACME_PRESENT' ssh-argv.log
+  1
+  $ grep -c 'sudo chown root:root' ssh-argv.log
+  0
+  [1]
+  $ unset ACME_HALF_ANSWERS
+
+The fifth arm is the other half of the fourth, and the one none of the four
+above reaches: the host wrote to standard error and the call succeeded anyway.
+Every arm above writes to standard error and then fails, so a runner that folded
+the two streams together on the way out would look right in all of them.
+
+The noise is real. Every one of these calls carries ssh's own "Permanently
+added" line, which the accept-new host-key policy emits on the first connection
+to any host; `sudo: unable to resolve host` and the mesg warning above arrive the
+same way. The orchestrator listing is read by taking its first non-empty line and
+splitting it on a tab, so a warning ahead of the listing is read as the listing
+-- and a running orchestrator of the right version reads as one that exists but
+is not running, which is answered by removing it and running a new one. That
+container terminates TLS for every site on the box.
+
+  $ : > "$SSH_ARGV_LOG"
+  $ echo 0 > "$DOCKER_PROBES"
+  $ export NOISY_SUCCESS=1
+  $ bondi-client setup > out.log 2>&1
+  $ sed 's/not reachable: .*/not reachable: <detail>/' out.log
+  Setting up the servers...
+  Processing server: 127.0.0.1
+  bondi-orchestrator container is already running on server 127.0.0.1: 0.10.1, skipping...
+  Docker is already installed on server 127.0.0.1: Docker version 29.2.1, build deadbeef
+  Network bondi-network is present on server 127.0.0.1
+  ACME file permissions updated on server 127.0.0.1: /etc/traefik/acme/acme.json
+  No alloy is configured for server 127.0.0.1: /etc/bondi/alloy is not on the host
+  
+  Server: 127.0.0.1
+  
+  Service
+    NAME                   SOURCE  IMAGE                            TAG          STATUS        RESTARTS  HEALTH
+    my-service             docker  -                                -            not found     -         -
+                           orch    not reachable: <detail>
+  
+  Infrastructure
+    NAME                   SOURCE  IMAGE                            TAG          STATUS        RESTARTS  HEALTH
+    bondi-orchestrator     docker  -                                -            not found     -         -
+                           orch    not reachable: <detail>
+  
+  Crontab
+    bondi section          docker  no Bondi section on the host
+
+The affirmative arm is that the listing was asked for at all: the answer above is
+this probe's, read clean, rather than a phase that never ran. Nothing was torn
+down.
+
+  $ grep -c 'name=\^/bondi-orchestrator\$' ssh-argv.log
+  1
+  $ grep -c 'rm --force bondi-orchestrator' ssh-argv.log
+  0
+  [1]
+  $ grep -c 'run -d --name bondi-orchestrator' ssh-argv.log
+  0
+  [1]
+  $ unset NOISY_SUCCESS

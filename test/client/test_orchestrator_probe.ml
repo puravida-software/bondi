@@ -1,5 +1,6 @@
 open Alcotest
 module Probe = Bondi_client.Orchestrator_probe
+module Remote_exec = Bondi_client.Remote_exec
 
 let contains = Test_helpers.contains
 
@@ -35,11 +36,47 @@ let test_verdict_rejects_silent_success () =
    layer reports it as an error rather than as output. That must be a rejection
    carrying the failure, not a crash and not a pass. *)
 let test_verdict_rejects_failed_probe () =
-  match Probe.verdict (Error "command failed (1): no such container") with
+  match
+    Probe.verdict
+      (Error
+         (Remote_exec.Command_failed { code = 1; output = "no such container" }))
+  with
   | Ok () -> fail "expected a failed probe to be rejected"
   | Error message ->
       check bool "carries the underlying failure" true
         (contains ~needle:"no such container" message)
+
+(* The two failures an operator resolves in different places. A host that could
+   not be reached is a key, an address or a firewall; a host that ran the check
+   and reported a non-zero exit is the box itself. Rendering both as "the check
+   could not be run on the server" states the first about the second, and no
+   reader of the sentence can tell which they have. *)
+let test_ssh_failure_and_command_failure_reach_different_verdicts () =
+  let unreached =
+    Probe.verdict
+      (Error
+         (Remote_exec.Ssh_failed
+            { code = 255; output = "Connection closed by 10.0.0.1 port 22" }))
+  in
+  let answered =
+    Probe.verdict
+      (Error
+         (Remote_exec.Command_failed { code = 1; output = "no such container" }))
+  in
+  match (unreached, answered) with
+  | Error unreached, Error answered ->
+      check bool "a host that was never reached says the check did not run" true
+        (contains ~needle:"could not be run on the server" unreached);
+      check bool "a host that ran the check does not say that" false
+        (contains ~needle:"could not be run on the server" answered);
+      check bool "it says the check ran and failed instead" true
+        (contains ~needle:"ran on the server" answered);
+      check bool "and each still carries what came back" true
+        (contains ~needle:"Connection closed" unreached
+        && contains ~needle:"no such container" answered)
+  | Ok (), _ -> fail "a host that could not be reached is not a serving server"
+  | Error _, Ok () ->
+      fail "a probe that failed on the host is not a serving server"
 
 (* The probe checks that the server answers HTTP on the port it was told to
    check, rather than that a container exists — a container whose process died
@@ -82,6 +119,8 @@ let () =
             test_verdict_rejects_silent_success;
           test_case "rejects a probe that could not be run" `Quick
             test_verdict_rejects_failed_probe;
+          test_case "an unreachable host and a failed check are not one verdict"
+            `Quick test_ssh_failure_and_command_failure_reach_different_verdicts;
         ] );
       ( "probe_command",
         [

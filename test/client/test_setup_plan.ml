@@ -1,5 +1,6 @@
 open Alcotest
 module Config_file = Bondi_client.Config_file
+module Remote_exec = Bondi_client.Remote_exec
 module Managed_container = Bondi_common.Managed_container
 module Setup = Bondi_client.Cmd.Setup
 
@@ -154,26 +155,35 @@ let ctx ?(alloy_state = Setup.Alloy_absent)
     Setup.managed;
   }
 
-(* One distinctive transport error, shared by every probe fixture in this file.
-   An assertion that this text reached the operator cannot pass on a generic
-   failure the way "an error was returned" would. *)
-let transport_error =
-  "command failed (255): Connection closed by 203.0.113.9 port 22"
+(* One distinctive transport failure, shared by every probe fixture in this
+   file. An assertion that this text reached the operator cannot pass on a
+   generic failure the way "an error was returned" would. The probes that read
+   the failure as a value and the ones that still read it as text are pinned
+   against the same sentence by deriving the text from the value, rather than
+   by spelling it twice. *)
+let transport_failure =
+  Remote_exec.Ssh_failed
+    { code = 255; output = "Connection closed by 203.0.113.9 port 22" }
+
+let transport_error = Remote_exec.message transport_failure
 
 (* The four probe results this file pins apart. Absence and transport failure
    both reach the client on the error channel — [ssh] propagates the remote
-   shell's exit 127 for a missing command, and [run_command] turns any non-zero
-   exit into an [Error] — so a fixture that answered [Ok] for an absent Docker
-   would pin a reading [gather_context] can never produce.
+   shell's exit 127 for a missing command, and every non-zero exit arrives as
+   an [Error] — so a fixture that answered [Ok] for an absent Docker would pin
+   a reading [gather_context] can never produce. What tells them apart is the
+   status, which is why these carry the failure rather than its rendering.
    [docker_missing_merged] is the same absence from a transport that folds
    stderr into stdout and exits zero. *)
 let docker_present = Ok "Docker version 24.0"
 
 let docker_missing =
-  Error "command failed (127): bash: docker: command not found"
+  Error
+    (Remote_exec.Command_failed
+       { code = 127; output = "bash: docker: command not found\n" })
 
 let docker_missing_merged = Ok "bash: docker: command not found"
-let docker_unreachable = Error transport_error
+let docker_unreachable = Error transport_failure
 
 let docker_status_string = function
   | Setup.Docker_installed output -> "Docker_installed " ^ output
@@ -386,8 +396,8 @@ let test_docker_probe_error_is_undetermined () =
 (* The affirmative absence arm: the shell's own report that the command does
    not exist is a positive determination, and the only one that may lead to an
    install. It arrives as a non-zero exit, which is the same channel the
-   transport error above arrives on — the two are told apart by what the host
-   said, not by whether the command succeeded. *)
+   transport error above arrives on — the two are told apart by the status the
+   host's shell returned, not by whether the command succeeded. *)
 let test_docker_probe_command_not_found_is_not_installed () =
   check_docker_status
     ~expected:
@@ -406,6 +416,42 @@ let test_docker_probe_version_output_is_installed () =
   check_docker_status
     ~expected:(Setup.Docker_installed "Docker version 29.2.1, build 1234567")
     (Ok "Docker version 29.2.1, build 1234567\n")
+
+(* Absence is the status the host's shell returned, not the words it chose to
+   return it with. A shell that words it without the word "command" exits 127
+   all the same, and a client that read the sentence rather than the status
+   refused to install on a host that had positively answered. *)
+let test_docker_probe_absence_is_the_exit_status_not_the_wording () =
+  check_docker_status
+    ~expected:
+      (Setup.Docker_not_installed
+         "command failed (127): sh: 1: docker: not found")
+    (Error
+       (Remote_exec.Command_failed
+          { code = 127; output = "sh: 1: docker: not found\n" }))
+
+(* The same reading in the direction that costs something. A connection that
+   never opened leaves by ssh's own exit 255, and nothing keeps the text it
+   leaves from carrying those same words: the output is whatever reached this
+   client. Read as a sentence, that piped get.docker.com into root's shell on a
+   host this run never reached; the status says the command never ran. *)
+let test_docker_probe_transport_failure_that_says_not_found_is_undetermined () =
+  let never_connected =
+    Error
+      (Remote_exec.Ssh_failed
+         { code = 255; output = "sh: line 1: jump-helper: command not found\n" })
+  in
+  check_docker_status
+    ~expected:
+      (Setup.Docker_undetermined
+         "command failed (255): sh: line 1: jump-helper: command not found")
+    never_connected;
+  match Setup.docker_install_verdict_of_probe never_connected with
+  | Setup.Docker_install ->
+      fail "a connection that never opened must not install Docker"
+  | Setup.Docker_satisfied version ->
+      failf "nor is it an installed Docker: %s" version
+  | Setup.Docker_abort _ -> ()
 
 (* No action list is produced at all, so nothing is interpreted against a host
    whose state was never read. *)
@@ -500,7 +546,7 @@ let test_ensure_docker_verdict_is_satisfied_when_installed () =
    "command failed (255): Connection closed by …" but 7.76.0 is required — a
    failure to ask, dressed up as a fact about curl. *)
 let test_cron_curl_probe_error_is_not_curls_answer () =
-  match Setup.cron_curl_verdict_of_probe (Error transport_error) with
+  match Setup.cron_curl_verdict_of_probe (Error transport_failure) with
   | Setup.Cron_curl_reported output ->
       failf "a probe that never ran is not curl's answer: %s" output
   | Setup.Cron_curl_undetermined message ->
@@ -524,13 +570,48 @@ let test_cron_curl_host_answers_are_curls_answer () =
       failf "a version the host printed is curl's answer: %s" message);
   match
     Setup.cron_curl_verdict_of_probe
-      (Error "command failed (127): bash: curl: command not found")
+      (Error
+         (Remote_exec.Command_failed
+            { code = 127; output = "bash: curl: command not found\n" }))
   with
   | Setup.Cron_curl_reported output ->
       check bool "and so is the host saying it has none" true
         (Bondi_common.String_utils.contains ~needle:"command not found" output)
   | Setup.Cron_curl_undetermined message ->
       failf "a host reporting no curl has answered about curl: %s" message
+
+(* Curl's absence is read the same way Docker's is: by the status the host's
+   shell returned, not by the words it chose. A shell that words it without the
+   word "command" has still answered about curl. *)
+let test_cron_curl_absence_is_the_exit_status_not_the_wording () =
+  match
+    Setup.cron_curl_verdict_of_probe
+      (Error
+         (Remote_exec.Command_failed
+            { code = 127; output = "sh: 1: curl: not found\n" }))
+  with
+  | Setup.Cron_curl_reported output ->
+      check bool "carries what the host said" true
+        (Bondi_common.String_utils.contains ~needle:"curl: not found" output)
+  | Setup.Cron_curl_undetermined message ->
+      failf "a host reporting no curl has answered about curl: %s" message
+
+(* And a connection that never opened is not curl's answer however its own text
+   reads. It leaves by ssh's own exit 255, and reading it as an answer decides
+   the crontab command's fate against a version the host never printed. *)
+let test_cron_curl_transport_failure_that_says_not_found_is_undetermined () =
+  match
+    Setup.cron_curl_verdict_of_probe
+      (Error
+         (Remote_exec.Ssh_failed
+            {
+              code = 255;
+              output = "sh: line 1: jump-helper: command not found\n";
+            }))
+  with
+  | Setup.Cron_curl_reported output ->
+      failf "a probe that never ran is not curl's answer: %s" output
+  | Setup.Cron_curl_undetermined _ -> ()
 
 (* ------------------------------------------------------------------------- *)
 (* ACME file probe                                                            *)
@@ -1687,6 +1768,11 @@ let () =
             test_docker_probe_command_not_found_on_stdout_is_not_installed;
           test_case "a version string is an installed Docker" `Quick
             test_docker_probe_version_output_is_installed;
+          test_case "absence is the exit status, not the wording" `Quick
+            test_docker_probe_absence_is_the_exit_status_not_the_wording;
+          test_case "a transport failure saying not found is undetermined"
+            `Quick
+            test_docker_probe_transport_failure_that_says_not_found_is_undetermined;
           test_case "plan_for_config aborts on an undetermined probe" `Quick
             test_plan_for_config_aborts_on_undetermined_docker;
           test_case "the abort names the transport error" `Quick
@@ -1764,6 +1850,11 @@ let () =
             test_cron_curl_probe_error_is_not_curls_answer;
           test_case "what the host said about curl is" `Quick
             test_cron_curl_host_answers_are_curls_answer;
+          test_case "absence is the exit status, not the wording" `Quick
+            test_cron_curl_absence_is_the_exit_status_not_the_wording;
+          test_case "a transport failure saying not found is undetermined"
+            `Quick
+            test_cron_curl_transport_failure_that_says_not_found_is_undetermined;
         ] );
       ( "acme probe",
         [

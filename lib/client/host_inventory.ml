@@ -16,7 +16,9 @@ type container = {
   created_at : string option;
 }
 
-type t = Observed of container list | Unreadable_listing of string
+type t =
+  | Observed of container list
+  | Unreadable_listing of Remote_exec.failure
 
 let listing_command = "ps -a --format '{{.Names}}\t{{.Image}}\t{{.State}}'"
 
@@ -184,11 +186,27 @@ let health_to_wait_for = function
           is_running container && has_something_to_wait_for container.health)
       |> List.map (fun container -> container.name)
 
+(* A host that ran the read and exited non-zero has answered -- the daemon is
+   down, the socket may not be opened, the CLI is not there -- and that is a
+   fact about the box. A host that was never reached has answered nothing, and
+   the operator's next move differs. A container's health that could not be read
+   is a cell of the report rather than a source with nothing to say, so here the
+   difference has nowhere to go but the words; the listing carries its outcome
+   out as a value instead and is not routed through this. *)
+let inspection_failure_message failure =
+  if Remote_exec.ran_on_host failure then
+    Printf.sprintf "the inspection ran on the host and failed: %s"
+      (Remote_exec.message failure)
+  else Remote_exec.message failure
+
 let of_reads ~listing ~inspection =
   match listing with
-  | Error message -> Unreadable_listing message
+  | Error failure -> Unreadable_listing failure
   | Ok output ->
-      let inspection = Result.map inspection_entries inspection in
+      let inspection =
+        Result.map inspection_entries
+          (Result.map_error inspection_failure_message inspection)
+      in
       Observed
         (List.filter_map
            (container_of_line ~inspection)

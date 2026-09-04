@@ -1,5 +1,6 @@
 open Alcotest
 module Inventory = Bondi_client.Host_inventory
+module Remote_exec = Bondi_client.Remote_exec
 
 let contains = Test_helpers.contains
 
@@ -57,8 +58,9 @@ let health_reported ~declaration ~status =
 
 let single_container inventory =
   match inventory with
-  | Inventory.Unreadable_listing message ->
-      failf "expected an observed inventory, got unreadable: %s" message
+  | Inventory.Unreadable_listing failure ->
+      failf "expected an observed inventory, got unreadable: %s"
+        (Remote_exec.message failure)
   | Inventory.Observed [ container ] -> container
   | Inventory.Observed containers ->
       failf "expected exactly one container, got %d" (List.length containers)
@@ -83,8 +85,9 @@ let test_inventory_parses_ps_listing () =
       ]
   in
   match inventory ~listing:(Ok listing) ~inspection:(Ok inspection) () with
-  | Inventory.Unreadable_listing message ->
-      failf "expected an observed inventory, got unreadable: %s" message
+  | Inventory.Unreadable_listing failure ->
+      failf "expected an observed inventory, got unreadable: %s"
+        (Remote_exec.message failure)
   | Inventory.Observed containers ->
       check (list string) "every container is observed, in listing order"
         [ "bondi-orchestrator"; "bondi-traefik"; "legacy-worker" ]
@@ -125,8 +128,9 @@ let test_inventory_reads_image_and_tag_separately () =
       ]
   in
   match inventory ~listing:(Ok listing) ~inspection:(Ok inspection) () with
-  | Inventory.Unreadable_listing message ->
-      failf "expected an observed inventory, got unreadable: %s" message
+  | Inventory.Unreadable_listing failure ->
+      failf "expected an observed inventory, got unreadable: %s"
+        (Remote_exec.message failure)
   | Inventory.Observed containers ->
       let pairs =
         List.map (fun (c : Inventory.container) -> (c.image, c.tag)) containers
@@ -220,22 +224,27 @@ let test_inventory_health_healthy_is_healthy () =
    is absent, which is a claim about the box that nothing supports. *)
 let test_inventory_unreadable_listing_is_not_empty_inventory () =
   match
-    inventory ~listing:(Error "command failed (255): Connection closed") ()
+    inventory
+      ~listing:
+        (Error
+           (Remote_exec.Ssh_failed { code = 255; output = "Connection closed" }))
+      ()
   with
   | Inventory.Observed containers ->
       failf "a failed listing must not be an inventory of %d containers"
         (List.length containers)
-  | Inventory.Unreadable_listing message ->
+  | Inventory.Unreadable_listing failure ->
       check bool "carries what went wrong" true
-        (Bondi_common.String_utils.contains ~needle:"Connection closed" message)
+        (Bondi_common.String_utils.contains ~needle:"Connection closed"
+           (Remote_exec.message failure))
 
 (* The other half of the pair: the same builder, with a listing that ran and
    found nothing, is an inventory — an empty one. *)
 let test_inventory_empty_listing_is_an_empty_inventory () =
   match inventory ~listing:(Ok "") () with
-  | Inventory.Unreadable_listing message ->
+  | Inventory.Unreadable_listing failure ->
       failf "an empty listing is an observation, not a failure to observe: %s"
-        message
+        (Remote_exec.message failure)
   | Inventory.Observed containers ->
       check int "no containers were observed" 0 (List.length containers)
 
@@ -342,8 +351,9 @@ let test_inventory_partial_inspection_leaves_the_rest_readable () =
     inspection_of [ ("survivor", "declared", "healthy", "0", created) ]
   in
   match inventory ~listing:(Ok listing) ~inspection:(Ok inspection) () with
-  | Inventory.Unreadable_listing message ->
-      failf "the listing ran, so this is an inventory: %s" message
+  | Inventory.Unreadable_listing failure ->
+      failf "the listing ran, so this is an inventory: %s"
+        (Remote_exec.message failure)
   | Inventory.Observed containers -> (
       let health_of name =
         match
@@ -380,7 +390,12 @@ let test_inventory_partial_inspection_leaves_the_rest_readable () =
 let test_inventory_unreadable_listing_names_nothing_to_wait_for () =
   check (list string) "a listing that never ran names no container" []
     (Inventory.health_to_wait_for
-       (inventory ~listing:(Error "command failed (255): Connection closed") ()))
+       (inventory
+          ~listing:
+            (Error
+               (Remote_exec.Ssh_failed
+                  { code = 255; output = "Connection closed" }))
+          ()))
 
 let () =
   run "Host_inventory"

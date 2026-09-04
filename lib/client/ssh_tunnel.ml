@@ -13,7 +13,7 @@ let tunnel_command ~key_path ~user ~host ~local_port ~remote_port =
   Printf.sprintf
     "ssh -i %s %s -o ExitOnForwardFailure=yes -N -L %d:127.0.0.1:%d %s"
     (Filename.quote key_path)
-    (String.concat " " Docker_common.ssh_options)
+    (String.concat " " Remote_exec.ssh_options)
     local_port remote_port
     (Filename.quote (user ^ "@" ^ host))
 
@@ -24,9 +24,13 @@ let free_local_port () =
     (fun () ->
       Unix.bind s (Unix.ADDR_INET (Unix.inet_addr_loopback, 0));
       match Unix.getsockname s with
-      | Unix.ADDR_INET (_, port) -> port
-      | Unix.ADDR_UNIX _ ->
-          failwith "impossible: AF_UNIX from an AF_INET socket")
+      | Unix.ADDR_INET (_, port) -> Ok port
+      | Unix.ADDR_UNIX path ->
+          Error
+            (Printf.sprintf
+               "ssh tunnel could not reserve a local port: the kernel named an \
+                internet socket %s"
+               path))
 
 let port_accepts port =
   let s = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
@@ -48,6 +52,40 @@ let port_accepts port =
 let readiness_attempts = 100
 let readiness_interval = 0.1
 
+(* One function in this client reads a process status, and it is not this one:
+   the classification is [Remote_exec.failure_of_status] and only the wording is
+   the tunnel's. The wording stays because it names the tunnel -- an operator
+   shown "command failed (255)" in the middle of a deploy cannot tell a forward
+   that never opened from the deploy itself failing.
+
+   There is no output to hand the classifier: [-N] runs no command, and ssh's
+   own diagnostics go straight to this process's stderr rather than through a
+   pipe this module reads. *)
+let early_exit_message status =
+  let exited code =
+    Printf.sprintf
+      "ssh tunnel exited with status %d before the forward was usable -- check \
+       the key and that port 22 is reachable"
+      code
+  in
+  let killed = "ssh tunnel was killed before the forward was usable" in
+  match Remote_exec.failure_of_status status ~output:"" with
+  (* Exit 0 is the classifier's success and the tunnel's failure: [-N] gave ssh
+     nothing to do but hold the forward open, so leaving at all is leaving too
+     early. Nothing else reaches this arm, so the code is 0. *)
+  | Ok _ -> exited 0
+  | Error (Remote_exec.Ssh_failed { code; _ })
+  | Error (Remote_exec.Command_failed { code; _ }) ->
+      exited code
+  | Error (Remote_exec.Signalled _)
+  | Error (Remote_exec.Stopped _) ->
+      killed
+  (* Not reachable from a status -- [ssh_config] is its only producer -- and
+     rendered by the module that owns it rather than given a tunnel sentence
+     that would be untrue if it ever arrived. *)
+  | Error (Remote_exec.Not_configured _ as failure) ->
+      Remote_exec.message failure
+
 let wait_until_ready ~port ~pid =
   let rec go attempt =
     if port_accepts port then Ok ()
@@ -63,19 +101,13 @@ let wait_until_ready ~port ~pid =
       | 0, _ ->
           Unix.sleepf readiness_interval;
           go (attempt + 1)
-      | _, Unix.WEXITED code ->
-          Error
-            (Printf.sprintf
-               "ssh tunnel exited with status %d before the forward was usable \
-                -- check the key and that port 22 is reachable"
-               code)
-      | _, _ -> Error "ssh tunnel was killed before the forward was usable"
+      | _, status -> Error (early_exit_message status)
   in
   go 0
 
 let with_tunnel ~(ssh : Config_file.server_ssh) ~host ~remote_port f =
-  Docker_common.with_temp_key ssh.private_key_contents (fun key_path ->
-      let local_port = free_local_port () in
+  Remote_exec.with_temp_key ssh.private_key_contents (fun key_path ->
+      let* local_port = free_local_port () in
       let cmd =
         tunnel_command ~key_path ~user:ssh.user ~host ~local_port ~remote_port
       in

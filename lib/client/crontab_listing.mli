@@ -80,14 +80,20 @@ val read_command : string
     The file is read into a shell variable rather than streamed, so a failure
     part-way through prints no fragment of it. *)
 
-val of_read_output : (string, string) result -> t
+val of_read_output : (string, Remote_exec.failure) result -> t
 (** Read the section out of the output of {!read_command}.
 
-    The argument is the remote call's own result, so a file that could not be
-    read is distinguishable from one that was read and holds no section. Only
-    the lines between the markers are read; entries an operator added by hand
-    outside them are neither counted nor named, because they are not Bondi's to
-    report on and not Bondi's to converge.
+    The argument is the remote call's own outcome rather than a sentence about
+    it, so a file that could not be read is distinguishable from one that was
+    read and holds no section — and a spool the host read and refused is
+    distinguishable from one the host was never asked about. A
+    {!Remote_exec.Command_failed} yields an {!Unreadable} saying the read ran on
+    the host and failed, which is a permission or a missing file to go and look
+    at; every other failure reads as {!Remote_exec.message} renders it, and
+    points at the connection instead. Only the lines between the markers are
+    read; entries an operator added by hand outside them are neither counted nor
+    named, because they are not Bondi's to report on and not Bondi's to
+    converge.
 
     An error is cut at the marker that precedes the file's contents before it
     reaches {!Unreadable}. See this module's own description for why. *)

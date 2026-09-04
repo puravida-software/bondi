@@ -46,7 +46,11 @@ type container = {
 type t =
   | Observed of container list
       (** the listing ran; these are the containers it found *)
-  | Unreadable_listing of string  (** the listing never ran *)
+  | Unreadable_listing of Remote_exec.failure
+      (** the listing did not yield one: the outcome of the read itself, so a
+          reader can tell a host that was never reached from one that ran the
+          listing and refused it, as far as {!Remote_exec.failure_of_status} can
+          tell them apart *)
 
 val listing_command : string
 (** The [docker] sub-command that lists every container on the host.
@@ -115,11 +119,21 @@ val health_to_wait_for : t -> string list
     running nothing; it has said nothing. *)
 
 val of_reads :
-  listing:(string, string) result -> inspection:(string, string) result -> t
+  listing:(string, Remote_exec.failure) result ->
+  inspection:(string, Remote_exec.failure) result ->
+  t
 (** Assemble the inventory from the output of the two commands.
 
-    Each argument is the remote call's own result, so a read that never happened
-    is distinguishable from one that answered. A failed listing yields
-    {!Unreadable_listing}, never an empty inventory. A failed inspection leaves
-    the containers themselves observed, with their health unreadable — the host
-    said which containers it has, and that much is still known. *)
+    Each argument is the remote call's own outcome rather than a sentence about
+    it, so a read that never happened stays distinguishable from one that
+    answered. A failed listing yields {!Unreadable_listing} carrying that
+    outcome, never an empty inventory: nothing here decides what the difference
+    means for a report, because the report is where an operator reads it and it
+    is not this module's to spend on a sentence.
+
+    A failed inspection leaves the containers themselves observed, with their
+    health unreadable — the host said which containers it has, and that much is
+    still known. That one is a cell rather than a source, so it has nowhere to
+    carry an outcome and the text says which instead: a
+    {!Remote_exec.Command_failed} reads as the inspection having run on the host
+    and failed, and every other failure as {!Remote_exec.message} renders it. *)

@@ -3,6 +3,7 @@ module Gather = Bondi_client.Status_gather
 module Report = Bondi_client.Status_report
 module Inventory = Bondi_client.Host_inventory
 module Crontab = Bondi_client.Crontab_listing
+module Remote_exec = Bondi_client.Remote_exec
 module Config_file = Bondi_client.Config_file
 
 (* Both constructors named, so a third is a compile error here rather than a
@@ -105,12 +106,13 @@ let report_of reading =
 let containers_of (reading : Gather.reading) =
   match reading.docker with
   | Inventory.Observed containers -> containers
-  | Inventory.Unreadable_listing message ->
-      failf "expected the host listing to have been read, got: %s" message
+  | Inventory.Unreadable_listing failure ->
+      failf "expected the host listing to have been read, got: %s"
+        (Remote_exec.message failure)
 
 let unreadable_listing_of (reading : Gather.reading) =
   match reading.docker with
-  | Inventory.Unreadable_listing message -> message
+  | Inventory.Unreadable_listing failure -> Remote_exec.message failure
   | Inventory.Observed containers ->
       failf "expected the host listing to have failed, got %d containers"
         (List.length containers)
@@ -138,6 +140,17 @@ let source_name ~source (view : Report.source_view) =
   | Report.Unavailable unavailability ->
       failf "expected %s to have answered, got unavailable: %s" source
         (unavailability_name unavailability)
+
+(* Which of the two a reading became, rather than what it said. Both arms carry
+   the host's own words, so a check on the message alone passes against a report
+   that has collapsed them. *)
+let unavailable_state_of ~source (view : Report.source_view) =
+  match view with
+  | Report.Unavailable (Report.Not_consulted _) -> "not consulted"
+  | Report.Unavailable (Report.Not_understood _) -> "not understood"
+  | Report.Absent -> failf "expected %s to be unavailable, got absent" source
+  | Report.Reported _ ->
+      failf "expected %s to be unavailable, got a reported observation" source
 
 let unavailable_of ~source (view : Report.source_view) =
   match view with
@@ -174,9 +187,11 @@ let test_gather_reading_without_http () =
       implementation that never populates a reading at all passes case 1. *)
 let test_gather_reading_without_ssh () =
   let reading =
-    reading ~listing:(Error "Missing ssh configuration for server 10.0.0.1")
-      ~inspection:(Error "Missing ssh configuration for server 10.0.0.1")
-      ~crontab:(Error "Missing ssh configuration for server 10.0.0.1") ()
+    let unconfigured =
+      Error (Remote_exec.Not_configured { server = "10.0.0.1" })
+    in
+    reading ~listing:unconfigured ~inspection:unconfigured ~crontab:unconfigured
+      ()
   in
   check string "a listing that never ran is not an empty box"
     "Missing ssh configuration for server 10.0.0.1"
@@ -194,9 +209,12 @@ let test_gather_reading_without_ssh () =
       that empties itself is the report an operator loses when it is needed. *)
 let test_gather_reading_from_neither () =
   let reading =
-    reading ~listing:(Error "Permission denied (publickey).")
-      ~inspection:(Error "Permission denied (publickey).")
-      ~crontab:(Error "Permission denied (publickey).")
+    let refused =
+      Error
+        (Remote_exec.Ssh_failed
+           { code = 255; output = "Permission denied (publickey)." })
+    in
+    reading ~listing:refused ~inspection:refused ~crontab:refused
       ~orchestrator:(Error (Report.Not_consulted "connection refused")) ()
   in
   let rows = (report_of reading).rows in
@@ -204,7 +222,7 @@ let test_gather_reading_from_neither () =
     [ "my-service"; "bondi-orchestrator" ]
     (List.map (fun (row : Report.row) -> row.name) rows);
   check string "the host says why it could not answer"
-    "Permission denied (publickey)."
+    "command failed (255): Permission denied (publickey)."
     (unavailable_of ~source:"docker"
        (row_named "bondi-orchestrator" rows).docker);
   check string "and so does the orchestrator" "connection refused"
@@ -230,12 +248,20 @@ let test_gather_reading_from_both () =
       about a host, and the pair is what stops the first collapsing into the
       second. Both arms are built from the same fixture. *)
 let test_gather_crontab_read_is_its_own_outcome () =
-  check string "a read that never happened says so"
-    "unreadable: cat: /var/spool/cron/crontabs/root: Permission denied"
+  check string "a read the host ran and refused says so, and says which"
+    "unreadable: the read ran on the host and failed: command failed (1): cat: \
+     /var/spool/cron/crontabs/root: Permission denied"
     (crontab_name
        (reading
           ~crontab:
-            (Error "cat: /var/spool/cron/crontabs/root: Permission denied") ())
+            (Error
+               (Remote_exec.Command_failed
+                  {
+                    code = 1;
+                    output =
+                      "cat: /var/spool/cron/crontabs/root: Permission denied";
+                  }))
+          ())
          .crontab);
   check string "a file that was read and has no section says that instead"
     "no section"
@@ -253,7 +279,11 @@ let test_gather_crontab_read_is_its_own_outcome () =
     [
       (reading ()).crontab;
       (reading ~crontab:(Ok spool_without_a_section) ()).crontab;
-      (reading ~crontab:(Error "denied") ()).crontab;
+      (reading
+         ~crontab:
+           (Error (Remote_exec.Command_failed { code = 1; output = "denied" }))
+         ())
+        .crontab;
     ]
 
 (* 6. What the orchestrator reported alongside its components reaches the report,
@@ -271,6 +301,29 @@ let test_gather_warnings_come_from_the_orchestrator () =
   check string "and the report knows which server it is about" "10.0.0.1"
     (report_of (reading ())).address
 
+(* 7. The end of the path the other cases only start. A remote read's outcome is
+      taken here, handed to the inventory and rendered by the report, and the
+      two failures an operator resolves in different places have to survive all
+      three: an ssh client that never reached the box, and a box that ran the
+      listing and refused it. The cases above prove each hop keeps the value;
+      this one is the only thing that fails if a hop turns it back into a
+      sentence. *)
+let test_a_failed_listing_reaches_the_report_as_the_state_it_was () =
+  let state_of listing =
+    let rows = (report_of (reading ~listing ())).rows in
+    unavailable_state_of ~source:"docker" (row_named "my-service" rows).docker
+  in
+  check string "an ssh client that never reached the box consulted nothing"
+    "not consulted"
+    (state_of
+       (Error (Remote_exec.Ssh_failed { code = 255; output = "no route" })));
+  check string "a box that ran the listing and refused it has answered"
+    "not understood"
+    (state_of
+       (Error
+          (Remote_exec.Command_failed
+             { code = 1; output = "Cannot connect to the Docker daemon" })))
+
 let () =
   run "status gather"
     [
@@ -285,5 +338,7 @@ let () =
             test_gather_crontab_read_is_its_own_outcome;
           test_case "warnings come from the orchestrator" `Quick
             test_gather_warnings_come_from_the_orchestrator;
+          test_case "a failed listing keeps its state to the report" `Quick
+            test_a_failed_listing_reaches_the_report_as_the_state_it_was;
         ] );
     ]

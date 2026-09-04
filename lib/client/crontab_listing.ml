@@ -181,9 +181,19 @@ let contents_after_marker output =
 let said marker output =
   Bondi_common.String_utils.contains ~needle:marker output
 
+(* A spool the host read and refused is not a spool the host was never asked
+   about. The first is a permission or a missing file on the box; the second is
+   the connection. Both leave the section unknown, and only the wording tells an
+   operator which of the two to go and look at. *)
+let unreadable_of_failure failure =
+  let detail = redacted (Remote_exec.message failure) in
+  if Remote_exec.ran_on_host failure then
+    Unreadable (Printf.sprintf "the read ran on the host and failed: %s" detail)
+  else Unreadable detail
+
 let of_read_output reading =
   match reading with
-  | Error message -> Unreadable (redacted message)
+  | Error failure -> unreadable_of_failure failure
   | Ok output -> (
       (* The contents marker is answered first, because everything after it is
          the file and a line of the file is free to hold any of the words

@@ -74,18 +74,27 @@ val wait_command : container_name:string -> timeout_seconds:int -> string
     site that does today is not.
 
     The verdict is carried by a marker on standard output and the command always
-    exits 0. A non-zero exit would be reported by the SSH layer as an error
-    carrying only stderr, which discards the marker that said what happened;
-    leaving the exit status alone keeps it meaning "the command could be run on
-    that host", which is a different fact and one {!verdict_of_output} also
-    needs. *)
+    exits 0. Leaving the exit status alone keeps it meaning "the command could
+    be run on that host", which is a different fact and one {!verdict_of_output}
+    also needs. A failure now carries the command's whole output, so a marker
+    printed before a non-zero exit does reach this module -- and is still not
+    read as a verdict, because honouring it would give the exit status two
+    meanings again. *)
 
-val verdict_of_output : (string, string) result -> verdict
+val verdict_of_output : (string, Remote_exec.failure) result -> verdict
 (** Decide, from the outcome of running {!wait_command}, what the host said.
 
-    The argument is the SSH call's own result, so a wait that ran and reported a
-    failure is distinguishable from one that could not be run at all. Output
-    that carries no marker — including no output whatsoever — is a rejection
-    rather than a pass: a remote command that exited without saying anything is
-    not evidence that a container is healthy, and reading it as one is the
-    defect this module exists to prevent. *)
+    The argument is the SSH call's own outcome rather than a sentence about it,
+    so a wait that ran and reported a failure is distinguishable from one that
+    could not be run at all — and here is how. A {!Remote_exec.Command_failed}
+    is the host having run the wait and exited non-zero, which given that the
+    command always exits 0 is the host reporting something about itself; the
+    {!Unreadable} it produces says the wait ran on the host and failed. Every
+    other failure — no [ssh] block, ssh's own failure, the local shell killed or
+    stopped — is nothing having been obtained from the host, and reads exactly
+    as {!Remote_exec.message} renders it. An operator resolves the two in
+    different places, which is the whole reason for the split. Output that
+    carries no marker — including no output whatsoever — is a rejection rather
+    than a pass: a remote command that exited without saying anything is not
+    evidence that a container is healthy, and reading it as one is the defect
+    this module exists to prevent. *)

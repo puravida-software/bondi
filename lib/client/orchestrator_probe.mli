@@ -27,28 +27,33 @@ val probe_command : port:int -> attempts:int -> string
     to be told so.
 
     The verdict is carried by a marker on standard output, and the command
-    always exits 0. A non-zero exit would be reported by the SSH layer as an
-    error carrying only stderr, which discards the marker that said what
-    happened; leaving the exit status alone keeps it meaning "the command could
-    be run on that host", which is a different fact and one {!verdict} also
-    needs. *)
+    always exits 0. Leaving the exit status alone keeps it meaning "the command
+    could be run on that host", which is a different fact and one {!verdict}
+    also needs. A failure now carries the command's whole output, so a marker
+    printed before a non-zero exit does reach this module -- and is still not
+    read as a verdict, because honouring it would give the exit status two
+    meanings again. *)
 
 val diagnostics_command : string
 (** The shell command that collects what the operator needs to diagnose an
     orchestrator that did not come up: the container's final state and exit
     code, followed by its last log lines. Run only after a failed probe. *)
 
-val verdict : (string, string) result -> (unit, string) result
+val verdict : (string, Remote_exec.failure) result -> (unit, string) result
 (** Decide, from the outcome of running {!probe_command}, whether the
     orchestrator is serving.
 
-    The argument is the SSH call's own result, so it distinguishes a probe that
-    ran and reported failure from a probe that could not be run at all; both are
-    rejections, and each error names which happened. Output that carries no
-    marker — including no output at all — is a rejection rather than a pass: a
-    remote command that exited without saying anything is not evidence that the
-    server is up, and reading it as one is the defect this module exists to
-    prevent. *)
+    The argument is the SSH call's own outcome rather than a sentence about it,
+    so it distinguishes a probe that ran and reported failure from a probe that
+    could not be run at all; both are rejections, and each error names which
+    happened. A {!Remote_exec.Command_failed} says the readiness check ran on
+    the server and failed — the probe always exits 0, so a non-zero exit is the
+    server reporting it could not get that far. Every other failure says the
+    check could not be run on the server, which is where it has always pointed
+    and is now the only place it does. Output that carries no marker — including
+    no output at all — is a rejection rather than a pass: a remote command that
+    exited without saying anything is not evidence that the server is up, and
+    reading it as one is the defect this module exists to prevent. *)
 
 val failure_message :
   ip_address:string ->
