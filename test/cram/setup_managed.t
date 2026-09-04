@@ -76,13 +76,14 @@ Every run now ends on the report of what the host holds, which this file takes
 apart elsewhere; here the run's own lines are the subject, so they are taken
 without it.
 
-  $ bondi-client setup 2>&1 | head -8
+  $ bondi-client setup 2>&1 | head -9
   Setting up the servers...
   Processing server: 127.0.0.1
   Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 127.0.0.1
   curl on server 127.0.0.1 supports the crontab command: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
   bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.1.0
+  No alloy is configured for server 127.0.0.1: /etc/bondi/alloy is not on the host
   Wrote secret environment file on server 127.0.0.1: /etc/bondi/gateway/env
   bondi-gateway container started on server 127.0.0.1: 
 
@@ -141,19 +142,27 @@ directory — which holds its secrets — deleted.
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
   > EOF
-  $ bondi-client setup 2>&1 | head -9
+  $ bondi-client setup 2>&1 | head -10
   Setting up the servers...
   Processing server: 127.0.0.1
   Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 127.0.0.1
   curl on server 127.0.0.1 supports the crontab command: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
   bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.1.0
+  No alloy is configured for server 127.0.0.1: /etc/bondi/alloy is not on the host
   Stopped bondi-gateway container on server 127.0.0.1
   Removed bondi-gateway container on server 127.0.0.1
   Removed config directory on server 127.0.0.1: /etc/bondi/gateway
 
   $ grep 'rm -rf' ssh-argv.log
+  sudo rm -rf '/etc/bondi/alloy'
   sudo rm -rf '/etc/bondi/gateway'
+
+The alloy directory goes on the same run, and nothing here declares alloy or
+runs it -- which is the point. That removal is planned from the configuration
+rather than from a container listing, so the credentials of a sidecar whose
+container was taken off the host by some other hand still leave with it. A
+removal that waited to see a container would send nothing here.
 
 A managed-container lookup that fails is not the same as a server with no
 managed containers. Setup stops and reports it rather than planning a run for a
@@ -288,13 +297,14 @@ old one on disk under a container that no longer references it.
   >     env_vars:
   >       TRADING_MODE: paper
   > EOF
-  $ bondi-client setup 2>&1 | head -8
+  $ bondi-client setup 2>&1 | head -9
   Setting up the servers...
   Processing server: 127.0.0.1
   Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 127.0.0.1
   curl on server 127.0.0.1 supports the crontab command: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
   bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.1.0
+  No alloy is configured for server 127.0.0.1: /etc/bondi/alloy is not on the host
   Wrote secret environment file on server 127.0.0.1: /etc/bondi/gateway/env
   bondi-gateway container started on server 127.0.0.1: 
 

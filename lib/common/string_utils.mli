@@ -45,3 +45,13 @@ val starts_with : prefix:string -> string -> bool
 
     An empty prefix is a prefix of everything, and a prefix longer than the
     value is a prefix of nothing. *)
+
+val has_control_char : string -> bool
+(** [has_control_char value] is whether [value] contains a C0 control character
+    or [DEL].
+
+    It is the rule the line-oriented formats Bondi writes are checked against: a
+    [KEY=VALUE] environment file has no quoting syntax, so a control character
+    in a value is not data but a second record. Callers reject rather than
+    escape, and each phrases its own message, because the value under inspection
+    is often a credential that must not appear in one. *)

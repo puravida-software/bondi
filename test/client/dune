@@ -17,6 +17,7 @@
   test_status_gather
   test_status_decode
   test_orchestrator_bind
+  test_alloy_commands
   test_ssh_tunnel
   test_ssh_multiplex
   test_docker_common)

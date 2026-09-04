@@ -109,6 +109,100 @@ let test_generate_services_only_with_exclusions () =
   check bool "has bondi.logs drop rule" true
     (contains ~needle:"bondi.logs" river)
 
+(* --- env_file_contents --- *)
+
+(* The generated config and the env file that feeds it are two halves of one
+   contract, so the expected variable set is read out of [generate]'s own output
+   rather than restated here: a name added to one half alone then reddens.
+
+   What this derivation does NOT cover: it sees a variable only where the River
+   text spells it [sys.env("NAME")]. A value Alloy picks up by any other route —
+   a command-line argument, a file it reads itself, a River builtin other than
+   [sys.env] — is invisible to it, and the drift claim above is bounded to that. *)
+let sys_env_references river =
+  let opener = "sys.env(\"" in
+  let len = String.length river in
+  let rec collect acc offset =
+    if offset >= len then List.rev acc
+    else
+      let rest = String.sub river offset (len - offset) in
+      match Bondi_common.String_utils.index_of ~needle:opener rest with
+      | None -> List.rev acc
+      | Some i -> (
+          let name_start = offset + i + String.length opener in
+          let after = String.sub river name_start (len - name_start) in
+          match String.index_opt after '"' with
+          | None -> List.rev acc
+          | Some j -> collect (String.sub after 0 j :: acc) (name_start + j + 1)
+          )
+  in
+  collect [] 0
+
+(* [KEY=VALUE] is the undelimited [field=value] shape a substring assertion
+   aliases on — ["...ID=1"] matches ["...ID=10"] — so the env file is parsed into
+   whole pairs and compared as a list instead. A line carrying no [=] is mapped
+   to a value that cannot be confused with an empty one, so a malformed line
+   fails legibly rather than as [("KEY", "")]. *)
+let env_file_entries contents =
+  String.split_on_char '\n' contents
+  |> List.filter (fun line -> line <> "")
+  |> List.map (fun line ->
+      match String.index_opt line '=' with
+      | None -> (line, "<line carries no '='>")
+      | Some i ->
+          ( String.sub line 0 i,
+            String.sub line (i + 1) (String.length line - i - 1) ))
+
+(* Every field is set explicitly rather than by [{ base_config with ... }]: the
+   collect mode, the labels and the exclusions all change what [generate] emits,
+   and an absence assertion inheriting one of them unseen is an absence that
+   might be the fixture's rather than the code's. *)
+let credential_config : R.config =
+  {
+    grafana_cloud_endpoint = "https://logs-prod-eu.grafana.net/loki/api/v1/push";
+    grafana_cloud_instance_id = "instance-9182736450";
+    grafana_cloud_api_key = "glc_notarealkey_0192837465";
+    collect = All;
+    labels = [];
+    excluded_containers = [];
+  }
+
+let test_env_file_contents_supplies_every_referenced_variable () =
+  let referenced = sys_env_references (R.generate credential_config) in
+  check (list string) "generate reads exactly these variables through sys.env"
+    [ "GRAFANA_CLOUD_INSTANCE_ID"; "GRAFANA_CLOUD_API_KEY" ]
+    referenced;
+  let declared =
+    List.map fst (env_file_entries (R.env_file_contents credential_config))
+  in
+  check (list string) "env file declares exactly the variables generate reads"
+    referenced declared
+
+let test_env_file_contents_carries_the_credential_values () =
+  check
+    (list (pair string string))
+    "each variable carries the value configured for it"
+    [
+      ("GRAFANA_CLOUD_INSTANCE_ID", "instance-9182736450");
+      ("GRAFANA_CLOUD_API_KEY", "glc_notarealkey_0192837465");
+    ]
+    (env_file_entries (R.env_file_contents credential_config))
+
+(* The absence arms below pass against an empty string and against a fixture that
+   stopped carrying credentials at all, so the affirmative arms come first and on
+   the same fixture: these values do reach the host, by the env file. *)
+let test_generated_config_contains_no_credential_value () =
+  let river = R.generate credential_config in
+  let env_file = R.env_file_contents credential_config in
+  check bool "env file carries the instance id" true
+    (contains ~needle:credential_config.grafana_cloud_instance_id env_file);
+  check bool "env file carries the api key" true
+    (contains ~needle:credential_config.grafana_cloud_api_key env_file);
+  check bool "generated config carries no instance id value" false
+    (contains ~needle:credential_config.grafana_cloud_instance_id river);
+  check bool "generated config carries no api key value" false
+    (contains ~needle:credential_config.grafana_cloud_api_key river)
+
 (* --- alloy fmt validation --- *)
 
 let run_alloy_fmt river_config =
@@ -142,7 +236,10 @@ let run_alloy_fmt river_config =
           Error
             (Printf.sprintf "alloy fmt exited %d:\n%s" code
                (Buffer.contents output))
-      | _ -> Error "alloy fmt killed/stopped")
+      | Unix.WSIGNALED signal ->
+          Error (Printf.sprintf "alloy fmt killed by signal %d" signal)
+      | Unix.WSTOPPED signal ->
+          Error (Printf.sprintf "alloy fmt stopped by signal %d" signal))
 
 let docker_available =
   let ic = Unix.open_process_in "docker info >/dev/null 2>&1 && echo ok" in
@@ -199,6 +296,15 @@ let () =
             test_generate_escapes_excluded_regex;
           test_case "services_only with exclusions" `Quick
             test_generate_services_only_with_exclusions;
+        ] );
+      ( "env_file_contents",
+        [
+          test_case "supplies every variable the config references" `Quick
+            test_env_file_contents_supplies_every_referenced_variable;
+          test_case "carries the credential values" `Quick
+            test_env_file_contents_carries_the_credential_values;
+          test_case "generated config contains no credential value" `Quick
+            test_generated_config_contains_no_credential_value;
         ] );
       ( "alloy fmt",
         [

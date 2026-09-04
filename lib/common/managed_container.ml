@@ -113,8 +113,6 @@ let rec first_duplicate_key seen = function
       if List.mem key seen then Some key
       else first_duplicate_key (key :: seen) rest
 
-let is_control c = Char.code c < 0x20 || Char.code c = 0x7f
-
 (* The secret env file is one KEY=VALUE per line and Docker's --env-file parser
    does no unquoting, so a control character in either half declares variables
    the operator did not write. Rejecting here rather than escaping at render
@@ -129,9 +127,10 @@ let validate_env_entry (key, value) =
   if
     String.length key = 0
     || String.contains key '='
-    || String.exists is_control key
+    || String_utils.has_control_char key
   then Error (Invalid_env_key key)
-  else if String.exists is_control raw_value then Error (Invalid_env_value key)
+  else if String_utils.has_control_char raw_value then
+    Error (Invalid_env_value key)
   else Ok ()
 
 let rec validate_env_entries = function

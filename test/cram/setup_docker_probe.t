@@ -76,7 +76,7 @@ the report's own reads, so every row reads as not found.
   Setting up the servers...
   Processing server: 127.0.0.1
   Error: could not read the Docker version, so Docker will not be installed: command failed (255): Connection closed by 10.0.0.1 port 22
-  setup stopped part-way through the Docker phase on server 127.0.0.1, so these phases did not run: network, ACME file, orchestrator.
+  setup stopped part-way through the Docker phase on server 127.0.0.1, so these phases did not run: network, ACME file, orchestrator, alloy.
   
   Server: 127.0.0.1
   
@@ -148,7 +148,7 @@ closed by 10.0.0.1 port 22" but 7.76.0 is required.
   [1]
   $ grep -A1 '^Error:' out.log
   Error: could not read the curl version on the server, so setup will not act on whether it can run the crontab command: command failed (255): Connection closed by 10.0.0.1 port 22
-  setup stopped part-way through the cron curl phase on server 127.0.0.1, so these phases did not run: ACME file, orchestrator.
+  setup stopped part-way through the cron curl phase on server 127.0.0.1, so these phases did not run: ACME file, orchestrator, alloy.
 
 The affirmative arm is the probe count again: curl was asked, so the refusal
 below is setup declining to act on an answer it never got rather than a run that
@@ -189,7 +189,7 @@ chown and chmod against a host that was never asked.
   [1]
   $ grep -A1 '^Error:' out.log
   Error: could not read whether /etc/traefik/acme/acme.json exists on the server, so setup will not act on whether it does: command failed (255): Connection closed by 10.0.0.1 port 22
-  setup stopped part-way through the ACME file phase on server 127.0.0.1, so these phases did not run: orchestrator.
+  setup stopped part-way through the ACME file phase on server 127.0.0.1, so these phases did not run: orchestrator, alloy.
 
 Nothing was written. The probe did run, so the absence below is the refusal to
 act on a reading nobody took rather than a phase that was never reached.

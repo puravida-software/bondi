@@ -16,9 +16,11 @@ let action_string = function
   | Setup.RemoveOrchestrator -> "RemoveOrchestrator"
   | Setup.RunServer -> "RunServer"
   | Setup.EnsureAlloyConfig -> "EnsureAlloyConfig"
+  | Setup.WriteAlloyEnv -> "WriteAlloyEnv"
   | Setup.RunAlloy -> "RunAlloy"
   | Setup.StopAlloy -> "StopAlloy"
   | Setup.RemoveAlloy -> "RemoveAlloy"
+  | Setup.CleanAlloyConfig -> "CleanAlloyConfig"
   | Setup.WriteManagedEnv spec ->
       "WriteManagedEnv " ^ Managed_container.name spec
   | Setup.RunManaged spec -> "RunManaged " ^ Managed_container.name spec
@@ -38,9 +40,11 @@ let is_ensure_network = function
   | Setup.RemoveOrchestrator
   | Setup.RunServer
   | Setup.EnsureAlloyConfig
+  | Setup.WriteAlloyEnv
   | Setup.RunAlloy
   | Setup.StopAlloy
   | Setup.RemoveAlloy
+  | Setup.CleanAlloyConfig
   | Setup.WriteManagedEnv _
   | Setup.RunManaged _
   | Setup.StopManaged _
@@ -62,8 +66,10 @@ let joins_network = function
   | Setup.StopOrchestrator
   | Setup.RemoveOrchestrator
   | Setup.EnsureAlloyConfig
+  | Setup.WriteAlloyEnv
   | Setup.StopAlloy
   | Setup.RemoveAlloy
+  | Setup.CleanAlloyConfig
   | Setup.WriteManagedEnv _
   | Setup.StopManaged _
   | Setup.RemoveManaged _
@@ -87,9 +93,11 @@ let is_managed = function
   | Setup.RemoveOrchestrator
   | Setup.RunServer
   | Setup.EnsureAlloyConfig
+  | Setup.WriteAlloyEnv
   | Setup.RunAlloy
   | Setup.StopAlloy
-  | Setup.RemoveAlloy ->
+  | Setup.RemoveAlloy
+  | Setup.CleanAlloyConfig ->
       false
 
 let check_managed_actions ~expected actions =
@@ -592,7 +600,11 @@ let test_plan_always_includes_ensure_docker () =
     ctx ~orchestrator:Setup.Orchestrator_absent ~docker_probe:docker_present ()
   in
   let actions = plan config context in
-  check bool "EnsureDocker is first" (List.hd actions = Setup.EnsureDocker) true
+  check bool "EnsureDocker is first"
+    (match actions with
+    | first :: _ -> first = Setup.EnsureDocker
+    | [] -> false)
+    true
 
 let test_plan_no_user_service_skips_acme () =
   let config =
@@ -688,6 +700,7 @@ let test_plan_exited_orchestrator_is_removed_before_running () =
         "EnsureNetwork bondi-network";
         "RemoveOrchestrator";
         "RunServer";
+        "CleanAlloyConfig";
       ]
     actions
 
@@ -711,6 +724,7 @@ let test_plan_running_orchestrator_is_removed_after_stopping () =
         "StopOrchestrator";
         "RemoveOrchestrator";
         "RunServer";
+        "CleanAlloyConfig";
       ]
     actions
 
@@ -767,6 +781,7 @@ let test_plan_action_order () =
         "StopOrchestrator";
         "RemoveOrchestrator";
         "RunServer";
+        "CleanAlloyConfig";
       ]
     actions
 
@@ -804,6 +819,7 @@ let test_plan_cron_only_no_acme () =
         "EnsureNetwork bondi-network";
         "RequireCronCurl";
         "RunServer";
+        "CleanAlloyConfig";
       ]
     actions
 
@@ -907,7 +923,7 @@ let test_setup_plan_ensure_network_precedes_joining_actions () =
      vacuously on a plan that starts no containers at all. *)
   check (list string) "plan starts containers"
     [ "RunServer"; "RunAlloy"; "RunManaged gateway" ]
-    (List.map (fun index -> action_string (List.nth actions index)) joining);
+    (actions |> List.filter joins_network |> List.map action_string);
   match indices_where is_ensure_network actions with
   | [ network_index ] ->
       check bool "EnsureNetwork precedes every joining action" true
@@ -1233,6 +1249,7 @@ let test_plan_alloy_declared_image_converges_like_the_default () =
         "StopAlloy";
         "RemoveAlloy";
         "EnsureAlloyConfig";
+        "WriteAlloyEnv";
         "RunAlloy";
       ]
     actions
@@ -1264,6 +1281,7 @@ let test_plan_alloy_stopped_is_removed_before_running () =
         "StopAlloy";
         "RemoveAlloy";
         "EnsureAlloyConfig";
+        "WriteAlloyEnv";
         "RunAlloy";
       ]
     (plan config context)
@@ -1284,7 +1302,13 @@ let test_plan_alloy_absent_runs_without_removing () =
   in
   check_actions
     ~expected:
-      [ "EnsureDocker"; ensure_network_action; "EnsureAlloyConfig"; "RunAlloy" ]
+      [
+        "EnsureDocker";
+        ensure_network_action;
+        "EnsureAlloyConfig";
+        "WriteAlloyEnv";
+        "RunAlloy";
+      ]
     (plan config context)
 
 (* Withdrawing alloy from the configuration must clear a stopped container too.
@@ -1304,6 +1328,131 @@ let test_plan_alloy_withdrawn_stopped_is_removed () =
   check_actions
     ~expected:
       [ "EnsureDocker"; ensure_network_action; "StopAlloy"; "RemoveAlloy" ]
+    (plan config context)
+
+(* The two branches that run alloy, as one fixture per host state so that a
+   claim about the plan's shape is made against both rather than against
+   whichever one happens to be enumerated. *)
+let alloy_run_branch_actions ~alloy_state =
+  let config =
+    make_config ~alloy:(Some minimal_alloy) ~user_service:None ~cron_jobs:None
+      ~version:"1.0.0" ()
+  in
+  let context =
+    ctx ~alloy_state
+      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+      ~docker_probe:docker_present ()
+  in
+  plan config context
+
+(* Where an action sits in a plan. A duplicate is its own failure rather than a
+   position: an action planned twice runs twice, and comparing the first
+   occurrence would report an ordering that holds for one of them. *)
+let index_of action actions =
+  match indices_where (fun candidate -> candidate = action) actions with
+  | [ index ] -> index
+  | [] -> fail (action_string action ^ " was not planned")
+  | _ :: _ :: _ -> fail (action_string action ^ " was planned more than once")
+
+(* The credentials file is written after the configuration that names the
+   variables it supplies and before the container that reads them, in both
+   branches that run alloy. A file written after the run is a container started
+   against credentials that are not on the host yet.
+
+   Stated as a relation rather than by re-enumerating the plan, which the two
+   cases above already do. An enumerated list is repaired by pasting in whatever
+   the plan now emits, so a change that quietly stopped writing the credentials
+   would be accepted there; it is not accepted here. *)
+let test_alloy_env_is_planned_before_the_run () =
+  List.iter
+    (fun (label, alloy_state) ->
+      let actions = alloy_run_branch_actions ~alloy_state in
+      let config_at = index_of Setup.EnsureAlloyConfig actions in
+      let env_at = index_of Setup.WriteAlloyEnv actions in
+      let run_at = index_of Setup.RunAlloy actions in
+      check bool
+        (label ^ ": credentials written after the config that names them")
+        true (config_at < env_at);
+      check bool
+        (label ^ ": credentials written before the container that reads them")
+        true (env_at < run_at))
+    [
+      ( "a stopped container",
+        alloy_ps ~state:"exited" ~image:Bondi_common.Defaults.alloy_image );
+      ("no container", Setup.alloy_state_of_ps_output "\n");
+    ]
+
+(* Withdrawing alloy from the configuration takes the credentials off the host
+   with it. Nothing new is planned for that: [RemoveAlloy] already deletes the
+   config directory whole, and the credentials file lives inside it -- which is
+   the relation this test pins. A later move of the file to a sibling path would
+   leave a withdrawn credential on disk with every other alloy test still
+   green. *)
+let test_withdrawn_alloy_still_removes_the_config_directory () =
+  let config =
+    make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
+  in
+  let context =
+    ctx
+      ~alloy_state:
+        (alloy_ps ~state:"exited" ~image:Bondi_common.Defaults.alloy_image)
+      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+      ~docker_probe:docker_present ()
+  in
+  let actions = plan config context in
+  check bool "the removal that carries the credentials off is planned"
+    (List.mem Setup.RemoveAlloy actions)
+    true;
+  check bool "no credentials are written for an alloy nothing declares"
+    (List.mem Setup.WriteAlloyEnv actions)
+    false;
+  check bool
+    (Setup.alloy_env_path ^ " is inside the directory the removal deletes")
+    true
+    (Bondi_common.String_utils.starts_with
+       ~prefix:(Setup.alloy_config_dir ^ "/")
+       Setup.alloy_env_path)
+
+(* The credentials also have to go when there is no container left to observe.
+   A bondi-alloy removed by any route other than bondi -- a hand-run [docker
+   rm], a prune, a rebuilt daemon -- leaves the env file behind and the listing
+   empty, so a removal planned from the listing plans nothing and the key stays
+   on the host for as long as the box lives. What says alloy is withdrawn is the
+   configuration, not the listing, and this is the arm that plans against it. *)
+let test_withdrawn_alloy_removes_the_directory_with_no_container_observed () =
+  let config =
+    make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
+  in
+  let context =
+    ctx
+      ~alloy_state:(Setup.alloy_state_of_ps_output "\n")
+      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+      ~docker_probe:docker_present ()
+  in
+  check_actions
+    ~expected:[ "EnsureDocker"; ensure_network_action; "CleanAlloyConfig" ]
+    (plan config context)
+
+(* A listing that never ran is not a host that has no alloy container: the probe
+   failed, and a removal issued over the same connection fails with it -- which
+   would stop the run before the phases below it, on a host that never declared
+   alloy at all. So the unknown stays tolerated here and the directory goes on
+   the next run that reads the listing. The affirmative arm is the case above:
+   the same config and the same fixture with the listing answered, which does
+   plan the removal, so this emptiness is caused by the unread listing rather
+   than by a fixture that stopped reaching the alloy branch. *)
+let test_withdrawn_alloy_plans_nothing_against_a_listing_that_never_ran () =
+  let config =
+    make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
+  in
+  let context =
+    ctx
+      ~alloy_state:(Setup.alloy_state_of_probe alloy_unreachable)
+      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+      ~docker_probe:docker_present ()
+  in
+  check_actions
+    ~expected:[ "EnsureDocker"; ensure_network_action ]
     (plan config context)
 
 (* ------------------------------------------------------------------------- *)
@@ -1409,6 +1558,7 @@ let test_plan_for_config_proceeds_when_probes_succeed () =
             "StopAlloy";
             "RemoveAlloy";
             "EnsureAlloyConfig";
+            "WriteAlloyEnv";
             "RunAlloy";
           ]
         actions
@@ -1674,6 +1824,15 @@ let () =
             test_plan_alloy_absent_runs_without_removing;
           test_case "withdrawal removes a stopped container" `Quick
             test_plan_alloy_withdrawn_stopped_is_removed;
+          test_case "the credentials file is written before the run" `Quick
+            test_alloy_env_is_planned_before_the_run;
+          test_case "withdrawal removes the directory holding the credentials"
+            `Quick test_withdrawn_alloy_still_removes_the_config_directory;
+          test_case "withdrawal removes the directory with no container seen"
+            `Quick
+            test_withdrawn_alloy_removes_the_directory_with_no_container_observed;
+          test_case "withdrawal plans nothing against an unread listing" `Quick
+            test_withdrawn_alloy_plans_nothing_against_a_listing_that_never_ran;
         ] );
       ( "alloy observation",
         [

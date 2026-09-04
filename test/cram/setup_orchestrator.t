@@ -95,6 +95,7 @@ holds.
   Network bondi-network is present on server 127.0.0.1
   ACME file permissions updated on server 127.0.0.1: /etc/traefik/acme/acme.json
   bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.10.1
+  No alloy is configured for server 127.0.0.1: /etc/bondi/alloy is not on the host
   
   Server: 127.0.0.1
   
@@ -127,9 +128,11 @@ request to the health endpoint.
   1
 
 An orchestrator that never answers fails the setup and reports the server's own
-account of why, rather than printing success. It was the last phase of this
-plan, so the report says that nothing after it was skipped rather than staying
-silent about the question.
+account of why, rather than printing success. The alloy phase follows it even
+here, where nothing declares alloy: the config directory is removed from what
+the configuration says rather than from what a container listing shows, so the
+report has a skipped phase to name rather than staying silent about the
+question.
 
 The run then reports the host itself, which is the reading this failure used to
 need a human for: the container is on the box and not serving, and the source
@@ -153,7 +156,7 @@ phases did not run; this one says what is on the box now, and both are printed.
   --- last 50 log lines ---
   Error loading shared library libzstd.so.1: No such file or directory (needed by /usr/local/bin/bondi-server)
   The container was left in place so it can be inspected: run `docker logs bondi-orchestrator` on 127.0.0.1. To restore service, set bondi_server.version in bondi.yaml back to a version known to run on this host and run `bondi setup` again.
-  setup stopped part-way through the orchestrator phase on server 127.0.0.1, which was the last one, so no phase was skipped.
+  setup stopped part-way through the orchestrator phase on server 127.0.0.1, so these phases did not run: alloy.
   
   Server: 127.0.0.1
   

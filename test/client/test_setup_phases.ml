@@ -43,9 +43,11 @@ let test_phase_of_each_action_is_named () =
       (Setup.RemoveOrchestrator, "Orchestrator");
       (Setup.RunServer, "Orchestrator");
       (Setup.EnsureAlloyConfig, "Alloy");
+      (Setup.WriteAlloyEnv, "Alloy");
       (Setup.RunAlloy, "Alloy");
       (Setup.StopAlloy, "Alloy");
       (Setup.RemoveAlloy, "Alloy");
+      (Setup.CleanAlloyConfig, "Alloy");
       (Setup.WriteManagedEnv spec, "Managed");
       (Setup.RunManaged spec, "Managed");
       (Setup.StopManaged "gateway", "Managed");

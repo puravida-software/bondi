@@ -181,9 +181,11 @@ type action =
   | RemoveOrchestrator
   | RunServer
   | EnsureAlloyConfig
+  | WriteAlloyEnv
   | RunAlloy
   | StopAlloy
   | RemoveAlloy
+  | CleanAlloyConfig
   | WriteManagedEnv of Managed_container.t
   | RunManaged of Managed_container.t
   | StopManaged of string
@@ -205,9 +207,11 @@ let phase_of_action : action -> Setup_phases.phase = function
   | RunServer ->
       Setup_phases.Orchestrator
   | EnsureAlloyConfig
+  | WriteAlloyEnv
   | RunAlloy
   | StopAlloy
-  | RemoveAlloy ->
+  | RemoveAlloy
+  | CleanAlloyConfig ->
       Setup_phases.Alloy
   | WriteManagedEnv _
   | RunManaged _
@@ -356,6 +360,208 @@ let orchestrator_restart_convergence ~expected observed =
             observed = got;
             command = orchestrator_restart_update_command ~policy:expected;
           }
+
+(* The mode Bondi declares for the River config file, as one named value so that
+   the command that writes it and the expectation the read-back is checked
+   against cannot drift apart: a file written at one mode and asserted against
+   another fails every run, and two values that drift together fail none.
+
+   0640 rather than 0600: the file holds no credentials -- the generated
+   configuration reads them through sys.env references, which is what
+   Alloy_river's interface says it emits -- so this is posture rather than
+   secrecy, and 0640 is already what two of the three boxes were narrowed to out
+   of band. Declaring the same value makes a converging setup leave those boxes
+   where they are instead of undoing the fix in the other direction. *)
+let alloy_config_declared_mode = "0640"
+let alloy_config_dir = "/etc/bondi/alloy"
+let alloy_config_path = alloy_config_dir ^ "/config.alloy"
+
+(* The file the Grafana Cloud credentials live in on the host. It sits inside
+   [alloy_config_dir] deliberately: both [RemoveAlloy] and [CleanAlloyConfig]
+   delete that directory whole, so an alloy withdrawn from the configuration
+   takes its credentials off the host whether or not a container was left to
+   observe. Moving this to a sibling path would leave a withdrawn credential
+   behind with nothing failing. *)
+let alloy_env_path = alloy_config_dir ^ "/env"
+
+(* Creates the River config file at the declared mode and takes its contents
+   from standard input, so they never reach argv.
+
+   The old file is removed rather than truncated. Measured 2026-09-03 on Linux
+   7.2.1 with GNU bash 5.3.15 and coreutils 9.11: a file already at 0644,
+   written by `sh -c 'umask 027; cat > f'`, is left at 0644. A redirect onto an
+   existing file consults no umask because it creates no file -- which is how a
+   box narrowed by hand stayed narrow and a box at 0644 stayed wide, with the
+   mode decided by whichever shell got there first rather than by Bondi.
+
+   Removing first is also what stops the write from following a symlink planted
+   at the path, which the chmod would otherwise apply to the symlink's target.
+
+   umask 077 covers the instant between the file's creation and the chmod: a
+   chmod that did not run leaves the file tighter than declared rather than at
+   the host's umask. It is set after the mkdir so that the directory keeps the
+   0755 it has today -- the Alloy container bind-mounts the file through it.
+
+   The steps are chained with && rather than `;` because `sh -c` exits with the
+   status of the last command it ran. Under `;` that is the chmod, which
+   succeeds on a file cat created and then failed to fill -- so a connection
+   dropped mid-transfer would leave a partial file, report success, and pass the
+   mode read-back, because the mode really was applied. *)
+let alloy_config_write_command ~mode =
+  Printf.sprintf "sudo sh -c %s"
+    (Filename.quote
+       (Printf.sprintf
+          "mkdir -p %s && rm -f %s && umask 077 && cat > %s && chmod %s %s"
+          (Filename.quote alloy_config_dir)
+          (Filename.quote alloy_config_path)
+          (Filename.quote alloy_config_path)
+          mode
+          (Filename.quote alloy_config_path)))
+
+(* The mode Bondi declares for the credentials file, as one named value for the
+   reason [alloy_config_declared_mode] gives: the command that writes it and any
+   expectation it is later checked against must be one value, not two spellings
+   that agree today. It is written at the width `stat -c %04a` reports, so a
+   read-back compares equal strings -- `600` never equals `0600`, and `chmod`
+   reads the two identically.
+
+   0600 rather than the config file's 0640: this file holds the Grafana Cloud
+   key itself. *)
+let alloy_env_declared_mode = "0600"
+
+(* Creates the Grafana Cloud credentials file at the declared mode and takes its
+   contents from standard input, so the key reaches no argv, no process listing
+   on the host, and no container's arguments.
+
+   The old file is removed rather than truncated for the reason
+   [alloy_config_write_command] records -- a redirect onto an existing file
+   creates nothing, so it consults no umask, and the mode stays whatever the
+   file already had. On a credentials file that is the difference between 0600
+   and whatever a previous hand left, and removing first is also what stops the
+   write from following a symlink planted at the path, which the chmod would
+   otherwise apply to the symlink's target.
+
+   umask 077 covers the instant between the file's creation and the chmod. The
+   file is created inside [alloy_config_dir] so that RemoveAlloy's recursive
+   delete carries it off when alloy is withdrawn.
+
+   The steps are chained with && for the reason [alloy_config_write_command]
+   records, and it bites harder here: a truncated GRAFANA_CLOUD_API_KEY reported
+   as a success is an Alloy that starts, reports itself healthy and ships
+   nothing, which is what {!Bondi_common.Alloy_river.env_file_contents} names as
+   the failure with no symptom at the point it is introduced. *)
+let alloy_env_write_command ~mode =
+  Printf.sprintf "sudo sh -c %s"
+    (Filename.quote
+       (Printf.sprintf
+          "mkdir -p %s && rm -f %s && umask 077 && cat > %s && chmod %s %s"
+          (Filename.quote alloy_config_dir)
+          (Filename.quote alloy_env_path)
+          (Filename.quote alloy_env_path)
+          mode
+          (Filename.quote alloy_env_path)))
+
+(* What the host reports the config file's mode as, so setup can check that what
+   it asked for is what it got rather than assuming the write took.
+
+   `stat` exits non-zero on a file it cannot read, and that is the same channel a
+   dropped connection arrives on, so the two would be one value. The probe says
+   which on standard output and always exits zero, leaving the exit status to
+   mean "the command could be run on that host" -- the separation
+   acme_probe_command already draws.
+
+   %04a rather than %a: `stat -c %a` prints 640 for a file at 0640, and the
+   declared mode is written with four digits. Rendering at the width the
+   declaration uses is what lets one constant feed both the write and the
+   comparison. *)
+let alloy_config_mode_unreadable_marker = "BONDI_ALLOY_MODE_UNREADABLE"
+
+let alloy_config_mode_command =
+  Printf.sprintf "sudo stat -c %%04a %s 2>/dev/null || echo %s"
+    (Filename.quote alloy_config_path)
+    alloy_config_mode_unreadable_marker
+
+(* Why the mode could not be read, as data rather than as a sentence. The two
+   cases are genuinely different -- a host that said nothing has no answer to
+   quote, a host that answered the marker does -- and the caller that words the
+   failure is the one that knows which file and which server it is talking
+   about, so it words it once. orchestrator_restart_convergence above draws the
+   same line for the same reason. *)
+type alloy_mode_unreadable =
+  | Alloy_mode_not_reported
+  | Alloy_mode_read_refused of { observed : string }
+
+(* What reading the mode back established. Unreadable is not a difference and
+   not a match: there is nothing to compare against, so reporting it as a wrong
+   mode states something about the host the host never said, and reading it as
+   agreement is the silent success the read-back exists to prevent. *)
+type alloy_config_mode =
+  | Alloy_mode_applied
+  | Alloy_mode_differs of { observed : string }
+  | Alloy_mode_unreadable of alloy_mode_unreadable
+
+let alloy_config_mode_of_probe ~expected output =
+  (* single_line rather than trim: what a host writes on standard output is free
+     text and arrives on however many lines the host chose -- a sudo warning
+     ahead of the reading is the ordinary case. Flattening it here rather than
+     at each place that renders it is what stops the tail of a two-line answer
+     from landing in the middle of a caller's sentence, and it is the same
+     reshaping status_report applies to every other message off a host. *)
+  let got = Bondi_common.String_utils.single_line output in
+  (* Empty output is what an ssh stub with no arm for the command, a command
+     whose output never arrived and a host that answered nothing all produce.
+     None of them is a mode, and none of them leaves anything to quote. *)
+  if got = "" then Alloy_mode_unreadable Alloy_mode_not_reported
+  else if
+    Bondi_common.String_utils.contains
+      ~needle:alloy_config_mode_unreadable_marker got
+  then Alloy_mode_unreadable (Alloy_mode_read_refused { observed = got })
+  else if got = expected then Alloy_mode_applied
+  else Alloy_mode_differs { observed = got }
+
+(* The `docker run` that starts the sidecar. The Grafana Cloud credentials are
+   read out of the file [WriteAlloyEnv] wrote rather than interpolated here.
+   Interpolated, they were in this client's ssh command line and in the host's
+   process listing for as long as the run took. Those two copies are what the
+   file takes away, and they are what the cram argv assertions pin.
+
+   The Engine's own record is deliberately unchanged. The Docker CLI expands
+   --env-file on the client, into the container's environment, before the create
+   call ever leaves it, so the key sits in `docker inspect bondi-alloy` byte for
+   byte as it did under -e. [observed -- 2026-09-03: `docker run -d --env-file
+   f` left the file's variables in .Config.Env unchanged. The expansion happens
+   in the client, so the reading is against docker CLI 29.7.2 and it is the
+   client version that decides it.]
+   Anything with root on the box reads the file itself anyway. Nothing here
+   claims otherwise, and a reader who checks `docker inspect` and finds the key
+   should not read that as the change having done nothing -- what closes is the
+   process table and the ssh invocation, not the Engine.
+
+   Both variables move, not only the key. The generated River configuration reads
+   both through sys.env, so supplying one through the file and one through -e
+   would split a single contract across two mechanisms, with nothing failing when
+   the two disagree.
+
+   The paths are the module's own constants rather than literals spelled a second
+   time: the file this command reads must be the file the write created, and a
+   run command pointing at a path nothing wrote starts a sidecar that ships
+   nothing while every half of the pair still looks right on its own. *)
+(* Withdrawing alloy from the configuration takes its files off the host. It is
+   a builder rather than a literal in the interpret arm for the reason the write
+   commands are: the directory it deletes has to be the directory they wrote to,
+   and a removal naming a directory nothing writes to leaves a withdrawn
+   credential on disk with nothing failing. *)
+let alloy_remove_config_command =
+  Printf.sprintf "sudo rm -rf %s" (Filename.quote alloy_config_dir)
+
+let alloy_run_command ~image =
+  Printf.sprintf
+    "docker run -d --name bondi-alloy --restart %s -v \
+     /var/run/docker.sock:/var/run/docker.sock:ro -v %s:%s:ro --label \
+     bondi.managed=true --label bondi.type=infrastructure --label \
+     bondi.logs=false --env-file %s %s run %s"
+    Bondi_common.Defaults.bondi_restart_policy alloy_config_path
+    alloy_config_path alloy_env_path (Filename.quote image) alloy_config_path
 
 let orchestrator_version_of_image image =
   let prefix = "mlopez1506/bondi-server:" in
@@ -644,16 +850,30 @@ let plan (config : Config_file.t) ~(specs : Managed_container.t list)
   let alloy =
     match (config.alloy, ctx.alloy_state) with
     | Some _, Alloy_present ->
-        [ StopAlloy; RemoveAlloy; EnsureAlloyConfig; RunAlloy ]
-    | Some _, Alloy_absent -> [ EnsureAlloyConfig; RunAlloy ]
+        [ StopAlloy; RemoveAlloy; EnsureAlloyConfig; WriteAlloyEnv; RunAlloy ]
+    | Some _, Alloy_absent -> [ EnsureAlloyConfig; WriteAlloyEnv; RunAlloy ]
     (* Withdrawn from configuration. A stopped container has to go too, or the
        name stays taken and the wedge outlives the withdrawal. *)
     | None, Alloy_present -> [ StopAlloy; RemoveAlloy ]
-    | None, Alloy_absent -> []
+    (* Withdrawn with nothing left to observe. A container removed by any route
+       other than bondi -- a hand-run [docker rm], a prune, a rebuilt daemon --
+       takes the listing's only evidence with it and leaves the credentials file
+       behind, so a removal planned from the listing plans nothing and the key
+       outlives the configuration that declared it. What says alloy is withdrawn
+       is the configuration; the directory removal is planned from that, which
+       is why it is here and not conditional on a container. The branch above
+       does not repeat it: [RemoveAlloy] deletes the same directory, and
+       planning both would delete it twice. *)
+    | None, Alloy_absent -> [ CleanAlloyConfig ]
     (* Nothing is planned against a listing that never ran, whether alloy is
        declared or not. With it declared [plan_for_config] turns this into an
-       error; without it there was nothing to converge anyway, so the run
-       carries on to the phases that follow. *)
+       error. Withdrawn, the directory removal above would be as well founded
+       here -- what says alloy is gone is the configuration, which was read --
+       but the listing failed on this host's own connection, so a removal issued
+       over the same connection fails with it and stops the run before every
+       phase below, on a box that never declared alloy at all. The unknown stays
+       tolerated and the directory goes on the next run that reads the
+       listing. *)
     | Some _, Alloy_undetermined _
     | None, Alloy_undetermined _ ->
         []
@@ -1001,22 +1221,93 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
               Bondi_common.Alloy_river.generate
                 (alloy_river_config config alloy)
             in
-            let config_dir = "/etc/bondi/alloy" in
-            let config_path = config_dir ^ "/config.alloy" in
+            (* The config travels on standard input rather than inside a
+               heredoc in the command, which is what lets the write be a single
+               root-owned command that also sets the mode.
+
+               Both numbers below were measured rather than reasoned about,
+               because run_command_with_input drains no output while the write
+               is in flight and a payload larger than the pipe buffer deadlocks
+               it. A generated config with three labels and an excluded
+               container is 1041 bytes; an unadjusted pipe on this platform
+               holds 65536, read from F_GETPIPE_SZ rather than from the
+               /proc ceiling, which reports the maximum a pipe may be raised to
+               and not the capacity it has. The config grows only with the
+               declared label map -- excluded_containers_from_config yields at
+               most one name -- so reaching the buffer would take on the order
+               of a thousand declared labels. *)
             let* _ =
-              remote_run ~user ~host ~key_path
-                (Printf.sprintf "sudo mkdir -p %s" config_dir)
+              remote_run_with_input ~user ~host ~key_path ~input:river_config
+                (alloy_config_write_command ~mode:alloy_config_declared_mode)
             in
-            let* _ =
-              remote_run ~user ~host ~key_path
-                (Printf.sprintf
-                   "cat > %s << '__BONDI_ALLOY_CFG_EOF__'\n\
-                    %s__BONDI_ALLOY_CFG_EOF__"
-                   config_path river_config)
+            (* Asking for a mode is not applying one, so the file is read back
+               before the run says it wrote it. A write whose chmod was refused,
+               or that landed somewhere a later phase does not look at, is
+               otherwise a clean setup over a file at the host's umask. *)
+            let* probe_output =
+              remote_run ~user ~host ~key_path alloy_config_mode_command
+            in
+            let* () =
+              match
+                alloy_config_mode_of_probe ~expected:alloy_config_declared_mode
+                  probe_output
+              with
+              | Alloy_mode_applied -> Ok ()
+              | Alloy_mode_differs { observed } ->
+                  Error
+                    (Printf.sprintf
+                       "%s on server %s is mode %s after being written at %s \
+                        -- refusing to report success on a posture that was \
+                        not applied"
+                       alloy_config_path ip_address observed
+                       alloy_config_declared_mode)
+              | Alloy_mode_unreadable reason ->
+                  let detail =
+                    match reason with
+                    | Alloy_mode_not_reported -> "the host reported nothing"
+                    | Alloy_mode_read_refused { observed } ->
+                        Printf.sprintf
+                          "the host could not read it and answered %s" observed
+                  in
+                  Error
+                    (Printf.sprintf
+                       "could not read back the mode of %s on server %s after \
+                        writing it at %s, so whether the mode was applied is \
+                        unknown: %s"
+                       alloy_config_path ip_address alloy_config_declared_mode
+                       detail)
             in
             print_endline
               (Printf.sprintf "Alloy config written on server %s: %s" ip_address
-                 config_path);
+                 alloy_config_path);
+            Ok ())
+    | WriteAlloyEnv -> (
+        match config.alloy with
+        | None -> Ok ()
+        | Some alloy ->
+            let contents =
+              Bondi_common.Alloy_river.env_file_contents
+                (alloy_river_config config alloy)
+            in
+            (* The credentials travel on standard input, so they appear in no
+               command line here, in no process listing on the host, and in no
+               container's arguments once the run command references the file
+               instead of interpolating them.
+
+               The payload is two short lines, far inside the 65536-byte pipe
+               that run_command_with_input measures against -- it drains no
+               output while the write is in flight, so a payload larger than the
+               buffer would deadlock. *)
+            let* _ =
+              remote_run_with_input ~user ~host ~key_path ~input:contents
+                (alloy_env_write_command ~mode:alloy_env_declared_mode)
+            in
+            (* The path, not the contents. A message that quoted what it wrote
+               would put the key back in the place this arm exists to take it
+               out of. *)
+            print_endline
+              (Printf.sprintf "Wrote Alloy credentials file on server %s: %s"
+                 ip_address alloy_env_path);
             Ok ())
     | RunAlloy -> (
         match config.alloy with
@@ -1026,20 +1317,9 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
               Option.value alloy.image
                 ~default:Bondi_common.Defaults.alloy_image
             in
-            let run_cmd =
-              Printf.sprintf
-                "docker run -d --name bondi-alloy --restart %s -v \
-                 /var/run/docker.sock:/var/run/docker.sock:ro -v \
-                 /etc/bondi/alloy/config.alloy:/etc/bondi/alloy/config.alloy:ro \
-                 --label bondi.managed=true --label bondi.type=infrastructure \
-                 --label bondi.logs=false -e GRAFANA_CLOUD_INSTANCE_ID=%s -e \
-                 GRAFANA_CLOUD_API_KEY=%s %s run /etc/bondi/alloy/config.alloy"
-                Bondi_common.Defaults.bondi_restart_policy
-                (Filename.quote alloy.grafana_cloud.instance_id)
-                (Filename.quote alloy.grafana_cloud.api_key)
-                image
+            let* output =
+              remote_run ~user ~host ~key_path (alloy_run_command ~image)
             in
-            let* output = remote_run ~user ~host ~key_path run_cmd in
             print_endline
               (Printf.sprintf "bondi-alloy container started on server %s: %s"
                  ip_address (String.trim output));
@@ -1052,12 +1332,17 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
         Ok ()
     | RemoveAlloy ->
         let* _ = run_remote_docker ~user ~host ~key_path "rm bondi-alloy" in
-        let* _ =
-          remote_run ~user ~host ~key_path "sudo rm -rf /etc/bondi/alloy"
-        in
+        let* _ = remote_run ~user ~host ~key_path alloy_remove_config_command in
         print_endline
           (Printf.sprintf
              "Removed bondi-alloy container and config on server %s" ip_address);
+        Ok ()
+    | CleanAlloyConfig ->
+        let* _ = remote_run ~user ~host ~key_path alloy_remove_config_command in
+        print_endline
+          (Printf.sprintf
+             "No alloy is configured for server %s: %s is not on the host"
+             ip_address alloy_config_dir);
         Ok ()
     | WriteManagedEnv spec ->
         let env_path = Managed_container.env_file_path spec in

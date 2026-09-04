@@ -36,3 +36,14 @@ val generate : config -> string
       via [env("GRAFANA_CLOUD_INSTANCE_ID")] and [env("GRAFANA_CLOUD_API_KEY")]
       — credentials are not baked into the config file; they must be provided as
       environment variables to the Alloy container *)
+
+val env_file_contents : config -> string
+(** The environment file the generated River configuration reads its Grafana
+    Cloud credentials from: one [KEY=VALUE] line for each variable {!generate}
+    references through [sys.env].
+
+    It lives beside {!generate} because the two are halves of one contract. A
+    variable named in one and not the other is a container that starts, reports
+    itself healthy, and ships nothing — Alloy resolves a missing [sys.env] to
+    the empty string rather than refusing to run, so the drift has no symptom at
+    the point it is introduced. *)

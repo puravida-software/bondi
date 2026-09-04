@@ -632,6 +632,79 @@ alloy:
             (Bondi_common.String_utils.contains ~needle:"invalid_mode" msg)
       | Ok _ -> fail "expected error for invalid collect mode")
 
+let alloy_credential_yaml ~instance_id ~api_key =
+  Printf.sprintf
+    {|bondi_server:
+  version: 0.1.0
+
+alloy:
+  grafana_cloud:
+    instance_id: %s
+    api_key: %s
+    endpoint: https://logs.example.com/push
+|}
+    instance_id api_key
+
+(* [docker run --env-file] is line-oriented, so a newline inside a credential
+   ends the record and the remainder declares a second variable. The [=] case is
+   the other half of the same parser rule: everything after the first [=] is the
+   value, to the end of the line, so an [=] inside a value reshapes nothing and
+   is accepted. *)
+let test_alloy_credential_newline_rejected () =
+  Unix.putenv "SSH_PRIVATE_KEY_CONTENTS" "ssh-key";
+  Unix.putenv "SSH_PRIVATE_KEY_PASS" "ssh-pass";
+  let yaml =
+    alloy_credential_yaml ~instance_id:{|"123"|}
+      ~api_key:{|"glc_secret\nGRAFANA_CLOUD_INSTANCE_ID=999"|}
+  in
+  with_temp_config yaml (fun () ->
+      match Config_file.read () with
+      | Ok _ -> fail "expected a newline in the api key to be rejected"
+      | Error message ->
+          check bool
+            (Printf.sprintf "error names the variable, got: %s" message)
+            true
+            (Bondi_common.String_utils.contains ~needle:"GRAFANA_CLOUD_API_KEY"
+               message);
+          check bool
+            (Printf.sprintf "error does not echo the credential, got: %s"
+               message)
+            false
+            (Bondi_common.String_utils.contains ~needle:"glc_secret" message))
+
+let test_alloy_instance_id_newline_rejected () =
+  Unix.putenv "SSH_PRIVATE_KEY_CONTENTS" "ssh-key";
+  Unix.putenv "SSH_PRIVATE_KEY_PASS" "ssh-pass";
+  let yaml =
+    alloy_credential_yaml ~instance_id:{|"123\nGRAFANA_CLOUD_API_KEY=leaked"|}
+      ~api_key:{|"abc"|}
+  in
+  with_temp_config yaml (fun () ->
+      match Config_file.read () with
+      | Ok _ -> fail "expected a newline in the instance id to be rejected"
+      | Error message ->
+          check bool
+            (Printf.sprintf "error names the variable, got: %s" message)
+            true
+            (Bondi_common.String_utils.contains
+               ~needle:"GRAFANA_CLOUD_INSTANCE_ID" message))
+
+let test_alloy_credential_equals_sign_accepted () =
+  Unix.putenv "SSH_PRIVATE_KEY_CONTENTS" "ssh-key";
+  Unix.putenv "SSH_PRIVATE_KEY_PASS" "ssh-pass";
+  let yaml =
+    alloy_credential_yaml ~instance_id:{|"123"|} ~api_key:{|"glc_eyJvIjoiMT=="|}
+  in
+  with_temp_config yaml (fun () ->
+      match Config_file.read () with
+      | Error message -> fail message
+      | Ok config -> (
+          match config.alloy with
+          | None -> fail "expected alloy config"
+          | Some alloy ->
+              check string "api key kept verbatim" "glc_eyJvIjoiMT=="
+                alloy.grafana_cloud.api_key))
+
 let managed_yaml body =
   {|bondi_server:
   version: 0.1.0
@@ -949,6 +1022,12 @@ let () =
           test_case "alloy collect default" `Quick test_alloy_collect_default;
           test_case "alloy labels parse" `Quick test_alloy_labels_parse;
           test_case "alloy collect invalid" `Quick test_alloy_collect_invalid;
+          test_case "alloy api key with a newline" `Quick
+            test_alloy_credential_newline_rejected;
+          test_case "alloy instance id with a newline" `Quick
+            test_alloy_instance_id_newline_rejected;
+          test_case "alloy api key with an equals sign" `Quick
+            test_alloy_credential_equals_sign_accepted;
         ] );
       ( "managed_containers",
         [
