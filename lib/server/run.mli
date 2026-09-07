@@ -6,11 +6,12 @@
     body are what reach cron's mail, and the payload's sinks are what reach the
     operator's alerting.
 
-    Everything below {!route} is exposed for one of two reasons — it is part of
-    the wire contract, or it is a pure seam the tests reach because the code
-    around it needs a Docker client and an Eio net that a unit test has no
-    business constructing. Nothing here is intended for another module to call
-    in production. *)
+    Everything below {!route} is exposed for one of three reasons — it is
+    {!run}, which is the endpoint's whole decision with no transport named; it
+    is part of the wire contract; or it is a pure seam the tests reach because
+    the code around it needs a Docker client and an Eio net that a unit test has
+    no business constructing. Nothing but {!run} and {!route} is intended for
+    another module to call in production. *)
 
 type run_payload = {
   job : string;
@@ -36,29 +37,6 @@ val run_payload_of_yojson : Yojson.Safe.t -> (run_payload, string) result
 val run_response_to_yojson : run_response -> Yojson.Safe.t
 (** Encode a run result for the HTTP response. *)
 
-(** Why a run request did not produce a result. The distinction is what the
-    endpoint's status is chosen from, so it is a variant rather than a string:
-    the caller's mistake and Bondi's own fault are not the same event and must
-    not be reported as though they were. *)
-type run_error =
-  | Invalid_request of string
-      (** The request could not be acted on as written — a body that does not
-          decode, or an image with no tag. *)
-  | Orchestrator_failure of string
-      (** Bondi could not carry out a well-formed request. *)
-
-val run_error_message : run_error -> string
-(** The human-readable half of a failure, without its classification. Never
-    contains a value taken from the rejected payload: run payloads carry
-    environment variables and sink URLs that may embed credentials, and this
-    text is returned over HTTP and mailed by cron. *)
-
-val status_of_run_error : run_error -> Dream.status
-(** The HTTP status for a failure class: 400 for {!Invalid_request}, 500 for
-    {!Orchestrator_failure}. Kept next to the variant so that adding a class
-    forces a status to be chosen for it, rather than defaulting inside the
-    handler. *)
-
 val outcome_of_result : (int, string) result -> Bondi_common.Alert.outcome
 (** Classify how a run ended for alerting: a container that completed reports
     its exit code, and a failure before or at start reports as never having run.
@@ -69,7 +47,6 @@ val plan_for_payload :
   Bondi_common.Alert.outcome ->
   timestamp:float ->
   Bondi_common.Alert.dispatch option
-
 (** Route an outcome to the sinks the payload configured, purely. A job that
     configures no severity map falls to the default one and a job that
     configures no sinks routes nowhere, so an unconfigured job plans no alert
@@ -113,7 +90,7 @@ val prepare :
     payload:Bondi_common.Alert.payload ->
     unit) ->
   string ->
-  (run_payload * string, run_error) result
+  (run_payload * string, Handler_error.t) result
 (** Decode a request body and require a tagged image, before anything is
     started. Returns the payload alongside the fully-qualified image.
 
@@ -126,25 +103,60 @@ val prepare :
 val response_of_run_result :
   warning:string option ->
   (int, string) result ->
-  (run_response, run_error) result
+  (run_response, Handler_error.t) result
 (** Classify the container lifecycle result. A container that ran to completion
     is a result whatever its exit code — a failing job is a successful run
     report — while a Docker-level failure is Bondi's fault, not the caller's. *)
 
-val route :
-  clock:'clock ->
+val run :
+  clock:'clock Eio.Time.clock ->
   client:Docker.Client.t ->
-  net:([> [> `Generic ] Eio.Net.ty ] as 'net) Eio.Resource.t ->
+  net:'net Eio.Net.t ->
   deliver:
-    (net:'net Eio.Resource.t ->
-    clock:'clock ->
+    (net:'net Eio.Net.t ->
+    clock:'clock Eio.Time.clock ->
+    targets:Bondi_common.Alert.sink list ->
+    payload:Bondi_common.Alert.payload ->
+    unit) ->
+  string ->
+  (run_response, Handler_error.t) result
+(** What the endpoint decides, naming no transport, so a caller holding no HTTP
+    request can reach it. Takes the request body as written and answers the
+    response or the failure.
+
+    [deliver] is taken in the shape the server builds once at startup, and the
+    net and the clock it needs are bound here rather than by the caller: a
+    caller that had to pre-bind them would be rebuilding part of the endpoint,
+    which is what this signature exists to make unnecessary.
+
+    Alert delivery is a bounded, best-effort side channel run after the outcome
+    is recorded and the container is cleaned up: it cannot change the answer,
+    though being synchronous it may delay it by up to one timeout per sink. A
+    body that did not decode names no job and reaches no sink; a body that did
+    alerts even when it is refused before anything starts.
+
+    Unlike {!Status.report} and {!Deploy.deploy}, this catches no exception. An
+    exception escaping it is answered by the web framework, as it always has
+    been; classifying it here would change the body the caller reads.
+
+    Precondition: it runs the container through Eio -- [Cohttp_eio] under an
+    [Eio.Switch] -- so it must be called from inside an Eio fiber, which in this
+    process means under [Lwt_eio.with_event_loop]. {!route} calls it straight
+    from its Lwt handler, which already sits under that event loop; a caller
+    that does not must supply the fiber itself, with [Eio_main.run] or
+    [Lwt_eio.run_eio]. *)
+
+val route :
+  clock:'clock Eio.Time.clock ->
+  client:Docker.Client.t ->
+  net:'net Eio.Net.t ->
+  deliver:
+    (net:'net Eio.Net.t ->
+    clock:'clock Eio.Time.clock ->
     targets:Bondi_common.Alert.sink list ->
     payload:Bondi_common.Alert.payload ->
     unit) ->
   Dream.route
-(** The [POST /api/v1/run] route.
-
-    Alert delivery is a bounded, best-effort side channel run after the outcome
-    is recorded: it cannot change the status or body this route returns, though
-    being synchronous it may delay the response by up to one timeout per sink.
-*)
+(** The [POST /api/v1/run] route. It reads the request body, dispatches to
+    {!run}, and encodes the answer as JSON or as the failure's own status and
+    message. *)

@@ -7,6 +7,10 @@ let pp_failure fmt (f : Remote_exec.failure) =
   match f with
   | Remote_exec.Not_configured { server } ->
       Format.fprintf fmt "Not_configured { server = %S }" server
+  | Remote_exec.Ssh_not_found { program } ->
+      Format.fprintf fmt "Ssh_not_found { program = %S }" program
+  | Remote_exec.Local_failure { reason } ->
+      Format.fprintf fmt "Local_failure { reason = %S }" reason
   | Remote_exec.Ssh_failed { code; output } ->
       Format.fprintf fmt "Ssh_failed { code = %d; output = %S }" code output
   | Remote_exec.Command_failed { code; output } ->
@@ -153,28 +157,46 @@ let test_unconfigured_server_is_an_arm_not_an_exception () =
    unroutable. Were the substitution ever to stop working, the operator's own
    client would run, spend its connect timeout and report 255, and these
    assertions would fail loudly rather than pass quietly. *)
-let with_ssh_stub script f =
-  let dir = Filename.temp_dir "bondi-ssh-stub-" "" in
-  let stub = Filename.concat dir "ssh" in
-  let oc = open_out stub in
-  output_string oc script;
-  close_out oc;
-  Unix.chmod stub 0o755;
-  let previous_path = Sys.getenv_opt "PATH" in
-  Unix.putenv "PATH"
-    (match previous_path with
-    | None -> dir
-    | Some previous -> dir ^ ":" ^ previous);
+(* PATH is restored on every path out, including the one where there was no
+   PATH to begin with: leaving a stub directory on it outlives this case and
+   every later one in the executable resolves [ssh] to whichever stub ran last.
+   There is no [unsetenv] in [Unix], so an absent PATH is restored as an empty
+   one -- which is what an absent PATH means to a search. *)
+let with_path value f =
+  let previous = Sys.getenv_opt "PATH" in
+  Unix.putenv "PATH" value;
   Fun.protect
     ~finally:(fun () ->
-      (match previous_path with
-      | None -> ()
-      | Some previous -> Unix.putenv "PATH" previous);
-      (try Sys.remove stub with
-      | Sys_error _ -> ());
+      match previous with
+      | None -> Unix.putenv "PATH" ""
+      | Some previous -> Unix.putenv "PATH" previous)
+    f
+
+let with_ssh_stub script f =
+  let dir = Filename.temp_dir "bondi-ssh-stub-" "" in
+  (* The directory is removed by a cleanup of its own rather than after the
+     stub's removal, so a stub that could not be removed does not also leak the
+     directory that holds it. *)
+  Fun.protect
+    ~finally:(fun () ->
       try Unix.rmdir dir with
       | Unix.Unix_error _ -> ())
-    f
+    (fun () ->
+      let stub = Filename.concat dir "ssh" in
+      Fun.protect
+        ~finally:(fun () ->
+          try Sys.remove stub with
+          | Sys_error _ -> ())
+        (fun () ->
+          let oc = open_out stub in
+          output_string oc script;
+          close_out oc;
+          Unix.chmod stub 0o755;
+          with_path
+            (match Sys.getenv_opt "PATH" with
+            | None -> dir
+            | Some previous -> dir ^ ":" ^ previous)
+            f))
 
 let unroutable_server : Bondi_client.Config_file.server =
   {
@@ -450,6 +472,194 @@ let test_ssh_options_never_prompt () =
   check bool "never asks about an unknown host key" true
     (contains ~needle:"StrictHostKeyChecking=" options)
 
+(* A command whose standard error exceeds one pipe buffer, written before it
+   says anything on standard output. A runner that drains one stream to end of
+   file before starting on the other never reaches the second: the command
+   blocks on the full error pipe, so the output pipe never reaches end of file
+   and the call never returns. 200 KB is comfortably past the 64 KB a Linux
+   pipe holds.
+
+   [bondi docker logs] is the caller that provokes it -- [docker logs] writes
+   the container's own error stream to its error stream -- and there is no
+   deadline anywhere on this path, so the failure is a hang rather than an
+   error. The second arm is the same shape on standard output, which is what
+   stops the first from passing against a runner that simply stopped collecting
+   standard error. *)
+let large_stderr_stub =
+  "#!/bin/sh\n\
+   awk 'BEGIN{s=\"\";for(i=0;i<1000;i++)s=s \"x\";for(j=0;j<200;j++)print s}' \
+   >&2\n\
+   echo done\n"
+
+let large_stdout_stub =
+  "#!/bin/sh\n\
+   awk 'BEGIN{s=\"\";for(i=0;i<1000;i++)s=s \"x\";for(j=0;j<200;j++)print s}'\n\
+   echo done >&2\n"
+
+let test_both_streams_are_drained_together () =
+  with_ssh_stub large_stderr_stub (fun () ->
+      check outcome "a command that fills the error pipe still returns"
+        (Ok "done\n")
+        (Remote_exec.command_output ~command:"docker logs c" unroutable_server));
+  with_ssh_stub large_stdout_stub (fun () ->
+      match
+        Remote_exec.command_output ~command:"docker logs c" unroutable_server
+      with
+      | Error _ -> fail "the stub exits zero"
+      | Ok output ->
+          check int "and one that fills the output pipe returns all of it"
+            200_200 (String.length output))
+
+(* The two pass-through printers exist to show an operator what the container
+   said, and a container says a good deal of it on standard error. The
+   stdout-only rule is right for the probes setup reads by shape and wrong for
+   these two, so the merge is asked for at the call rather than assumed either
+   way.
+
+   Both arms on one stub: without the default arm this would pass against a
+   runner that merged unconditionally, which is the defect the stdout-only rule
+   was introduced to fix. *)
+let test_a_caller_may_ask_for_the_error_stream_on_a_successful_command () =
+  with_ssh_stub "#!/bin/sh\necho 'from stdout'\necho 'from stderr' >&2\n"
+    (fun () ->
+      check outcome "asked for, the error stream arrives with the answer"
+        (Ok "from stdout\nfrom stderr\n")
+        (Remote_exec.command_output ~standard_error:Remote_exec.Merged_always
+           ~command:"logs c" unroutable_server);
+      check outcome "and by default it does not" (Ok "from stdout\n")
+        (Remote_exec.command_output ~command:"logs c" unroutable_server))
+
+(* An [ssh] that is not on this machine's PATH is the local shell exiting 127,
+   which is the same code the host's own shell exits when the remote command
+   does not exist. Read as the host's answer it authorises installing Docker on
+   a box nobody asked to change, so the question is settled before the spawn:
+   a client that is not there is this machine's failure and no host verdict at
+   all.
+
+   The second arm is the same call with a working stub on PATH, which is what
+   stops the first from passing against a runner that never reaches a host. *)
+let test_a_missing_local_ssh_is_not_the_hosts_answer () =
+  let empty = Filename.temp_dir "bondi-no-ssh-" "" in
+  Fun.protect
+    ~finally:(fun () ->
+      try Unix.rmdir empty with
+      | Unix.Unix_error _ -> ())
+    (fun () ->
+      with_path empty (fun () ->
+          match
+            Remote_exec.command_output ~command:"docker --version"
+              unroutable_server
+          with
+          | Ok _ -> fail "there is no ssh to run"
+          | Error observed ->
+              check bool "no host ran anything, so there is no host verdict"
+                false
+                (Remote_exec.ran_on_host observed);
+              check failure "and the arm says which client is missing"
+                (Remote_exec.Ssh_not_found { program = "ssh" })
+                observed));
+  with_ssh_stub "#!/bin/sh\necho ok\n" (fun () ->
+      check outcome "an ssh that is there is spawned as before" (Ok "ok\n")
+        (Remote_exec.command_output ~command:"docker --version"
+           unroutable_server))
+
+(* This client's own inability to make the call -- no temporary directory to
+   write the key into, no descriptors left to spawn with -- is a failure it can
+   describe, so it is a value rather than something a caller discovers by
+   catching. [ran_on_host] is false for the same reason as above: nothing ran
+   anywhere.
+
+   The temporary directory is moved to a path that does not exist, which is what
+   [Filename.temp_file] raises [Sys_error] on. The successful call ahead of it is
+   not decoration: it forces the multiplexing directory, which is named once per
+   process from the temporary directory in force at the time. *)
+let test_a_client_that_cannot_write_its_key_reports_a_value () =
+  with_ssh_stub "#!/bin/sh\necho ok\n" (fun () ->
+      check outcome "the same call succeeds where the key can be written"
+        (Ok "ok\n")
+        (Remote_exec.command_output ~command:"true" unroutable_server);
+      let previous = Filename.get_temp_dir_name () in
+      Filename.set_temp_dir_name
+        (Filename.concat previous "bondi-absent-tmpdir");
+      Fun.protect
+        ~finally:(fun () -> Filename.set_temp_dir_name previous)
+        (fun () ->
+          match
+            Remote_exec.command_output ~command:"true" unroutable_server
+          with
+          | Ok _ -> fail "there is nowhere to write the key"
+          | Error observed ->
+              check bool "nothing ran on any host" false
+                (Remote_exec.ran_on_host observed);
+              check bool "and the arm is this machine's own" true
+                (match observed with
+                | Remote_exec.Local_failure _ -> true
+                | Remote_exec.Not_configured _
+                | Remote_exec.Ssh_not_found _
+                | Remote_exec.Ssh_failed _
+                | Remote_exec.Command_failed _
+                | Remote_exec.Signalled _
+                | Remote_exec.Stopped _ ->
+                    false)))
+
+(* The rendered message is printed to a terminal and pasted into reports, and
+   the output it interpolates is whatever the failed command printed --
+   [docker logs] on a chatty container is megabytes. The payload is what makes
+   the message worth reading, so it is carried and bounded rather than dropped,
+   and the marker says the bound was reached.
+
+   The second arm is an output just under the bound, which is what stops the
+   first from passing against a message that truncates everything. *)
+let test_message_bounds_the_output_it_carries () =
+  let long = String.make 10_000 'x' in
+  let rendered =
+    Remote_exec.message (Remote_exec.Command_failed { code = 1; output = long })
+  in
+  check bool "the bound is applied" true (String.length rendered < 3_000);
+  check bool "and it says so rather than trailing off" true
+    (contains ~needle:"truncated" rendered);
+  let short = String.make 2_000 'x' in
+  check string "an output within the bound is carried whole"
+    ("command failed (1): " ^ short)
+    (Remote_exec.message
+       (Remote_exec.Command_failed { code = 1; output = short }))
+
+(* One template was being spelled out by every caller that words a report
+   around [ran_on_host]. The wording is the policy's, the noun is the caller's,
+   and both arms are asserted so a helper that prefixed everything -- or
+   nothing -- would be caught. *)
+let test_explain_prefixes_only_the_host_s_own_answer () =
+  check string "a host that answered is named as having answered"
+    "the read ran on the host and failed: command failed (1): boom"
+    (Remote_exec.explain ~subject:"the read"
+       (Remote_exec.Command_failed { code = 1; output = "boom" }));
+  check string "and one that was never reached is not"
+    "command failed (255): boom"
+    (Remote_exec.explain ~subject:"the read"
+       (Remote_exec.Ssh_failed { code = 255; output = "boom" }))
+
+(* The guarded [Command_failed] test that two setup probes each spelled out,
+   asked of the type instead. A code that matches on any other arm would be
+   the misreading the predicate exists to prevent. *)
+let test_exited_with_is_the_hosts_own_code_alone () =
+  check bool "the host's own code matches" true
+    (Remote_exec.exited_with ~code:127
+       (Remote_exec.Command_failed { code = 127; output = "" }));
+  check bool "a different code does not" false
+    (Remote_exec.exited_with ~code:127
+       (Remote_exec.Command_failed { code = 1; output = "" }));
+  check bool "and no other arm carries a host code at all" false
+    (List.exists
+       (Remote_exec.exited_with ~code:127)
+       [
+         Remote_exec.Not_configured { server = "10.0.0.1" };
+         Remote_exec.Ssh_not_found { program = "ssh" };
+         Remote_exec.Local_failure { reason = "no descriptors" };
+         Remote_exec.Ssh_failed { code = 127; output = "" };
+         Remote_exec.Signalled { signal = 127; output = "" };
+         Remote_exec.Stopped { signal = 127; output = "" };
+       ])
+
 let () =
   run "Remote_exec"
     [
@@ -468,6 +678,8 @@ let () =
         [
           test_case "renders the text each shape rendered before" `Quick
             test_message_renders_the_text_each_shape_rendered_before;
+          test_case "bounds the output it carries" `Quick
+            test_message_bounds_the_output_it_carries;
           test_case "an unconfigured server is an arm, not an exception" `Quick
             test_unconfigured_server_is_an_arm_not_an_exception;
         ] );
@@ -485,6 +697,14 @@ let () =
             test_the_sigpipe_disposition_is_restored;
           test_case "merges standard error on a failure and only there" `Quick
             test_standard_error_is_merged_on_a_failure_and_only_there;
+          test_case "drains both streams together" `Quick
+            test_both_streams_are_drained_together;
+          test_case "a caller may ask for the error stream on success" `Quick
+            test_a_caller_may_ask_for_the_error_stream_on_a_successful_command;
+          test_case "a missing local ssh is not the host's answer" `Quick
+            test_a_missing_local_ssh_is_not_the_hosts_answer;
+          test_case "a client that cannot write its key reports a value" `Quick
+            test_a_client_that_cannot_write_its_key_reports_a_value;
         ] );
       ( "writing the key to disk",
         [
@@ -499,6 +719,10 @@ let () =
         [
           test_case "ran_on_host names the one answer the host gave" `Quick
             test_ran_on_host_names_the_one_answer_the_host_gave;
+          test_case "explain prefixes only the host's own answer" `Quick
+            test_explain_prefixes_only_the_host_s_own_answer;
+          test_case "exited_with is the host's own code alone" `Quick
+            test_exited_with_is_the_hosts_own_code_alone;
         ] );
       ( "ssh options",
         [

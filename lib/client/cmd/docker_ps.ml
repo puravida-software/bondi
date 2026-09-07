@@ -8,7 +8,10 @@ let run () =
         List.map
           (fun server ->
             match
-              Remote_exec.docker_command_output_text ~command:"ps" server
+              (* Pass-through, like [docker logs]: what the operator is shown
+                 is what the command said, on either stream. *)
+              Remote_exec.docker_command_output_text
+                ~standard_error:Remote_exec.Merged_always ~command:"ps" server
             with
             | Ok output ->
                 Ok

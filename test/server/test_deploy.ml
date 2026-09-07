@@ -1,4 +1,5 @@
 module Deploy = Bondi_server__Deploy
+module Handler_error = Bondi_server__Handler_error
 module Docker = Bondi_server__Docker__Client
 module Simple = Bondi_server__Strategy__Simple
 module Crontab = Bondi_server__Crontab
@@ -45,7 +46,7 @@ let planned_actions ~context input =
   match Deploy.cron_plan input with
   | Error err ->
       Alcotest.fail
-        (context ^ ": cron_plan failed: " ^ Deploy.deploy_error_message err)
+        (context ^ ": cron_plan failed: " ^ Handler_error.message err)
   | Ok actions -> List.map action_string actions
 
 let plan_error ~context input =
@@ -189,7 +190,7 @@ let test_cron_plan_rejects_unknown_network () =
   in
   let input = { minimal_input with cron_jobs = Some [ cron ] } in
   let msg =
-    Deploy.deploy_error_message
+    Handler_error.message
       (plan_error ~context:"job on an unmanaged network" input)
   in
   Alcotest.check Alcotest.bool
@@ -225,7 +226,7 @@ let test_cron_plan_rejects_every_unknown_network () =
     }
   in
   let msg =
-    Deploy.deploy_error_message
+    Handler_error.message
       (plan_error ~context:"two jobs on unmanaged networks" input)
   in
   List.iter
@@ -246,15 +247,15 @@ let test_deploy_status_for_invalid_request () =
   let input = { minimal_input with cron_jobs = Some [ cron ] } in
   let err = plan_error ~context:"job on an unmanaged network" input in
   Alcotest.check Alcotest.int "declared-network rejection answers 400" 400
-    (Dream.status_to_int (Deploy.status_of_deploy_error err))
+    (Dream.status_to_int (Handler_error.http_status err))
 
 (* The affirmative arm for the test above: without it, a classifier that
    answered 400 for everything would pass. *)
 let test_deploy_status_for_orchestrator_failure () =
   Alcotest.check Alcotest.int "an orchestrator fault answers 500" 500
     (Dream.status_to_int
-       (Deploy.status_of_deploy_error
-          (Deploy.Orchestrator_failure "docker daemon unreachable")))
+       (Handler_error.http_status
+          (Handler_error.Orchestrator_failure "docker daemon unreachable")))
 
 (* The affirmative arm above with the network field removed — a job declaring
    none plans exactly what it planned before the network check existed. *)
@@ -640,6 +641,38 @@ let test_traefik_not_declared_plans_no_update () =
        (traefik_policy_context ~traefik_image:"traefik:v3.3.0"
           ~policy:(Some (applied_policy "no"))))
 
+(* --- Deploy.deploy: the composition the plans sit underneath --- *)
+
+(* [deploy]'s catch-all is reachable through no pure seam: [cron_plan] answers
+   with a value, and everything after it is Docker. The Engine is reached over
+   [net], so a net that raises is what makes a strategy throw. *)
+exception Docker_socket_unreachable
+
+let unreachable_docker_net () =
+  let net = Eio_mock.Net.make "docker" in
+  Eio_mock.Net.on_getaddrinfo net [ `Raise Docker_socket_unreachable ];
+  Eio_mock.Net.on_connect net [ `Raise Docker_socket_unreachable ];
+  net
+
+let test_deploy_reports_an_escaping_exception () =
+  Eio_mock.Backend.run @@ fun () ->
+  let net = unreachable_docker_net () in
+  let clock = Eio_mock.Clock.make () in
+  match Deploy.deploy ~clock ~net minimal_input with
+  | Ok _ ->
+      Alcotest.fail
+        "a deploy whose Engine calls raise must not report a deployed tag"
+  | Error (Handler_error.Invalid_request msg) ->
+      Alcotest.failf
+        "an exception out of a strategy is Bondi's fault, not the caller's, \
+         but it answered Invalid_request: %s"
+        msg
+  | Error (Handler_error.Orchestrator_failure msg) ->
+      Alcotest.(check bool)
+        "the failure carries the exception that escaped" true
+        (Bondi_common.String_utils.contains ~needle:"Docker_socket_unreachable"
+           msg)
+
 let () =
   Alcotest.run "Deploy"
     [
@@ -726,5 +759,11 @@ let () =
             test_no_traefik_running_plans_no_update;
           Alcotest.test_case "an undeclared proxy plans no update" `Quick
             test_traefik_not_declared_plans_no_update;
+        ] );
+      ( "deploy",
+        [
+          Alcotest.test_case
+            "an escaping exception becomes an orchestrator failure" `Quick
+            test_deploy_reports_an_escaping_exception;
         ] );
     ]

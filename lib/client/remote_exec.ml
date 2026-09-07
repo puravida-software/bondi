@@ -2,6 +2,8 @@ let ( let* ) = Result.bind
 
 type failure =
   | Not_configured of { server : string }
+  | Ssh_not_found of { program : string }
+  | Local_failure of { reason : string }
   | Ssh_failed of { code : int; output : string }
   | Command_failed of { code : int; output : string }
   | Signalled of { signal : int; output : string }
@@ -33,33 +35,129 @@ let failure_of_status status ~output =
 let ran_on_host = function
   | Command_failed _ -> true
   | Not_configured _
+  | Ssh_not_found _
+  | Local_failure _
   | Ssh_failed _
   | Signalled _
   | Stopped _ ->
       false
 
+let exited_with ~code = function
+  | Command_failed { code = actual; _ } -> actual = code
+  | Not_configured _
+  | Ssh_not_found _
+  | Local_failure _
+  | Ssh_failed _
+  | Signalled _
+  | Stopped _ ->
+      false
+
+type standard_error = Merged_on_failure | Merged_always
+
+(* What a message may carry of the output it is reporting. The payload is the
+   half of a failure worth reading, so it is carried rather than dropped -- but
+   the output of a failed [docker logs], or of the orchestrator's own
+   [docker logs --tail 50 ... 2>&1], is megabytes, and this text is written to a
+   terminal and pasted into a report. Bounded here rather than at one caller,
+   because every caller renders through this function and the one that capped
+   its own was capping for a different reason. 2 KB is the size the convention
+   this follows prescribes: several lines of a stack or a daemon's complaint,
+   and nothing that scrolls a terminal away. *)
+let message_output_limit = 2048
+
+let carried output =
+  let trimmed = String.trim output in
+  let length = String.length trimmed in
+  if length <= message_output_limit then trimmed
+  else
+    Printf.sprintf "%s ... (truncated, %d bytes in all)"
+      (String.sub trimmed 0 message_output_limit)
+      length
+
 let message = function
   | Not_configured { server } ->
       Printf.sprintf "Missing ssh configuration for server %s" server
+  | Ssh_not_found { program } ->
+      Printf.sprintf
+        "%s was not found on this machine's PATH, so no command was run" program
+  | Local_failure { reason } ->
+      Printf.sprintf "this machine could not run the command: %s" reason
   | Ssh_failed { code; output }
   | Command_failed { code; output } ->
-      Printf.sprintf "command failed (%d): %s" code (String.trim output)
+      Printf.sprintf "command failed (%d): %s" code (carried output)
   | Signalled { signal; output } ->
-      Printf.sprintf "command killed (%d): %s" signal (String.trim output)
+      Printf.sprintf "command killed (%d): %s" signal (carried output)
   | Stopped { signal; output } ->
-      Printf.sprintf "command stopped (%d): %s" signal (String.trim output)
+      Printf.sprintf "command stopped (%d): %s" signal (carried output)
 
-let read_all ic =
-  let buffer = Buffer.create 256 in
-  (try
-     while true do
-       let line = input_line ic in
-       Buffer.add_string buffer line;
-       Buffer.add_char buffer '\n'
-     done
-   with
-  | End_of_file -> ());
-  Buffer.contents buffer
+let explain ~subject failure =
+  if ran_on_host failure then
+    Printf.sprintf "%s ran on the host and failed: %s" subject (message failure)
+  else message failure
+
+(* Both streams are drained together, waiting on whichever has bytes, rather
+   than one to end of file and then the other. Sequentially, a command that
+   fills the pipe it is not being read from blocks on the write, so it never
+   closes the pipe that is being read and the call never returns -- there is no
+   deadline anywhere on this path, so the symptom is a hang.
+
+   Measured on 2026-09-05 through this module's own spawn: a stub writing 200 KB
+   to standard error before its first line of standard output did not return
+   under the sequential drain and was killed at 60s; the same stub returns
+   [Ok "done\n"] under this one, and a stub writing the same 200 KB to standard
+   output returns all of it. A Linux pipe holds 64 KB, and [docker logs] on a
+   container that writes to its error stream passes far more than that through
+   [bondi docker logs].
+
+   Read from the descriptors rather than through the channels, so that neither
+   channel's buffering can hold bytes the other is waiting on. Nothing else
+   reads these channels, so nothing is missed.
+
+   Each stream is terminated the way the line-at-a-time read this replaces
+   terminated it -- a final line the command left unterminated gains the newline
+   it did not print. Kept rather than dropped because it is what every caller
+   has been handed since before this runner existed, and a drain that changes
+   the bytes is a change nobody asked this fix to make. *)
+let line_terminated contents =
+  if contents = "" || contents.[String.length contents - 1] = '\n' then contents
+  else contents ^ "\n"
+
+let drain_both from_output from_errors =
+  let output_fd = Unix.descr_of_in_channel from_output in
+  let errors_fd = Unix.descr_of_in_channel from_errors in
+  let output = Buffer.create 256 in
+  let errors = Buffer.create 256 in
+  let chunk = Bytes.create 65536 in
+  let rec drain open_fds =
+    match open_fds with
+    | [] -> ()
+    | _ :: _ ->
+        let ready =
+          match Unix.select open_fds [] [] (-1.0) with
+          | ready, _, _ -> ready
+          (* A signal delivered while waiting is not an end of stream. *)
+          | exception Unix.Unix_error (Unix.EINTR, _, _) -> []
+        in
+        let still_open =
+          List.filter
+            (fun fd ->
+              if not (List.mem fd ready) then true
+              else
+                match Unix.read fd chunk 0 (Bytes.length chunk) with
+                | 0 -> false
+                | count ->
+                    Buffer.add_subbytes
+                      (if fd = output_fd then output else errors)
+                      chunk 0 count;
+                    true
+                | exception Unix.Unix_error (Unix.EINTR, _, _) -> true)
+            open_fds
+        in
+        drain still_open
+  in
+  drain [ output_fd; errors_fd ];
+  ( line_terminated (Buffer.contents output),
+    line_terminated (Buffer.contents errors) )
 
 (* Standard error is collected apart from standard output and merged into it
    only when the command failed. A failure is reported with whatever the command
@@ -71,10 +169,15 @@ let read_all ic =
    -- so a "Permanently added ... to the list of known hosts" ahead of the
    reading is read as the reading.
 
-   Standard output is drained before standard error, so a command that fills the
-   error pipe while this is still reading the output pipe would block. Nothing
-   this client runs prints anything like a pipe buffer's worth of diagnostics,
-   and the same order was what the two shapes this runner replaces used.
+   The two streams are drained together rather than one after the other. Draining
+   in sequence deadlocks on a command that fills the pipe nobody is reading, and
+   both claims that used to stand here in place of that -- that nothing this
+   client runs prints a pipe buffer's worth, and that the replaced shapes drained
+   in the same order -- were assumed and are false. [docker logs] passes a
+   container's whole error stream through this runner, and the shape this one
+   replaces ran one pipe (`2>&1` through [Unix.open_process_in]), which is why it
+   had no second stream to leave undrained. The deadlock and its absence are both
+   measured; see [drain_both].
 
    [input] is written to the command's standard input rather than embedded in
    the command line, so that a payload carrying credentials never appears in
@@ -103,15 +206,23 @@ let with_process cmd f =
       let (_ : Unix.process_status) = Unix.close_process_full channels in
       Printexc.raise_with_backtrace exn backtrace
 
-let output_of_status status ~standard_output ~standard_error =
-  match status with
-  | Unix.WEXITED 0 -> standard_output
-  | Unix.WEXITED _
-  | Unix.WSIGNALED _
-  | Unix.WSTOPPED _ ->
-      standard_output ^ standard_error
+(* The stdout-only rule on a successful command is setup's: it reads a reading
+   by shape, so a warning ssh or sudo wrote alongside the answer would be read as
+   the answer. It is wrong for the two pass-through printers, whose whole job is
+   to show an operator what the container said -- so the merge is asked for at
+   the call rather than assumed either way. *)
+let output_of_status status ~policy ~standard_output ~standard_error =
+  match policy with
+  | Merged_always -> standard_output ^ standard_error
+  | Merged_on_failure -> (
+      match status with
+      | Unix.WEXITED 0 -> standard_output
+      | Unix.WEXITED _
+      | Unix.WSIGNALED _
+      | Unix.WSTOPPED _ ->
+          standard_output ^ standard_error)
 
-let run_command ?input cmd =
+let run_command ?input ?(policy = Merged_on_failure) cmd =
   let status, (standard_output, standard_error) =
     with_process cmd (fun (from_command, to_command, from_command_errors) ->
         (* Writing to a command that has already exited raises SIGPIPE, which at
@@ -135,12 +246,10 @@ let run_command ?input cmd =
                 with
                 | Sys_error _ -> ()));
         close_out_noerr to_command;
-        let standard_output = read_all from_command in
-        let standard_error = read_all from_command_errors in
-        (standard_output, standard_error))
+        drain_both from_command from_command_errors)
   in
   failure_of_status status
-    ~output:(output_of_status status ~standard_output ~standard_error)
+    ~output:(output_of_status status ~policy ~standard_output ~standard_error)
 
 let decode_private_key contents =
   match Base64.decode contents with
@@ -259,18 +368,83 @@ let ssh_command ~user ~host ~key_path cmd =
     (Filename.quote destination)
     (Filename.quote cmd)
 
-let command_output ?input ~command (server : Config_file.server) =
+(* Whether there is an [ssh] to spawn is asked before spawning, because after
+   the spawn the answer is unrecoverable: a local shell that cannot find the
+   command exits 127, which is exactly what the host's own shell exits when the
+   remote command is missing. Setup reads that code as the host reporting Docker
+   absent and installs Docker -- so an operator with no ssh client would have a
+   box changed on the strength of a message from their own machine.
+
+   PATH is read here rather than resolved into the command line: what
+   [ssh_command] spells is asserted on elsewhere, and a check is all this needs
+   to be. *)
+let ssh_program = "ssh"
+
+let is_executable_file path =
+  match Unix.stat path with
+  | { Unix.st_kind = Unix.S_REG; _ } -> (
+      match Unix.access path [ Unix.X_OK ] with
+      | () -> true
+      | exception Unix.Unix_error _ -> false)
+  | {
+   Unix.st_kind =
+     ( Unix.S_DIR | Unix.S_CHR | Unix.S_BLK | Unix.S_LNK | Unix.S_FIFO
+     | Unix.S_SOCK );
+   _;
+  } ->
+      false
+  | exception Unix.Unix_error _ -> false
+
+let found_on_path program =
+  if String.contains program '/' then is_executable_file program
+  else
+    Option.value (Sys.getenv_opt "PATH") ~default:""
+    |> String.split_on_char ':'
+    |> List.exists (fun directory ->
+        is_executable_file
+          (Filename.concat
+             (if directory = "" then Filename.current_dir_name else directory)
+             program))
+
+let ssh_client_present () =
+  if found_on_path ssh_program then Ok ()
+  else Error (Ssh_not_found { program = ssh_program })
+
+(* Writing the key and spawning the process are this machine's own work, and
+   both fail in ordinary ways -- a temporary directory that is not there or not
+   writable, no descriptors left. Those are failures this module can describe,
+   so they are arms rather than exceptions a caller would have to catch to
+   discover it had a result type for nothing. Nothing else in the region raises:
+   [run_command] returns its outcome and [with_temp_key]'s cleanup swallows the
+   removal it is allowed to. *)
+let command_output ?input ?standard_error ~command (server : Config_file.server)
+    =
   let* ssh = ssh_config server in
-  with_temp_key ssh.Config_file.private_key_contents (fun key_path ->
-      run_command ?input
-        (ssh_command ~user:ssh.Config_file.user ~host:server.ip_address
-           ~key_path command))
+  let* () = ssh_client_present () in
+  match
+    with_temp_key ssh.Config_file.private_key_contents (fun key_path ->
+        run_command ?input ?policy:standard_error
+          (ssh_command ~user:ssh.Config_file.user ~host:server.ip_address
+             ~key_path command))
+  with
+  | outcome -> outcome
+  | exception Sys_error reason -> Error (Local_failure { reason })
+  | exception Unix.Unix_error (code, callee, argument) ->
+      Error
+        (Local_failure
+           {
+             reason =
+               Printf.sprintf "%s %s: %s" callee argument
+                 (Unix.error_message code);
+           })
 
-let docker_command_output ?input ~command server =
-  command_output ?input ~command:("docker " ^ command) server
+let docker_command_output ?input ?standard_error ~command server =
+  command_output ?input ?standard_error ~command:("docker " ^ command) server
 
-let command_output_text ?input ~command server =
-  Result.map_error message (command_output ?input ~command server)
+let command_output_text ?input ?standard_error ~command server =
+  Result.map_error message
+    (command_output ?input ?standard_error ~command server)
 
-let docker_command_output_text ?input ~command server =
-  Result.map_error message (docker_command_output ?input ~command server)
+let docker_command_output_text ?input ?standard_error ~command server =
+  Result.map_error message
+    (docker_command_output ?input ?standard_error ~command server)

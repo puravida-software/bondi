@@ -21,7 +21,10 @@
   test_alert_delivery
   test_auth
   test_server_config
-  test_cron_secrets)
+  test_cron_secrets
+  test_handler_error
+  test_diagnostics
+  test_health)
  (modules
   test_env
   test_simple_plan
@@ -37,7 +40,10 @@
   test_alert_delivery
   test_auth
   test_server_config
-  test_cron_secrets)
+  test_cron_secrets
+  test_handler_error
+  test_diagnostics
+  test_health)
  (libraries
   alcotest
   bondi.client
@@ -47,4 +53,5 @@
   eio
   eio.mock
   server_test_helpers
+  unix
   yojson))

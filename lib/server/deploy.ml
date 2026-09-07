@@ -111,23 +111,6 @@ type deploy_action =
       restart_policy : Docker.Client.restart_policy;
     }
 
-type deploy_error = Invalid_request of string | Orchestrator_failure of string
-
-let deploy_error_message = function
-  | Invalid_request msg
-  | Orchestrator_failure msg ->
-      msg
-
-(* The failure class alone picks the status, so the Dream handler carries no
-   decision of its own. [Invalid_request] is a value the caller wrote that
-   failed a precondition and answers 400, matching what this endpoint already
-   returns for a body it cannot decode; [Orchestrator_failure] is a fault on
-   Bondi's side of the call and answers 500. The sibling /run endpoint
-   classifies the same way. *)
-let status_of_deploy_error : deploy_error -> Dream.status = function
-  | Invalid_request _ -> `Bad_Request
-  | Orchestrator_failure _ -> `Internal_Server_Error
-
 let ( let* ) = Result.bind
 
 (* ------------------------------------------------------------------------- *)
@@ -155,7 +138,7 @@ let ( let* ) = Result.bind
    hand and the check is pure, so stopping at the first would make the operator
    rediscover the next bad name on a later deploy. *)
 let cron_network_action (jobs : Simple.cron_job list) :
-    (deploy_action list, deploy_error) result =
+    (deploy_action list, Handler_error.t) result =
   let shared = Bondi_common.Defaults.network_name in
   let declares_shared (job : Simple.cron_job) =
     match job.network with
@@ -178,7 +161,7 @@ let cron_network_action (jobs : Simple.cron_job list) :
         (if List.exists declares_shared jobs then [ EnsureCronNetwork ] else [])
   | offenders ->
       Error
-        (Invalid_request
+        (Handler_error.Invalid_request
            (Printf.sprintf
               "cron jobs declare networks bondi does not manage (%s). bondi \
                manages only %s: declare that instead, and attach the \
@@ -187,7 +170,7 @@ let cron_network_action (jobs : Simple.cron_job list) :
               shared shared))
 
 let cron_plan (input : Simple.deploy_input) :
-    (deploy_action list, deploy_error) result =
+    (deploy_action list, Handler_error.t) result =
   match input.cron_jobs with
   | None
   | Some [] ->
@@ -302,12 +285,19 @@ let interpret ~clock ~client ~net (actions : deploy_action list) :
 (* JSON / HTTP                                                               *)
 (* ------------------------------------------------------------------------- *)
 
-let decode_input body =
+(* The decode is a decision the endpoint makes, so it answers in the same
+   vocabulary as the rest of it: a body that did not decode is a value the
+   caller wrote that failed a precondition, which is [Invalid_request] and
+   carries that class's status and exit code. The two messages are unchanged --
+   [route] prefixes them, and that prefix is the wire. *)
+let decode_input body : (Simple.deploy_input, Handler_error.t) result =
   match Yojson.Safe.from_string body with
-  | exception Yojson.Json_error msg -> Error ("invalid JSON: " ^ msg)
+  | exception Yojson.Json_error msg ->
+      Error (Handler_error.Invalid_request ("invalid JSON: " ^ msg))
   | json ->
       Simple.deploy_input_of_yojson json
-      |> Result.map_error (fun msg -> "invalid deploy payload: " ^ msg)
+      |> Result.map_error (fun msg ->
+          Handler_error.Invalid_request ("invalid deploy payload: " ^ msg))
 
 let build_response ~strategy ~strategy_reason (input : Simple.deploy_input) =
   {
@@ -390,10 +380,11 @@ let gather_traefik_policy ~clock ~client ~net :
       (match inspection with
       | Ok _ -> ()
       | Error msg ->
-          Dream.log
-            "could not read the restart policy of container %s: %s -- treating \
-             it as non-compliant"
-            container.id msg);
+          Diagnostics.write
+            (Printf.sprintf
+               "could not read the restart policy of container %s: %s -- \
+                treating it as non-compliant"
+               container.id msg));
       Ok
         {
           traefik = Some container;
@@ -409,57 +400,78 @@ let converge_traefik_restart_policy ~clock ~client ~net ~strategy input :
    failure there is Bondi's fault by construction. [cron_plan] is the one step
    that can fail on what the caller wrote, and it classifies its own error. *)
 let orchestrator_step result =
-  Result.map_error (fun m -> Orchestrator_failure m) result
+  Result.map_error (fun m -> Handler_error.Orchestrator_failure m) result
 
-let run_deploy ~clock ~net input =
-  Lwt_eio.run_eio @@ fun () ->
-  let client = Docker.Client.create ?registry_auth:(registry_auth input) () in
-  (* The cron plan is pure and depends only on [input], so it runs before any
-     workload is touched: a rejected network declaration must not be discovered
-     after the service has already moved to a new tag. *)
-  let* actions = cron_plan input in
-  match input.Simple.service_name with
-  | None ->
-      (* Cron-only deploy: skip main image pull and workload deployment *)
-      let* () = orchestrator_step (interpret ~clock ~client ~net actions) in
-      Ok
-        (build_response ~strategy:Simple ~strategy_reason:"cron-only deploy"
-           input)
-  | Some _ ->
-      let* strategy, strategy_reason =
-        orchestrator_step (select_strategy_and_prepare ~client ~net input)
-      in
-      (* Before the workload moves, and outside the strategy dispatch: both
-         strategies leave the proxy running, so neither is a place this can be
-         done once. *)
-      let* () =
-        orchestrator_step
-          (converge_traefik_restart_policy ~clock ~client ~net ~strategy input)
-      in
-      let* () =
-        orchestrator_step (deploy_workload ~clock ~client ~net ~strategy input)
-      in
-      let* () = orchestrator_step (interpret ~clock ~client ~net actions) in
-      Ok (build_response ~strategy ~strategy_reason input)
+(* The endpoint's whole decision, naming no transport, so a caller holding no
+   HTTP request can reach it. Everything above it in [route] is decoding and
+   everything below is encoding.
+
+   The catch-all is where the route's [Lwt.catch] went, and it is deliberately
+   not narrowed to exclude [Stdlib.Exit]: nothing on this path calls [exit],
+   and answering a raised [Exit] differently than this endpoint answers it
+   today would change what the wire says. What did move is the boundary -- the
+   old catch also covered the JSON encoding, which now sits on the route's side
+   of the seam. The encoder walks a record of four strings and has no input on
+   which it can raise.
+
+   [Eio.Cancel.Cancelled] is the one exception the boundary move makes it wrong
+   to absorb. The old [Lwt.catch] sat outside [Lwt_eio.run_eio], where a
+   cancelled fiber had already been converted before it could be seen; this
+   catch runs inside that fiber, so swallowing the cancellation would let a
+   cancelled deploy return normally and break structured concurrency. It is
+   re-raised rather than classified. *)
+let deploy ~clock ~net input : (deploy_response, Handler_error.t) result =
+  try
+    let client = Docker.Client.create ?registry_auth:(registry_auth input) () in
+    (* The cron plan is pure and depends only on [input], so it runs before any
+       workload is touched: a rejected network declaration must not be discovered
+       after the service has already moved to a new tag. *)
+    let* actions = cron_plan input in
+    match input.Simple.service_name with
+    | None ->
+        (* Cron-only deploy: skip main image pull and workload deployment *)
+        let* () = orchestrator_step (interpret ~clock ~client ~net actions) in
+        Ok
+          (build_response ~strategy:Simple ~strategy_reason:"cron-only deploy"
+             input)
+    | Some _ ->
+        let* strategy, strategy_reason =
+          orchestrator_step (select_strategy_and_prepare ~client ~net input)
+        in
+        (* Before the workload moves, and outside the strategy dispatch: both
+           strategies leave the proxy running, so neither is a place this can be
+           done once. *)
+        let* () =
+          orchestrator_step
+            (converge_traefik_restart_policy ~clock ~client ~net ~strategy input)
+        in
+        let* () =
+          orchestrator_step
+            (deploy_workload ~clock ~client ~net ~strategy input)
+        in
+        let* () = orchestrator_step (interpret ~clock ~client ~net actions) in
+        Ok (build_response ~strategy ~strategy_reason input)
+  with
+  | Eio.Cancel.Cancelled _ as cancelled -> raise cancelled
+  | exn -> Error (Handler_error.Orchestrator_failure (Printexc.to_string exn))
 
 let route ~clock ~net =
   Dream.post "/deploy" @@ fun req ->
   let open Lwt.Infix in
   let%lwt body = Dream.body req in
   match decode_input body with
-  | Error msg -> Dream.respond ~status:`Bad_Request ("Bad request: " ^ msg)
-  | Ok input ->
-      Lwt.catch
-        (fun () ->
-          run_deploy ~clock ~net input >>= function
-          | Ok response ->
-              response
-              |> deploy_response_to_yojson
-              |> Yojson.Safe.to_string
-              |> Dream.json
-          | Error err ->
-              Dream.respond
-                ~status:(status_of_deploy_error err)
-                ("Error deploying: " ^ deploy_error_message err))
-        (fun exn ->
-          Dream.respond ~status:`Internal_Server_Error (Printexc.to_string exn))
+  | Error err ->
+      Dream.respond
+        ~status:(Handler_error.http_status err)
+        ("Bad request: " ^ Handler_error.message err)
+  | Ok input -> (
+      (Lwt_eio.run_eio @@ fun () -> deploy ~clock ~net input) >>= function
+      | Ok response ->
+          response
+          |> deploy_response_to_yojson
+          |> Yojson.Safe.to_string
+          |> Dream.json
+      | Error err ->
+          Dream.respond
+            ~status:(Handler_error.http_status err)
+            ("Error deploying: " ^ Handler_error.message err))

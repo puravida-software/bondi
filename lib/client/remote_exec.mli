@@ -14,6 +14,18 @@ type failure =
       (** The server has no [ssh] block, so nothing was attempted. This is a
           source that cannot be consulted rather than an answer that could not
           be understood, and the two send an operator to different places. *)
+  | Ssh_not_found of { program : string }
+      (** No [ssh] on this machine's PATH, so nothing was spawned. The local
+          shell reports a missing command by exiting 127, which is exactly what
+          the host's own shell exits when the {i remote} command is missing --
+          and one of those readings authorises installing Docker on a box nobody
+          asked to change. The question is therefore settled before the spawn
+          and answered here, where [ran_on_host] is false. *)
+  | Local_failure of { reason : string }
+      (** This client could not make the call at all: no temporary directory to
+          write the key into, no descriptors left to spawn with. A failure this
+          module can describe is a value rather than something a caller
+          discovers by catching, and nothing ran on any host. *)
   | Ssh_failed of { code : int; output : string }
       (** ssh could not reach or authenticate to the host: no command ran.
           [output] is what ssh itself printed. *)
@@ -53,8 +65,8 @@ val failure_of_status :
     closed port returned 255, an unauthorised key returned 255, and a reachable
     host running [exit 7] returned 7 rather than 255.
 
-    Two things this decision cannot do, stated so that no caller infers coverage
-    it does not have.
+    Three things this decision cannot do, stated so that no caller infers
+    coverage it does not have.
 
     A remote command that itself exits 255 is misclassified as ssh's own
     failure. Measured in the same session: [exit 255] on the reachable host
@@ -85,35 +97,95 @@ val failure_of_status :
     so the arm is believed unreachable and exists because the compiler requires
     it and the text it renders is pinned.
 
+    An exit 127 is not on its own the host's report that the remote command is
+    missing. The shell this client spawns exits 127 for a command {i it} cannot
+    find, and the command it is given is [ssh] -- so an operator with no ssh
+    client installed reaches this function with exactly the status a host
+    reports a missing Docker with. That reading authorises installing Docker, so
+    it is not left to the caller to notice: {!command_output} settles whether
+    there is an [ssh] to spawn before spawning and answers [Ssh_not_found],
+    which {!ran_on_host} is false of. This function, reached with a status
+    alone, still cannot tell the two apart.
+
     Every code above is a property of that one OpenSSH. The client actually
     invoked is whatever [ssh] is on the operator's PATH, and nothing in the
     configuration pins it. *)
 
+val exited_with : code:int -> failure -> bool
+(** [exited_with ~code failure] is whether the host ran the command and it
+    exited [code].
+
+    True of [Command_failed] alone, for the reason {!ran_on_host} gives: a code
+    carried by any other arm is this machine's or ssh's, not the host's. Two
+    setup probes each spelled the guarded [Command_failed] arm and then
+    re-listed the remaining constructors after it, which is a match the compiler
+    cannot check -- the guarded arm and the catch-all share a constructor. Asked
+    of the type instead. *)
+
 val ran_on_host : failure -> bool
 (** Whether the host ran the command and this is its answer.
 
-    True of [Command_failed] alone: the other four are the command never having
+    True of [Command_failed] alone: the other six are the command never having
     been run, so nothing about them is the host's verdict on anything. Callers
     word their reports around that difference -- one sentence sends an operator
-    to the host, the other to the network or to [bondi.yaml] -- and they were
-    each spelling the same five-arm split out for themselves. The policy is one
-    decision, so it is decided here; only the wording is each caller's own. *)
+    to the host, the other to the network, to this machine, or to [bondi.yaml].
+    The policy is one decision, so it is decided here. The most common wording
+    around it is {!explain}, which is where the three callers that had each
+    spelled out the same sentence now get it; the two whose arms differ by more
+    than a noun keep their own wording and take this predicate directly. *)
+
+val explain : subject:string -> failure -> string
+(** [explain ~subject failure] is {!message}, prefixed with
+    ["<subject> ran on the host and failed: "] when {!ran_on_host}.
+
+    The sentence is the policy's and the noun is the caller's. Four callers were
+    each spelling this out around their own {!ran_on_host} test, identical but
+    for the noun, so the wording lived in four places while the decision lived
+    in one. A caller whose two arms differ by more than the noun -- one that
+    routes to different constructors, or words the not-reached arm too -- keeps
+    its own and takes {!ran_on_host} directly. *)
 
 val message : failure -> string
 (** The operator-facing text for a failure.
 
-    Byte-identical to what each of the two implementations this module replaces
-    printed, which is what lets their existing assertions stand as evidence that
-    consolidating them changed nothing. Output is trimmed here rather than on
-    the way in, so a caller that needs what the host actually said still has it.
+    The four format strings are byte-identical to what each of the two
+    implementations this module replaces printed, which is what lets their
+    existing assertions stand as evidence that consolidating them changed
+    nothing. Output is trimmed here rather than on the way in, so a caller that
+    needs what the host actually said still has it.
+
+    The interpolated output is bounded at 2 KB. It is carried because it is the
+    half of a failure worth reading, and bounded because this text is printed to
+    a terminal and rendered into reports while its source is unbounded -- a
+    failed [docker logs], or the orchestrator's own
+    [docker logs --tail 50 ... 2>&1], is megabytes. Past the bound the text ends
+    [" ... (truncated, N bytes in all)"], so a reader is told the payload was
+    cut rather than left to wonder where it stopped. An output within the bound
+    is untouched, which is every assertion in the suite and every failure an
+    operator has seen.
 
     Exposed so that no call site spells the rendering itself: two call sites
     spelling it separately is how they came to render it differently. A caller
     that acts on the kind of failure takes the value; re-deriving the kind by
     parsing this string is the defect this module exists to close. *)
 
+(** Whether a caller wants the command's error stream, or only its answer. *)
+type standard_error =
+  | Merged_on_failure
+      (** Standard output alone on success, output and error together on a
+          failure. What every probe wants: setup reads a successful reading by
+          shape -- a marker word, a listing line, a file mode -- so a
+          "Permanently added ... to the list of known hosts" ahead of it is read
+          as the reading. *)
+  | Merged_always
+      (** Both streams, whatever the status. What the two pass-through printers
+          want: [bondi docker logs] and [bondi docker ps] exist to show an
+          operator what the container said, and a container says much of it on
+          standard error. *)
+
 val command_output :
   ?input:string ->
+  ?standard_error:standard_error ->
   command:string ->
   Config_file.server ->
   (string, failure) result
@@ -129,9 +201,19 @@ val command_output :
     outputs by shape, so a warning ahead of the reading would be read as the
     reading.
 
-    The output is collected a line at a time, so a final line the command left
-    unterminated arrives with a newline that the command did not print. Nothing
-    else about the bytes is changed, and nothing is trimmed.
+    [standard_error] is where a caller says otherwise, and there are exactly two
+    that do. [bondi docker logs] and [bondi docker ps] are pass-through
+    printers: what they exist to show is what the command said, and a container
+    says much of it on its error stream, so they pass [Merged_always]. Every
+    other caller is a probe read by shape and takes the default.
+
+    Both streams are drained together. A runner that drained one to end of file
+    and then the other hangs on any command that fills the pipe it is not
+    reading -- 64 KB on Linux, which [docker logs] passes without trying.
+
+    A final line the command left unterminated arrives with a newline that the
+    command did not print, which is what the line-at-a-time read this replaced
+    also did. Nothing else about the bytes is changed, and nothing is trimmed.
 
     The runner is not re-entrant. It changes this process's SIGPIPE disposition
     for the duration of the write and restores it afterwards, and that setting
@@ -152,10 +234,15 @@ val command_output :
 
     A server with no [ssh] block is a source that cannot be consulted, not an
     error to raise: the result says so and the caller decides what that means.
-*)
+    So are the two failures that belong to this machine rather than to a host --
+    no [ssh] on PATH ([Ssh_not_found], settled before the spawn so that a local
+    shell's exit 127 is never read as the host's) and nowhere to write the key
+    or nothing left to spawn with ([Local_failure]). Nothing on this path raises
+    for a case it can name. *)
 
 val docker_command_output :
   ?input:string ->
+  ?standard_error:standard_error ->
   command:string ->
   Config_file.server ->
   (string, failure) result
@@ -167,6 +254,7 @@ val docker_command_output :
 
 val command_output_text :
   ?input:string ->
+  ?standard_error:standard_error ->
   command:string ->
   Config_file.server ->
   (string, string) result
@@ -174,6 +262,7 @@ val command_output_text :
 
 val docker_command_output_text :
   ?input:string ->
+  ?standard_error:standard_error ->
   command:string ->
   Config_file.server ->
   (string, string) result

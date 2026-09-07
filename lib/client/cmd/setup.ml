@@ -571,28 +571,22 @@ let managed_of_ps_output output =
    never read for the verdict. *)
 let shell_command_not_found_code = 127
 
+(* A successful probe is a version string and nothing else. It used to be read
+   for the words a shell prints when the command is missing, because the runner
+   of the day appended [2>&1] and a not-found line could arrive on the success
+   channel. It cannot now: the runner answers a successful command with its
+   standard output alone unless the caller asks otherwise, and the two callers
+   that ask are the pass-through printers, not this probe. *)
 let docker_status_of_probe = function
-  | Ok version_output ->
-      if
-        Bondi_common.String_utils.contains ~needle:"command not found"
-          version_output
-      then Docker_not_installed (String.trim version_output)
-      else Docker_installed (String.trim version_output)
+  | Ok version_output -> Docker_installed (String.trim version_output)
   (* The shell reports a missing command by exiting non-zero, which is the same
      channel a dropped connection arrives on. What tells them apart is the
      status the host's own shell returned, and that reading is the only one
      that may lead to an install. *)
-  | Error failure -> (
-      match failure with
-      | Remote_exec.Command_failed { code; _ }
-        when code = shell_command_not_found_code ->
-          Docker_not_installed (String.trim (Remote_exec.message failure))
-      | Remote_exec.Command_failed _
-      | Remote_exec.Not_configured _
-      | Remote_exec.Ssh_failed _
-      | Remote_exec.Signalled _
-      | Remote_exec.Stopped _ ->
-          Docker_undetermined (Remote_exec.message failure))
+  | Error failure ->
+      if Remote_exec.exited_with ~code:shell_command_not_found_code failure then
+        Docker_not_installed (String.trim (Remote_exec.message failure))
+      else Docker_undetermined (Remote_exec.message failure)
 
 (* Installing Docker is the one action here that changes a host nobody asked to
    change: it restarts the daemon, and with it every container carrying a
@@ -627,17 +621,10 @@ type cron_curl_verdict =
 
 let cron_curl_verdict_of_probe = function
   | Ok output -> Cron_curl_reported output
-  | Error failure -> (
-      match failure with
-      | Remote_exec.Command_failed { code; _ }
-        when code = shell_command_not_found_code ->
-          Cron_curl_reported (Remote_exec.message failure)
-      | Remote_exec.Command_failed _
-      | Remote_exec.Not_configured _
-      | Remote_exec.Ssh_failed _
-      | Remote_exec.Signalled _
-      | Remote_exec.Stopped _ ->
-          Cron_curl_undetermined (Remote_exec.message failure))
+  | Error failure ->
+      if Remote_exec.exited_with ~code:shell_command_not_found_code failure then
+        Cron_curl_reported (Remote_exec.message failure)
+      else Cron_curl_undetermined (Remote_exec.message failure)
 
 (* What reading the ACME file established. [test -f] reports an absent file by
    exiting non-zero, which is the channel a dropped connection arrives on too,

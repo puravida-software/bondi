@@ -502,6 +502,40 @@ let test_status_gathers_only_managed_containers () =
        (fun (c : Bondi_server__Docker__Client.container) -> c.id)
        (Status.managed_containers_of containers))
 
+(* --- Status.report: the composition the plan sits underneath --- *)
+
+(* [report]'s catch-all has no value form reachable through [plan]: a subsystem
+   that merely failed is collected into [errors] and returned beside everything
+   else, while an exception thrown out of the gather never reaches the planner
+   at all. Docker is reached over [net], so a net that raises is what puts one
+   there. *)
+exception Docker_socket_unreachable
+
+let unreachable_docker_net () =
+  let net = Eio_mock.Net.make "docker" in
+  Eio_mock.Net.on_getaddrinfo net [ `Raise Docker_socket_unreachable ];
+  Eio_mock.Net.on_connect net [ `Raise Docker_socket_unreachable ];
+  net
+
+let test_report_reports_an_escaping_exception () =
+  Eio_mock.Backend.run @@ fun () ->
+  let net = unreachable_docker_net () in
+  let clock = Eio_mock.Clock.make () in
+  let client = Bondi_server__Docker__Client.create () in
+  match Status.report ~client ~net ~clock ~service_name:(Some "myapp") with
+  | Ok _ ->
+      Alcotest.fail
+        "an exception out of the gather must not be reported as a status"
+  | Error (Bondi_server__Handler_error.Invalid_request msg) ->
+      Alcotest.failf
+        "an exception out of the gather is Bondi's fault, not the caller's, \
+         but it answered Invalid_request: %s"
+        msg
+  | Error (Bondi_server__Handler_error.Orchestrator_failure msg) ->
+      check bool "the failure carries the exception that escaped" true
+        (Bondi_common.String_utils.contains ~needle:"Docker_socket_unreachable"
+           msg)
+
 let () =
   run "Status.plan"
     [
@@ -537,5 +571,10 @@ let () =
             test_status_json_omits_empty_managed;
           test_case "gathers only managed containers" `Quick
             test_status_gathers_only_managed_containers;
+        ] );
+      ( "report",
+        [
+          test_case "an escaping exception becomes an orchestrator failure"
+            `Quick test_report_reports_an_escaping_exception;
         ] );
     ]

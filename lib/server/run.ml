@@ -126,22 +126,6 @@ let dispatch_alert ~deliver ~payload ~outcome =
   | Some ({ targets; payload = alert_payload } : Alert.dispatch) ->
       deliver ~targets ~payload:alert_payload
 
-type run_error = Invalid_request of string | Orchestrator_failure of string
-
-let run_error_message = function
-  | Invalid_request msg
-  | Orchestrator_failure msg ->
-      msg
-
-(* The failure class alone picks the status, so the Dream handler carries no
-   decision of its own. [Invalid_request] is a caller-supplied value that
-   failed a precondition and answers 400, matching what /deploy already returns
-   for a body it cannot decode; [Orchestrator_failure] is a fault on Bondi's
-   side of the call and answers 500. Neither is 404, which described neither. *)
-let status_of_run_error : run_error -> Dream.status = function
-  | Invalid_request _ -> `Bad_Request
-  | Orchestrator_failure _ -> `Internal_Server_Error
-
 (* The rejected body's keys are named; its values never are. A run payload
    carries env_vars and sink URLs that may embed credentials, and this message
    is returned over HTTP and mailed by cron. Without the key list the ppx's
@@ -151,11 +135,11 @@ let status_of_run_error : run_error -> Dream.status = function
 let decode_payload body =
   match Yojson.Safe.from_string body with
   | exception Yojson.Json_error msg ->
-      Error (Invalid_request ("invalid JSON: " ^ msg))
+      Error (Handler_error.Invalid_request ("invalid JSON: " ^ msg))
   | json ->
       run_payload_of_yojson json
       |> Result.map_error (fun msg ->
-          Invalid_request
+          Handler_error.Invalid_request
             (Printf.sprintf "invalid run payload: %s (keys received: %s)" msg
                (String.concat ", " (top_level_keys json))))
 
@@ -164,20 +148,20 @@ let decode_payload body =
    the crontab command's non-zero exit is its only failure channel. A
    payload that did decode knows both, so an untagged image dispatches here
    rather than short-circuiting past the dispatch point at the end of [run]. *)
-let prepare ~deliver body : (run_payload * string, run_error) result =
+let prepare ~deliver body : (run_payload * string, Handler_error.t) result =
   let* payload = decode_payload body in
   match parse_image payload.image with
   | Error msg ->
       dispatch_alert ~deliver ~payload ~outcome:(outcome_of_result (Error msg));
-      Error (Invalid_request msg)
+      Error (Handler_error.Invalid_request msg)
   | Ok (image_name, tag) -> Ok (payload, image_name ^ ":" ^ tag)
 
 (* Classify the container lifecycle result: a Docker-level failure is Bondi's
    fault, not the caller's. *)
 let response_of_run_result ~warning :
-    (int, string) result -> (run_response, run_error) result = function
+    (int, string) result -> (run_response, Handler_error.t) result = function
   | Ok exit_code -> Ok { exit_code; warning }
-  | Error msg -> Error (Orchestrator_failure msg)
+  | Error msg -> Error (Handler_error.Orchestrator_failure msg)
 
 (* Whether the post-run cleanup happens, and what it reported. Cleanup runs only
    when the container both started and finished: removing the previous container
@@ -193,8 +177,23 @@ let warning_of_run ~cleanup ~started ~run_result =
   | Error _, Error _ ->
       None
 
-let run ~client ~net ~deliver body =
-  let* payload, full_image = prepare ~deliver body in
+(* The whole of what the endpoint decides, with no transport named, so a caller
+   holding no HTTP request can reach it.
+
+   [deliver] arrives in the same shape the route was handed at startup, and the
+   resources it needs are bound here rather than by the caller: a caller that
+   had to pre-bind [net] and [clock] itself would be reconstructing part of the
+   endpoint, which is the thing this signature exists to make unnecessary. The
+   pure seams below it take the already-bound form, because none of them has a
+   net or a clock to give.
+
+   There is no catch-all here, unlike [Status.report] and [Deploy.deploy]. This
+   endpoint has never had one: an exception escaping it is answered by the web
+   framework, and turning that into an [Orchestrator_failure] would change the
+   body the caller reads. *)
+let run ~clock ~client ~net ~deliver body =
+  let post_alert ~targets ~payload = deliver ~net ~clock ~targets ~payload in
+  let* payload, full_image = prepare ~deliver:post_alert body in
   let container_name = temp_container_name payload.job in
   let opts = run_opts ~container_name ~full_image payload in
   (* Capture either the container's exit code or an orchestrator-start error;
@@ -217,16 +216,17 @@ let run ~client ~net ~deliver body =
      recorded and the container is cleaned up: it cannot change the returned
      outcome, though being synchronous it may delay this response by up to
      one per-sink timeout. *)
-  dispatch_alert ~deliver ~payload ~outcome:(outcome_of_result run_result);
+  dispatch_alert ~deliver:post_alert ~payload
+    ~outcome:(outcome_of_result run_result);
   response
 
 let route ~clock ~client ~net ~deliver =
   Dream.post "/run" @@ fun req ->
   let%lwt body = Dream.body req in
-  let post_alert ~targets ~payload = deliver ~net ~clock ~targets ~payload in
-  match run ~client ~net ~deliver:post_alert body with
+  match run ~clock ~client ~net ~deliver body with
   | Ok response ->
       response |> run_response_to_yojson |> Yojson.Safe.to_string |> Dream.json
   | Error err ->
-      Dream.respond ~status:(status_of_run_error err)
-        ("Run failed: " ^ run_error_message err)
+      Dream.respond
+        ~status:(Handler_error.http_status err)
+        ("Run failed: " ^ Handler_error.message err)

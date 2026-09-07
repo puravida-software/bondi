@@ -1,4 +1,5 @@
 module Run = Bondi_server__Run
+module Handler_error = Bondi_server__Handler_error
 module Docker = Bondi_server__Docker__Client
 module Alert = Bondi_common.Alert
 
@@ -207,7 +208,7 @@ let check_untagged_image_failure err =
   Alcotest.(check bool)
     "the failure is the untagged image, not an earlier rejection" true
     (Bondi_common.String_utils.contains ~needle:"has no tag"
-       (Run.run_error_message err))
+       (Handler_error.message err))
 
 let test_prepare_accepts_a_tagged_image () =
   let dispatched = ref [] in
@@ -218,7 +219,7 @@ let test_prepare_accepts_a_tagged_image () =
   with
   | Error err ->
       Alcotest.fail
-        ("prepare rejected a valid body: " ^ Run.run_error_message err)
+        ("prepare rejected a valid body: " ^ Handler_error.message err)
   | Ok (payload, full_image) ->
       Alcotest.(check string) "the tagged image survives" "myapp:v1" full_image;
       Alcotest.(check string) "the job name survives" "nightly" payload.Run.job;
@@ -253,7 +254,7 @@ let test_run_status_for_malformed_body () =
   in
   Alcotest.(check int)
     "a malformed body answers a client error, not 404" 400
-    (Dream.status_to_int (Run.status_of_run_error err));
+    (Dream.status_to_int (Handler_error.http_status err));
   Alcotest.(check (list (list string)))
     "a body that names no job has no sinks to alert to" [] !dispatched
 
@@ -274,7 +275,7 @@ let test_run_decode_error_names_keys_not_values () =
          ])
   in
   let msg =
-    Run.run_error_message
+    Handler_error.message
       (prepare_must_fail ~deliver:(recording_deliver dispatched) body)
   in
   List.iter
@@ -337,7 +338,7 @@ let test_run_status_for_orchestrator_failure () =
   | Error err ->
       Alcotest.(check int)
         "an orchestrator fault answers a server error, not 404" 500
-        (Dream.status_to_int (Run.status_of_run_error err))
+        (Dream.status_to_int (Handler_error.http_status err))
 
 let test_run_outcome_from_exit_code () =
   Alcotest.check outcome_testable "completed run classifies as Exited n"
@@ -373,6 +374,40 @@ let test_combine_warnings_some_some () =
     (Alcotest.option Alcotest.string)
     "both Some" (Some "a; b")
     (Run.combine_warnings (Some "a") (Some "b"))
+
+(* --- Run.run: the composition the seams sit underneath --- *)
+
+(* [prepare] takes [deliver] already bound to a net and a clock, so no test of
+   it can see where those come from. [run] is where they are bound, and an
+   untagged image is the one failure that reaches the dispatch without reaching
+   Docker -- which is why this pins the side channel with a client that is never
+   called. Pins run.mli's "the net and the clock it needs are bound here rather
+   than by the caller". *)
+let test_run_binds_its_own_net_and_clock_into_the_alert_channel () =
+  Eio_mock.Backend.run @@ fun () ->
+  let net = Eio_mock.Net.make "unused" in
+  let clock = Eio_mock.Clock.make () in
+  let client = Docker.create () in
+  let dispatched = ref [] in
+  let deliverer_got_runs_own_resources = ref None in
+  let deliver ~net:delivered_net ~clock:delivered_clock ~targets ~payload:_ =
+    deliverer_got_runs_own_resources :=
+      Some (delivered_net == net && delivered_clock == clock);
+    dispatched := !dispatched @ [ List.map Alert.sink_url targets ]
+  in
+  let body = run_body ~alert_sinks:alerting_sinks_json ~image:"myapp" () in
+  (match Run.run ~clock ~client ~net ~deliver body with
+  | Ok _ ->
+      Alcotest.fail "an untagged image must be refused before anything starts"
+  | Error err -> check_untagged_image_failure err);
+  Alcotest.(check (list (list string)))
+    "the alert side channel fires from inside run, not from the route"
+    [ [ "https://sink.example.com/x" ] ]
+    !dispatched;
+  Alcotest.(check (option bool))
+    "run handed the deliverer its own net and clock, not a rebound pair"
+    (Some true)
+    !deliverer_got_runs_own_resources
 
 let () =
   Alcotest.run "Run"
@@ -454,5 +489,11 @@ let () =
             test_run_opts_absent_network;
           Alcotest.test_case "cron container declares no restart policy" `Quick
             test_cron_run_container_declares_no_restart_policy;
+        ] );
+      ( "run",
+        [
+          Alcotest.test_case
+            "binds its own net and clock into the alert channel" `Quick
+            test_run_binds_its_own_net_and_clock_into_the_alert_channel;
         ] );
     ]
