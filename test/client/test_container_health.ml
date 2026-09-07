@@ -1,5 +1,6 @@
 open Alcotest
 module Health = Bondi_client.Container_health
+module Remote_exec = Bondi_client.Remote_exec
 
 let contains = Test_helpers.contains
 
@@ -110,7 +111,9 @@ let test_health_verdict_gone_when_container_stops () =
    failing check. *)
 let test_health_verdict_unreadable () =
   match
-    Health.verdict_of_output (Error "command failed (255): Connection closed")
+    Health.verdict_of_output
+      (Error
+         (Remote_exec.Ssh_failed { code = 255; output = "Connection closed" }))
   with
   | Health.Unreadable message ->
       check bool "carries what went wrong" true
@@ -121,6 +124,46 @@ let test_health_verdict_unreadable () =
   | Health.Timed_out _
   | Health.Gone ->
       fail "a read that never happened must be reported as unreadable"
+
+(* Reading a verdict off the value rather than off a match, so the cases below
+   stay about the difference between two failures and not about the five arms
+   they are not. *)
+let unreadable_message verdict =
+  match verdict with
+  | Health.Unreadable message -> message
+  | Health.Healthy
+  | Health.Unhealthy _
+  | Health.No_healthcheck
+  | Health.Timed_out _
+  | Health.Gone ->
+      fail "a wait that failed must be reported as unreadable"
+
+(* A host that ran the wait and answered with a non-zero exit has told this
+   client something about itself; a host that was never reached has not. Both
+   are unreadable waits, and reporting the second's wording on the first sends
+   an operator to the key when the answer is on the box. *)
+let test_a_host_that_answered_is_not_a_host_that_could_not_be_reached () =
+  let unreached =
+    unreadable_message
+      (Health.verdict_of_output
+         (Error
+            (Remote_exec.Ssh_failed
+               { code = 255; output = "Connection closed by 10.0.0.1 port 22" })))
+  in
+  let answered =
+    unreadable_message
+      (Health.verdict_of_output
+         (Error
+            (Remote_exec.Command_failed
+               { code = 1; output = "Cannot connect to the Docker daemon" })))
+  in
+  check bool "a host that ran the wait says so" true
+    (contains ~needle:"ran on the host" answered);
+  check bool "a host that was never reached does not" false
+    (contains ~needle:"ran on the host" unreached);
+  check bool "and each still carries what came back" true
+    (contains ~needle:"Connection closed" unreached
+    && contains ~needle:"Docker daemon" answered)
 
 (* Every [docker inspect] in the wait discards its stderr, so a daemon that is
    down, a socket the user may not open, or a CLI that errored for any other
@@ -267,6 +310,8 @@ let () =
             test_health_verdict_gone_when_container_stops;
           test_case "a read that could not be taken is unreadable" `Quick
             test_health_verdict_unreadable;
+          test_case "a host that answered is not a host never reached" `Quick
+            test_a_host_that_answered_is_not_a_host_that_could_not_be_reached;
           test_case "a reading that failed is not a stopped container" `Quick
             test_health_verdict_unreadable_read_is_not_a_stopped_container;
           test_case "output carrying no marker is a rejection" `Quick

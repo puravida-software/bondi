@@ -39,8 +39,13 @@ let test_destination_is_quoted () =
   check bool "user@host quoted" true
     (contains ~needle:"'root@203.0.113.7'" (cmd ()))
 
+let free_port () =
+  match Ssh_tunnel.free_local_port () with
+  | Ok port -> port
+  | Error e -> fail e
+
 let test_free_port_is_usable () =
-  let p = Ssh_tunnel.free_local_port () in
+  let p = free_port () in
   check bool "in the ephemeral range" true (p > 1024 && p < 65536);
   (* and actually bindable, which is the property the caller depends on *)
   let s = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
@@ -53,14 +58,48 @@ let test_free_port_is_usable () =
 let test_free_ports_differ () =
   (* Two calls handing back the same port would make concurrent deploys on one
      runner collide -- and the fleet runs 16 agents on one box. *)
-  let a = Ssh_tunnel.free_local_port () in
+  let a = free_port () in
   let s = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
   Fun.protect
     ~finally:(fun () -> Unix.close s)
     (fun () ->
       Unix.bind s (Unix.ADDR_INET (Unix.inet_addr_loopback, a));
-      let b = Ssh_tunnel.free_local_port () in
+      let b = free_port () in
       check bool "does not hand out a bound port" true (a <> b))
+
+let killed = "ssh tunnel was killed before the forward was usable"
+
+(* The sentence names the tunnel. An operator shown only the shared rendering --
+   "command failed (255)" -- cannot tell a forward that never opened from the
+   deploy the forward exists to carry. *)
+let test_exit_status_is_reported () =
+  let m = Ssh_tunnel.early_exit_message (Unix.WEXITED 7) in
+  check bool "names the tunnel" true (contains ~needle:"ssh tunnel" m);
+  check bool "carries the status" true (contains ~needle:"status 7" m);
+  check bool "says where to look" true (contains ~needle:"check the key" m)
+
+(* 255 is the code ssh reserves for its own failures, which Remote_exec
+   classifies apart from a remote exit. The tunnel reports the number either
+   way: for a forward there is no remote command whose code it could be. *)
+let test_ssh_own_failure_code_is_reported () =
+  check bool "carries 255" true
+    (contains ~needle:"status 255"
+       (Ssh_tunnel.early_exit_message (Unix.WEXITED 255)))
+
+(* An ssh that exits cleanly before the forward answers has still failed: -N
+   means it had nothing to do but hold the forward open. *)
+let test_clean_exit_is_still_a_failure () =
+  check bool "carries 0" true
+    (contains ~needle:"status 0"
+       (Ssh_tunnel.early_exit_message (Unix.WEXITED 0)))
+
+let test_signalled_reads_as_killed () =
+  check string "killed" killed
+    (Ssh_tunnel.early_exit_message (Unix.WSIGNALED Sys.sigterm))
+
+let test_stopped_reads_as_killed () =
+  check string "killed" killed
+    (Ssh_tunnel.early_exit_message (Unix.WSTOPPED Sys.sigstop))
 
 (* An unreachable host must fail as an error rather than hang: the readiness
    loop watches the ssh child, so its exit is reported instead of waited out.
@@ -101,6 +140,16 @@ let () =
         ] );
       ( "failure",
         [
+          test_case "exit status is reported" `Quick
+            test_exit_status_is_reported;
+          test_case "ssh's own failure code is reported" `Quick
+            test_ssh_own_failure_code_is_reported;
+          test_case "clean exit is still a failure" `Quick
+            test_clean_exit_is_still_a_failure;
+          test_case "signalled reads as killed" `Quick
+            test_signalled_reads_as_killed;
+          test_case "stopped reads as killed" `Quick
+            test_stopped_reads_as_killed;
           test_case "unreachable host errors" `Quick
             test_unreachable_host_errors;
         ] );

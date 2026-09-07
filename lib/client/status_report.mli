@@ -36,12 +36,17 @@ type observation = {
 (** Why a source has nothing to say.
 
     Two failures that an operator resolves in two different places. A source
-    that was never reached is a question about the network; a source that
-    answered with something this client cannot read is a question about what is
-    running at the other end, and is usually a version skew between the two.
-    Reporting the second as the first sends the reader looking in the wrong
-    place, and the answer that would have shown them which is gone by then —
-    hence the message carries what arrived. *)
+    that was never reached is a question about the network or the credentials
+    for it; a source that answered with something this client cannot read is a
+    question about what is running at the other end — a version skew for the
+    orchestrator over HTTP, a daemon that is down or a CLI that is not there for
+    the host over SSH. Reporting the second as the first sends the reader
+    looking in the wrong place, and the answer that would have shown them which
+    is gone by then — hence the message carries what arrived.
+
+    Both sources produce both arms. Which one an SSH-sourced reading became is
+    decided from the remote call's own outcome rather than from its rendered
+    text, since the text cannot say. *)
 type unavailability =
   | Not_consulted of string  (** nothing was obtained from it at all *)
   | Not_understood of string

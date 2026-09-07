@@ -1,8 +1,11 @@
 (* Markers rather than exit codes, and the probe always exits 0. SSH's own exit
    status already means "could the command be run on that host at all", and
-   overloading it with the verdict loses the verdict: the SSH layer reports a
-   non-zero remote command as an error carrying its stderr, discarding the
-   stdout that said why. The marker is the one signal that survives. *)
+   overloading it with the verdict loses the verdict: a non-zero exit is a
+   failure, and a failure is not a reading. The remote layer now carries the
+   command's whole output through a failure, so the marker is no longer lost in
+   transit -- but honouring one on a non-zero exit would make the exit status
+   mean two things again, which is what this convention exists to prevent. The
+   marker on an exit-0 answer is the one signal read. *)
 let serving_marker = "BONDI_ORCHESTRATOR_SERVING"
 let unreachable_marker = "BONDI_ORCHESTRATOR_UNREACHABLE"
 let container_name = "bondi-orchestrator"
@@ -30,6 +33,19 @@ let diagnostics_command =
      %s 2>&1; echo '--- last 50 log lines ---'; docker logs --tail 50 %s 2>&1"
     container_name container_name
 
+(* The probe always exits 0 and carries its verdict on standard output, so a
+   non-zero exit is the host reporting that it could not even get that far --
+   which is still the host answering. Saying the check could not be run is true
+   of a server that was never reached and false of one that ran it, and an
+   operator resolves the two in different places. *)
+let reason_of_failure failure =
+  if Remote_exec.ran_on_host failure then
+    Printf.sprintf "the readiness check ran on the server and failed: %s"
+      (Remote_exec.message failure)
+  else
+    Printf.sprintf "the readiness check could not be run on the server: %s"
+      (Remote_exec.message failure)
+
 let verdict probe =
   match probe with
   | Ok output ->
@@ -41,10 +57,7 @@ let verdict probe =
              "the orchestrator container did not answer GET %s. The readiness \
               check answered: %s"
              health_path (String.trim output))
-  | Error message ->
-      Error
-        (Printf.sprintf "the readiness check could not be run on the server: %s"
-           message)
+  | Error failure -> Error (reason_of_failure failure)
 
 let failure_message ~ip_address ~image ~reason ~diagnostics =
   Printf.sprintf

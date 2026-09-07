@@ -28,15 +28,19 @@ type reading = {
 (** Everything one server was asked, and what came back. *)
 
 val reading_of_reads :
-  listing:(string, string) result ->
-  inspection:(string, string) result ->
-  crontab:(string, string) result ->
+  listing:(string, Remote_exec.failure) result ->
+  inspection:(string, Remote_exec.failure) result ->
+  crontab:(string, Remote_exec.failure) result ->
   orchestrator:(orchestrator_reading, Status_report.unavailability) result ->
   reading
 (** Assemble a reading from the outcome of each read.
 
-    Every argument is the call's own result, so a read that never happened stays
-    distinguishable from one that answered and found nothing. This is the single
+    Every argument is the call's own outcome rather than a sentence about it, so
+    a read that never happened stays distinguishable from one that answered and
+    found nothing, and a host that answered badly stays distinguishable from one
+    that was never reached. Each of the three is handed to the module that owns
+    that reading, and each of those decides for itself what a
+    {!Remote_exec.failure} means for the thing it reports. This is the single
     place those four outcomes are turned into the report's own vocabulary, which
     is why it is a function rather than four lines inside {!gather}: it can be
     checked without a host. *)

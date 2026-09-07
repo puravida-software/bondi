@@ -4,6 +4,7 @@ module Inventory = Bondi_client.Host_inventory
 module Health = Bondi_client.Container_health
 module Crontab = Bondi_client.Crontab_listing
 module Config_file = Bondi_client.Config_file
+module Remote_exec = Bondi_client.Remote_exec
 
 let contains = Test_helpers.contains
 
@@ -110,6 +111,22 @@ let observation_of ~source view =
         source
         (unavailability_name unavailability)
 
+(* Which of the two a reading became, rather than what it said. The message can
+   be equal across both arms — it is the host's own words either way — so a test
+   that reads only the message cannot tell them apart, which is the state this
+   report was in. *)
+let unavailability_state (unavailability : Report.unavailability) =
+  match unavailability with
+  | Report.Not_consulted _ -> "not consulted"
+  | Report.Not_understood _ -> "not understood"
+
+let unavailability_state_of ~source view =
+  match view with
+  | Report.Unavailable unavailability -> unavailability_state unavailability
+  | Report.Absent -> failf "expected %s to be unavailable, got absent" source
+  | Report.Reported _ ->
+      failf "expected %s to be unavailable, got a reported observation" source
+
 let unavailability_of ~source view =
   match view with
   | Report.Unavailable unavailability -> unavailability_name unavailability
@@ -168,11 +185,15 @@ let test_report_row_exists_without_http () =
       does not empty the table either. *)
 let test_report_row_exists_without_ssh () =
   let rows =
-    report ~docker:(Inventory.Unreadable_listing "Missing ssh configuration") ()
+    report
+      ~docker:
+        (Inventory.Unreadable_listing
+           (Remote_exec.Not_configured { server = "10.0.0.1" }))
+      ()
   in
   let gateway = row_named (container_name "ibgateway") rows in
   check string "the source that could not be consulted says so"
-    "Missing ssh configuration"
+    "Missing ssh configuration for server 10.0.0.1"
     (unavailability_of ~source:"docker" gateway.docker);
   let observation =
     observation_of ~source:"the orchestrator" gateway.orchestrator
@@ -311,12 +332,16 @@ let test_report_source_absent_is_not_source_unavailable () =
   let answered = report ~docker:(Inventory.Observed []) () in
   let could_not_be_asked =
     report
-      ~docker:(Inventory.Unreadable_listing "ssh: connect: no route to host") ()
+      ~docker:
+        (Inventory.Unreadable_listing
+           (Remote_exec.Ssh_failed
+              { code = 255; output = "ssh: connect: no route to host" }))
+      ()
   in
   check_absent ~source:"docker"
     (row_named (container_name "ibgateway") answered).docker;
   check string "a listing that never ran carries why"
-    "ssh: connect: no route to host"
+    "command failed (255): ssh: connect: no route to host"
     (unavailability_of ~source:"docker"
        (row_named (container_name "ibgateway") could_not_be_asked).docker)
 
@@ -497,7 +522,12 @@ let test_render_undeclared_is_flagged () =
 let test_render_http_only_rows_flagged_unverified () =
   let unverified =
     rendered
-      (report ~docker:(Inventory.Unreadable_listing "ssh: no route to host") ())
+      (report
+         ~docker:
+           (Inventory.Unreadable_listing
+              (Remote_exec.Ssh_failed
+                 { code = 255; output = "ssh: no route to host" }))
+         ())
   in
   check bool "a row only the orchestrator has is flagged unverified" true
     (contains
@@ -851,6 +881,68 @@ let test_report_a_digest_split_two_ways_is_not_a_disagreement () =
   check bool "two different images still are" true
     (Report.disagrees (row_named "worker" drifted))
 
+(* 28. A host that was never reached is a source the report could not consult.
+       Its twin below is the same source having answered, and the pair is the
+       point: an operator sent to their key and the network by one, and to the
+       box by the other, is only sent to the right one if the report keeps them
+       apart. Nothing about the ssh client's own failure says anything about
+       what is running on the far end, so this arm claims nothing about it. *)
+let test_a_host_that_could_not_be_reached_is_not_consulted () =
+  let unreached =
+    Inventory.Unreadable_listing
+      (Remote_exec.Ssh_failed
+         { code = 255; output = "ssh: connect to host 10.0.0.1: no route" })
+  in
+  let gateway =
+    row_named (container_name "ibgateway") (report ~docker:unreached ())
+  in
+  check string "a host that was never reached could not be consulted"
+    "not consulted"
+    (unavailability_state_of ~source:"docker" gateway.docker);
+  let line =
+    line_naming
+      (container_name "ibgateway")
+      (rendered (report ~docker:unreached ()))
+  in
+  check bool "and the rendered row says the host was not read" true
+    (contains line ~needle:"not read");
+  check bool "carrying what ssh said" true (contains line ~needle:"no route")
+
+(* 29. The other arm. The host ran the listing and it exited non-zero — the
+       daemon is down, the socket is not there, the CLI is missing — so the box
+       has answered, and what it answered is the evidence. Reporting that as a
+       source that could not be consulted sends the reader to the network, where
+       there is nothing wrong, and the answer that would have shown them is gone
+       by the time they look. *)
+let test_a_host_that_answered_unreadably_is_not_understood () =
+  let refused =
+    Inventory.Unreadable_listing
+      (Remote_exec.Command_failed
+         {
+           code = 1;
+           output =
+             "Cannot connect to the Docker daemon at \
+              unix:///var/run/docker.sock";
+         })
+  in
+  let gateway =
+    row_named (container_name "ibgateway") (report ~docker:refused ())
+  in
+  check string "a host that ran the listing and refused it has answered"
+    "not understood"
+    (unavailability_state_of ~source:"docker" gateway.docker);
+  let line =
+    line_naming
+      (container_name "ibgateway")
+      (rendered (report ~docker:refused ()))
+  in
+  check bool "and the rendered row does not claim the host was not read" false
+    (contains line ~needle:"not read");
+  check bool "it says the answer is what could not be read" true
+    (contains line ~needle:"could not be read");
+  check bool "carrying what the host said" true
+    (contains line ~needle:"Cannot connect to the Docker daemon")
+
 let () =
   run "Status_report"
     [
@@ -927,5 +1019,9 @@ let () =
         [
           test_case "an unreadable answer is not an unreachable source" `Quick
             test_report_an_unreadable_answer_is_not_an_unreachable_source;
+          test_case "a host that could not be reached is not consulted" `Quick
+            test_a_host_that_could_not_be_reached_is_not_consulted;
+          test_case "a host that answered unreadably is not understood" `Quick
+            test_a_host_that_answered_unreadably_is_not_understood;
         ] );
     ]

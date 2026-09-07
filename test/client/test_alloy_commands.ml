@@ -54,9 +54,9 @@ let test_write_command_creates_the_file_rather_than_truncating_it () =
 
 (* `sh -c "a; b"` exits with b's status, so a write chained with `;` reports
    whatever the trailing chmod reported. chmod succeeds on a file that cat
-   created and then failed to fill -- and run_command_with_input deliberately
-   swallows its own write failure on the recorded grounds that the exit status
-   reports it. Measured 2026-09-03 with GNU coreutils 9.11 and dash 0.5.12:
+   created and then failed to fill -- and the runner deliberately swallows its
+   own write failure on the recorded grounds that the exit status reports it.
+   Measured 2026-09-03 with GNU coreutils 9.11 and dash 0.5.12:
 
      $ printf 'PART' | sh -c "rm -f f; cat > f; chmod 0640 f"; echo $?
      0

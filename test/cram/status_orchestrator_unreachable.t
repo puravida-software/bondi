@@ -6,9 +6,10 @@ and it answers on exactly that failure.
   $ ROOT="$PWD"
 
 The stub answers the three reads the report takes off the host, dispatching on
-the remote command string the client sends. $SSH_BROKEN makes every read fail, so
-the same fixture covers both an SSH source that answered and one that could not
-be consulted.
+the remote command string the client sends. $SSH_BROKEN makes every read fail
+before the command runs, and $SSH_DAEMON_DOWN makes every read run and fail, so
+the one fixture covers a source that answered, a source that could not be
+consulted, and a source whose answer could not be read.
 
   $ mkdir -p "$ROOT/bin"
   $ cat > "$ROOT/bin/ssh" <<'STUB'
@@ -16,6 +17,12 @@ be consulted.
   > while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done
   > shift
   > if [ -n "$SSH_BROKEN" ]; then echo 'Permission denied (publickey).' >&2; exit 255; fi
+  > # Reached, ran, and failed -- the code is not 255, which is the only thing
+  > # that separates it from the case above.
+  > if [ -n "$SSH_DAEMON_DOWN" ]; then
+  >   echo 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?' >&2
+  >   exit 1
+  > fi
   > case "$1" in
   >   'docker ps -a --format'*)
   >     printf 'my-service\tacme/app:1.4.0\trunning\n'
@@ -109,7 +116,8 @@ The affirmative arm on the same fixture. With SSH failing too, both sources say
 so on every row and no row disappears — a source that could not be consulted is a
 line, never a silence.
 
-  $ SSH_BROKEN=1 bondi-client status 2>&1 | sed -e 's/not reachable: .*/not reachable: <detail>/' -e 's/not read: .*/not read: <detail>/'
+  $ SSH_BROKEN=1 bondi-client status > out.log 2>&1
+  $ sed -e 's/not reachable: .*/not reachable: <detail>/' -e 's/not read: .*/not read: <detail>/' out.log
   Server: 127.0.0.1
   
   Service
@@ -126,6 +134,49 @@ line, never a silence.
     bondi section          docker  not read: <detail>
 
 
+The other way a source has nothing to give. The host was reached, it ran the
+command, and the command failed: a different sentence, and a different place to
+go — the box rather than the key and the network. The row says which of the two
+it was rather than only that the read did not work, and it carries what the host
+said while failing, which is the part an operator acts on. The crontab line
+words it differently because it is a cell rather than a row with two sides: the
+listing prefixes its own account of what happened and the cell prints it.
+
+What this does not show, because nothing can show it: a command that itself
+exits 255 comes back indistinguishable from ssh's own failure and is reported as
+the block above. The code here is 1, and the code is the whole of the
+difference between these two blocks.
+
+  $ SSH_DAEMON_DOWN=1 bondi-client status 2>&1 | sed 's/not reachable: .*/not reachable: <detail>/'
+  Server: 127.0.0.1
+  
+  Service
+    NAME                   SOURCE  IMAGE                            TAG          STATUS        RESTARTS  HEALTH
+    my-service             docker  answered with something that could not be read: command failed (1): Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?
+                           orch    not reachable: <detail>
+  
+  Infrastructure
+    NAME                   SOURCE  IMAGE                            TAG          STATUS        RESTARTS  HEALTH
+    bondi-orchestrator     docker  answered with something that could not be read: command failed (1): Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?
+                           orch    not reachable: <detail>
+  
+  Crontab
+    bondi section          docker  not read: the read ran on the host and failed: command failed (1): Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?
+
+The exit code is still zero, and the machine-readable form keeps the two apart
+in a field rather than in a sentence: on the same run, the two host readings say
+they could not be read and the two orchestrator readings say they could not be
+consulted.
+
+  $ SSH_DAEMON_DOWN=1 bondi-client status > /dev/null 2>&1
+  $ echo $?
+  0
+  $ SSH_DAEMON_DOWN=1 bondi-client status --output json > out.json 2>&1
+  $ grep -c '"reason": "not_understood"' out.json
+  2
+  $ grep -c '"reason": "not_consulted"' out.json
+  2
+
 A server with no ssh block in its configuration is a source that cannot be
 consulted, not an error: the run still exits zero and still prints its table.
 
@@ -141,7 +192,8 @@ consulted, not an error: the run still exits zero and still prints its table.
   > bondi_server:
   >   version: "0.10.3"
   > EOF
-  $ bondi-client status 2>&1 | sed 's/not reachable: .*/not reachable: <detail>/' | head -6
+  $ bondi-client status > out.log 2>&1
+  $ sed 's/not reachable: .*/not reachable: <detail>/' out.log | head -6
   Server: 127.0.0.1
   
   Service
@@ -175,7 +227,8 @@ sources and does not quietly collapse them.
   > bondi_server:
   >   version: "0.10.3"
   > EOF
-  $ bondi-client status --output json 2>&1 | grep -E '"(name|source|reason|state|health)"' | sed 's/^ *//' | head -14
+  $ bondi-client status --output json > out.json 2>&1
+  $ grep -E '"(name|source|reason|state|health)"' out.json | sed 's/^ *//' | head -14
   "name": "my-service",
   "source": "reported",
   "state": "running",

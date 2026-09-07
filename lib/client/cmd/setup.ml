@@ -1,100 +1,5 @@
 let ( let* ) = Result.bind
 
-let read_all ic =
-  let buffer = Buffer.create 256 in
-  (try
-     while true do
-       let line = input_line ic in
-       Buffer.add_string buffer line;
-       Buffer.add_char buffer '\n'
-     done
-   with
-  | End_of_file -> ());
-  Buffer.contents buffer
-
-(* [input] is written to the command's standard input rather than embedded in
-   the command itself, so that a payload carrying credentials never appears in
-   argv on either machine. Nothing drains the command's output while the write
-   is in flight, so callers must keep [input] small enough to fit the pipe
-   buffer; an env file is a few hundred bytes. *)
-let run_command_with_input cmd input =
-  let in_chan, out_chan, err_chan =
-    Unix.open_process_full cmd (Unix.environment ())
-  in
-  (* Writing to a command that has already exited raises SIGPIPE, which by
-     default terminates this process before the exit status below can report
-     anything. Ignoring it for the duration of the write is what turns that
-     into the Sys_error the handler expects. Restored afterwards so the
-     disposition is not changed program-wide. *)
-  let previous_sigpipe = Sys.signal Sys.sigpipe Sys.Signal_ignore in
-  Fun.protect
-    ~finally:(fun () -> Sys.set_signal Sys.sigpipe previous_sigpipe)
-    (fun () ->
-      (* The command may exit before reading its input, which closes the pipe.
-         That is reported by the exit status below, so the write failing is not
-         itself an error worth surfacing. *)
-      try
-        output_string out_chan input;
-        flush out_chan
-      with
-      | Sys_error _ -> ());
-  close_out_noerr out_chan;
-  let stdout = read_all in_chan in
-  let stderr = read_all err_chan in
-  match Unix.close_process_full (in_chan, out_chan, err_chan) with
-  | Unix.WEXITED 0 -> Ok stdout
-  | Unix.WEXITED code ->
-      Error (Printf.sprintf "command failed (%d): %s" code (String.trim stderr))
-  | Unix.WSIGNALED signal ->
-      Error
-        (Printf.sprintf "command killed (%d): %s" signal (String.trim stderr))
-  | Unix.WSTOPPED signal ->
-      Error
-        (Printf.sprintf "command stopped (%d): %s" signal (String.trim stderr))
-
-let run_command cmd = run_command_with_input cmd ""
-
-let with_temp_key contents f =
-  let path = Filename.temp_file "bondi-key-" ".pem" in
-  let decoded = Docker_common.decode_private_key contents in
-  let oc = open_out path in
-  Fun.protect
-    ~finally:(fun () ->
-      close_out_noerr oc;
-      Sys.remove path)
-    (fun () ->
-      output_string oc decoded;
-      close_out oc;
-      Unix.chmod path 0o600;
-      f path)
-
-(* Shares Docker_common's option set rather than restating a subset of it.
-   This spelling had BatchMode and StrictHostKeyChecking but not ConnectTimeout
-   or the keepalives, so setup -- the command that makes by far the most SSH
-   calls -- was the one with no bound on a connection that hangs.
-
-   Multiplexing matters most here: setup issues 31 of these, and each one paid a
-   full handshake. See Docker_common.multiplex_options. *)
-let ssh_command ~user ~host ~key_path cmd =
-  let destination = user ^ "@" ^ host in
-  Printf.sprintf "ssh -i %s %s %s %s -- %s" (Filename.quote key_path)
-    (String.concat " " Docker_common.ssh_options)
-    (String.concat " " (Docker_common.multiplex_options ()))
-    (Filename.quote destination)
-    (Filename.quote cmd)
-
-let remote_run ~user ~host ~key_path cmd =
-  run_command (ssh_command ~user ~host ~key_path cmd)
-
-let remote_run_with_input ~user ~host ~key_path ~input cmd =
-  run_command_with_input (ssh_command ~user ~host ~key_path cmd) input
-
-let get_docker_version ~user ~host ~key_path =
-  remote_run ~user ~host ~key_path "docker --version"
-
-let run_remote_docker ~user ~host ~key_path cmd =
-  remote_run ~user ~host ~key_path ("docker " ^ cmd)
-
 (* ------------------------------------------------------------------------- *)
 (* Types                                                                     *)
 (* ------------------------------------------------------------------------- *)
@@ -148,7 +53,8 @@ type managed_observation =
    which restarts the daemon and every container with it. Absence is the host's
    own report that the command does not exist, never a failure to ask — and
    both reach the client the same way, since [ssh] propagates the remote
-   shell's exit 127 and [run_command] turns any non-zero exit into an [Error].
+   shell's exit 127 and [Remote_exec.command_output_text] turns any non-zero
+   exit into an [Error].
    The two are told apart by what the host said, not by which channel said
    it. *)
 type docker_status =
@@ -656,6 +562,15 @@ let managed_of_ps_output output =
       | _ :: _ :: _ :: _ ->
           None)
 
+(* The status a shell exits with when the command does not exist: POSIX
+   reserves 127 for it, and the shell on this machine was observed exiting 127
+   for one on 2026-09-04. ssh propagates the remote command's status, so it
+   reaches this client as the host's own answer. The words that come with it do
+   not carry that answer -- they are the remote shell's, and nothing here pins
+   which shell the host runs -- so they are kept for the operator to read and
+   never read for the verdict. *)
+let shell_command_not_found_code = 127
+
 let docker_status_of_probe = function
   | Ok version_output ->
       if
@@ -664,13 +579,20 @@ let docker_status_of_probe = function
       then Docker_not_installed (String.trim version_output)
       else Docker_installed (String.trim version_output)
   (* The shell reports a missing command by exiting non-zero, which is the same
-     channel a dropped connection arrives on. An error carrying the shell's own
-     words is the host answering, and it is the only error that may lead to an
-     install. *)
-  | Error err
-    when Bondi_common.String_utils.contains ~needle:"command not found" err ->
-      Docker_not_installed (String.trim err)
-  | Error err -> Docker_undetermined err
+     channel a dropped connection arrives on. What tells them apart is the
+     status the host's own shell returned, and that reading is the only one
+     that may lead to an install. *)
+  | Error failure -> (
+      match failure with
+      | Remote_exec.Command_failed { code; _ }
+        when code = shell_command_not_found_code ->
+          Docker_not_installed (String.trim (Remote_exec.message failure))
+      | Remote_exec.Command_failed _
+      | Remote_exec.Not_configured _
+      | Remote_exec.Ssh_failed _
+      | Remote_exec.Signalled _
+      | Remote_exec.Stopped _ ->
+          Docker_undetermined (Remote_exec.message failure))
 
 (* Installing Docker is the one action here that changes a host nobody asked to
    change: it restarts the daemon, and with it every container carrying a
@@ -697,17 +619,25 @@ let docker_install_verdict_of_probe probe =
    but 7.76.0 is required, which is a failure to ask dressed as a fact about
    curl. Absence is different: the host's own report that the command does not
    exist arrives on the same channel and is an answer, so the two are told apart
-   by what the host said rather than by which channel said it. *)
+   by the status the host's shell returned rather than by the channel it came
+   on or the words it came with. *)
 type cron_curl_verdict =
   | Cron_curl_reported of string
   | Cron_curl_undetermined of string
 
 let cron_curl_verdict_of_probe = function
   | Ok output -> Cron_curl_reported output
-  | Error err
-    when Bondi_common.String_utils.contains ~needle:"command not found" err ->
-      Cron_curl_reported err
-  | Error err -> Cron_curl_undetermined err
+  | Error failure -> (
+      match failure with
+      | Remote_exec.Command_failed { code; _ }
+        when code = shell_command_not_found_code ->
+          Cron_curl_reported (Remote_exec.message failure)
+      | Remote_exec.Command_failed _
+      | Remote_exec.Not_configured _
+      | Remote_exec.Ssh_failed _
+      | Remote_exec.Signalled _
+      | Remote_exec.Stopped _ ->
+          Cron_curl_undetermined (Remote_exec.message failure))
 
 (* What reading the ACME file established. [test -f] reports an absent file by
    exiting non-zero, which is the channel a dropped connection arrives on too,
@@ -740,9 +670,11 @@ let acme_file_state_of_probe = function
           (Printf.sprintf "the host answered without saying which: %s"
              (String.trim output))
 
-let gather_context ~user ~host ~key_path : (setup_context, string) result =
+let gather_context (server : Config_file.server) :
+    (setup_context, string) result =
   let docker_status =
-    docker_status_of_probe (get_docker_version ~user ~host ~key_path)
+    docker_status_of_probe
+      (Remote_exec.docker_command_output ~command:"--version" server)
   in
   let orchestrator =
     match docker_status with
@@ -750,7 +682,8 @@ let gather_context ~user ~host ~key_path : (setup_context, string) result =
     | Docker_undetermined message -> Orchestrator_undetermined message
     | Docker_installed _ ->
         orchestrator_state_of_probe
-          (run_remote_docker ~user ~host ~key_path orchestrator_ps_command)
+          (Remote_exec.docker_command_output_text
+             ~command:orchestrator_ps_command server)
   in
   let alloy_state =
     match docker_status with
@@ -758,7 +691,8 @@ let gather_context ~user ~host ~key_path : (setup_context, string) result =
     | Docker_undetermined message -> Alloy_undetermined message
     | Docker_installed _ ->
         alloy_state_of_probe
-          (run_remote_docker ~user ~host ~key_path alloy_ps_command)
+          (Remote_exec.docker_command_output_text ~command:alloy_ps_command
+             server)
   in
   let managed =
     match docker_status with
@@ -769,7 +703,10 @@ let gather_context ~user ~host ~key_path : (setup_context, string) result =
        empty one is a claim about the host that nothing supports. *)
     | Docker_undetermined message -> Managed_unobserved message
     | Docker_installed _ -> (
-        match run_remote_docker ~user ~host ~key_path managed_ps_command with
+        match
+          Remote_exec.docker_command_output_text ~command:managed_ps_command
+            server
+        with
         | Ok output -> Managed_observed (managed_of_ps_output output)
         | Error err -> Managed_unobserved err)
   in
@@ -1019,8 +956,9 @@ let alloy_river_config (config : Config_file.t) (alloy : Config_file.alloy) :
 (* Phase 3: Interpreter                                                      *)
 (* ------------------------------------------------------------------------- *)
 
-let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
+let interpret (server : Config_file.server) (config : Config_file.t)
     (actions : action list) : (unit, string) result =
+  let ip_address = server.Config_file.ip_address in
   (* One action, applied. No arm here knows what follows it: the plan stops at
      the first failure, and saying what that leaves undone is [run]'s job
      below. *)
@@ -1032,7 +970,7 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
            [docker_install_verdict_of_probe]; this arm only carries it out. *)
         match
           docker_install_verdict_of_probe
-            (get_docker_version ~user ~host ~key_path)
+            (Remote_exec.docker_command_output ~command:"--version" server)
         with
         (* Bare: [run] below names the server once, for every arm. *)
         | Docker_abort message -> Error message
@@ -1050,7 +988,9 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
               "curl -fsSL https://get.docker.com -o get-docker.sh && sudo sh \
                get-docker.sh"
             in
-            let* output = remote_run ~user ~host ~key_path install_cmd in
+            let* output =
+              Remote_exec.command_output_text ~command:install_cmd server
+            in
             print_endline
               (Printf.sprintf "Docker installed on server %s: %s" ip_address
                  (String.trim output));
@@ -1063,8 +1003,9 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
         let* () =
           match
             acme_file_state_of_probe
-              (remote_run ~user ~host ~key_path
-                 (acme_probe_command ~path:acme_file))
+              (Remote_exec.command_output_text
+                 ~command:(acme_probe_command ~path:acme_file)
+                 server)
           with
           | Acme_file_undetermined message ->
               Error
@@ -1077,7 +1018,7 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
                 Printf.sprintf "sudo chown root:root %s && sudo chmod 600 %s"
                   acme_file acme_file
               in
-              let* _ = remote_run ~user ~host ~key_path cmd in
+              let* _ = Remote_exec.command_output_text ~command:cmd server in
               print_endline
                 (Printf.sprintf "ACME file permissions updated on server %s: %s"
                    ip_address acme_file);
@@ -1089,7 +1030,9 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
                    %s && sudo chmod 600 %s"
                   acme_dir acme_file acme_file acme_file
               in
-              let* output = remote_run ~user ~host ~key_path cmd in
+              let* output =
+                Remote_exec.command_output_text ~command:cmd server
+              in
               print_endline
                 (Printf.sprintf "ACME file created on server %s: %s" ip_address
                    (String.trim output));
@@ -1104,7 +1047,7 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
             (Filename.quote network_name)
             (Filename.quote network_name)
         in
-        let* _ = remote_run ~user ~host ~key_path cmd in
+        let* _ = Remote_exec.command_output_text ~command:cmd server in
         print_endline
           (Printf.sprintf "Network %s is present on server %s" network_name
              ip_address);
@@ -1116,7 +1059,7 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
         let* output =
           match
             cron_curl_verdict_of_probe
-              (remote_run ~user ~host ~key_path "curl --version")
+              (Remote_exec.command_output ~command:"curl --version" server)
           with
           | Cron_curl_reported output -> Ok output
           | Cron_curl_undetermined message ->
@@ -1137,7 +1080,8 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
         Ok ()
     | StopOrchestrator ->
         let* _ =
-          run_remote_docker ~user ~host ~key_path "stop bondi-orchestrator"
+          Remote_exec.docker_command_output_text
+            ~command:"stop bondi-orchestrator" server
         in
         print_endline
           (Printf.sprintf "Stopped bondi-orchestrator container on server %s"
@@ -1155,7 +1099,7 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
            . && { echo 'bondi-orchestrator could not be removed' >&2; exit 1; \
            } || true"
         in
-        let* _ = remote_run ~user ~host ~key_path cmd in
+        let* _ = Remote_exec.command_output_text ~command:cmd server in
         print_endline
           (Printf.sprintf "Removed bondi-orchestrator container on server %s"
              ip_address);
@@ -1163,7 +1107,7 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
     | RunServer ->
         let image = "mlopez1506/bondi-server:" ^ config.bondi_server.version in
         let* run_cmd = orchestrator_run_command config in
-        let* _ = remote_run ~user ~host ~key_path run_cmd in
+        let* _ = Remote_exec.command_output_text ~command:run_cmd server in
         (* Assert the posture rather than assume the run command took. This is
            the step whose absence let an undeclared loopback binding be reverted
            silently on 2026-08-29: the container came back healthy on 0.0.0.0
@@ -1171,7 +1115,8 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
            "is it up", which is a different question. *)
         let expected = orchestrator_bind_address config in
         let* published =
-          remote_run ~user ~host ~key_path orchestrator_port_command
+          Remote_exec.command_output_text ~command:orchestrator_port_command
+            server
         in
         let* () =
           match published_binding_matches ~expected published with
@@ -1190,18 +1135,20 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
            fetches the container's own account of the failure only when there is
            one to explain. *)
         let probe =
-          remote_run ~user ~host ~key_path
-            (Orchestrator_probe.probe_command
-               ~port:Bondi_common.Defaults.server_port
-               ~attempts:Orchestrator_probe.readiness_attempts)
+          Remote_exec.command_output
+            ~command:
+              (Orchestrator_probe.probe_command
+                 ~port:Bondi_common.Defaults.server_port
+                 ~attempts:Orchestrator_probe.readiness_attempts)
+            server
         in
         let* () =
           Orchestrator_probe.verdict probe
           |> Result.map_error (fun reason ->
               let diagnostics =
                 match
-                  remote_run ~user ~host ~key_path
-                    Orchestrator_probe.diagnostics_command
+                  Remote_exec.command_output_text
+                    ~command:Orchestrator_probe.diagnostics_command server
                 with
                 | Ok output -> String.trim output
                 | Error message -> message
@@ -1226,10 +1173,10 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
                root-owned command that also sets the mode.
 
                Both numbers below were measured rather than reasoned about,
-               because run_command_with_input drains no output while the write
-               is in flight and a payload larger than the pipe buffer deadlocks
-               it. A generated config with three labels and an excluded
-               container is 1041 bytes; an unadjusted pipe on this platform
+               because the runner drains no output while the write is in flight
+               and a payload larger than the pipe buffer deadlocks it. A
+               generated config with three labels and an excluded container is
+               1041 bytes; an unadjusted pipe on this platform
                holds 65536, read from F_GETPIPE_SZ rather than from the
                /proc ceiling, which reports the maximum a pipe may be raised to
                and not the capacity it has. The config grows only with the
@@ -1237,15 +1184,18 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
                most one name -- so reaching the buffer would take on the order
                of a thousand declared labels. *)
             let* _ =
-              remote_run_with_input ~user ~host ~key_path ~input:river_config
-                (alloy_config_write_command ~mode:alloy_config_declared_mode)
+              Remote_exec.command_output_text ~input:river_config
+                ~command:
+                  (alloy_config_write_command ~mode:alloy_config_declared_mode)
+                server
             in
             (* Asking for a mode is not applying one, so the file is read back
                before the run says it wrote it. A write whose chmod was refused,
                or that landed somewhere a later phase does not look at, is
                otherwise a clean setup over a file at the host's umask. *)
             let* probe_output =
-              remote_run ~user ~host ~key_path alloy_config_mode_command
+              Remote_exec.command_output_text ~command:alloy_config_mode_command
+                server
             in
             let* () =
               match
@@ -1295,12 +1245,13 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
                instead of interpolating them.
 
                The payload is two short lines, far inside the 65536-byte pipe
-               that run_command_with_input measures against -- it drains no
-               output while the write is in flight, so a payload larger than the
-               buffer would deadlock. *)
+               the runner measures against -- it drains no output while the
+               write is in flight, so a payload larger than the buffer would
+               deadlock. *)
             let* _ =
-              remote_run_with_input ~user ~host ~key_path ~input:contents
-                (alloy_env_write_command ~mode:alloy_env_declared_mode)
+              Remote_exec.command_output_text ~input:contents
+                ~command:(alloy_env_write_command ~mode:alloy_env_declared_mode)
+                server
             in
             (* The path, not the contents. A message that quoted what it wrote
                would put the key back in the place this arm exists to take it
@@ -1318,27 +1269,40 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
                 ~default:Bondi_common.Defaults.alloy_image
             in
             let* output =
-              remote_run ~user ~host ~key_path (alloy_run_command ~image)
+              Remote_exec.command_output_text
+                ~command:(alloy_run_command ~image) server
             in
             print_endline
               (Printf.sprintf "bondi-alloy container started on server %s: %s"
                  ip_address (String.trim output));
             Ok ())
     | StopAlloy ->
-        let* _ = run_remote_docker ~user ~host ~key_path "stop bondi-alloy" in
+        let* _ =
+          Remote_exec.docker_command_output_text ~command:"stop bondi-alloy"
+            server
+        in
         print_endline
           (Printf.sprintf "Stopped bondi-alloy container on server %s"
              ip_address);
         Ok ()
     | RemoveAlloy ->
-        let* _ = run_remote_docker ~user ~host ~key_path "rm bondi-alloy" in
-        let* _ = remote_run ~user ~host ~key_path alloy_remove_config_command in
+        let* _ =
+          Remote_exec.docker_command_output_text ~command:"rm bondi-alloy"
+            server
+        in
+        let* _ =
+          Remote_exec.command_output_text ~command:alloy_remove_config_command
+            server
+        in
         print_endline
           (Printf.sprintf
              "Removed bondi-alloy container and config on server %s" ip_address);
         Ok ()
     | CleanAlloyConfig ->
-        let* _ = remote_run ~user ~host ~key_path alloy_remove_config_command in
+        let* _ =
+          Remote_exec.command_output_text ~command:alloy_remove_config_command
+            server
+        in
         print_endline
           (Printf.sprintf
              "No alloy is configured for server %s: %s is not on the host"
@@ -1363,7 +1327,9 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
             (Managed_container.secret_env_file_contents spec)
             ~default:""
         in
-        let* _ = remote_run_with_input ~user ~host ~key_path ~input write_cmd in
+        let* _ =
+          Remote_exec.command_output_text ~input ~command:write_cmd server
+        in
         print_endline
           (Printf.sprintf "Wrote secret environment file on server %s: %s"
              ip_address env_path);
@@ -1371,7 +1337,8 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
     | RunManaged spec ->
         let args = Managed_container.run_args spec |> List.map Filename.quote in
         let* output =
-          run_remote_docker ~user ~host ~key_path (String.concat " " args)
+          Remote_exec.docker_command_output_text
+            ~command:(String.concat " " args) server
         in
         print_endline
           (Printf.sprintf "%s container started on server %s: %s"
@@ -1381,8 +1348,9 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
     | StopManaged name ->
         let container = Managed_container.container_name_of name in
         let* _ =
-          run_remote_docker ~user ~host ~key_path
-            ("stop " ^ Filename.quote container)
+          Remote_exec.docker_command_output_text
+            ~command:("stop " ^ Filename.quote container)
+            server
         in
         print_endline
           (Printf.sprintf "Stopped %s container on server %s" container
@@ -1391,8 +1359,9 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
     | RemoveManaged name ->
         let container = Managed_container.container_name_of name in
         let* _ =
-          run_remote_docker ~user ~host ~key_path
-            ("rm " ^ Filename.quote container)
+          Remote_exec.docker_command_output_text
+            ~command:("rm " ^ Filename.quote container)
+            server
         in
         print_endline
           (Printf.sprintf "Removed %s container on server %s" container
@@ -1401,7 +1370,9 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
     | CleanManagedConfig name ->
         let dir = Managed_container.config_dir_of name in
         let* _ =
-          remote_run ~user ~host ~key_path ("sudo rm -rf " ^ Filename.quote dir)
+          Remote_exec.command_output_text
+            ~command:("sudo rm -rf " ^ Filename.quote dir)
+            server
         in
         print_endline
           (Printf.sprintf "Removed config directory on server %s: %s" ip_address
@@ -1446,10 +1417,11 @@ let interpret ~user ~host ~key_path ~ip_address (config : Config_file.t)
    container, so the pid and StartedAt are untouched -- measured 2026-09-02
    against Docker 29.x, not reasoned from the documentation. Recreating the
    orchestrator to change a flag would drop TLS for every site on the box. *)
-let converge_orchestrator_restart_policy ~user ~host ~key_path ~ip_address =
+let converge_orchestrator_restart_policy (server : Config_file.server) =
+  let ip_address = server.Config_file.ip_address in
   let expected = Bondi_common.Defaults.bondi_restart_policy in
   let* reported =
-    remote_run ~user ~host ~key_path orchestrator_restart_command
+    Remote_exec.command_output_text ~command:orchestrator_restart_command server
   in
   match orchestrator_restart_convergence ~expected reported with
   | Restart_policy_already_applied -> Ok ()
@@ -1466,9 +1438,10 @@ let converge_orchestrator_restart_policy ~user ~host ~key_path ~ip_address =
             than corrected blind"
            ip_address orchestrator_restart_command)
   | Restart_policy_needs_update { observed; command } ->
-      let* _ = remote_run ~user ~host ~key_path command in
+      let* _ = Remote_exec.command_output_text ~command server in
       let* applied =
-        remote_run ~user ~host ~key_path orchestrator_restart_command
+        Remote_exec.command_output_text ~command:orchestrator_restart_command
+          server
       in
       let* () =
         declared_restart_matches ~expected applied
@@ -1495,73 +1468,70 @@ let converge_orchestrator_restart_policy ~user ~host ~key_path ~ip_address =
 
 let setup_server config server =
   let open Config_file in
-  let { ip_address; ssh; _ } = server in
+  let { ip_address; _ } = server in
   print_endline ("Processing server: " ^ ip_address);
-  match ssh with
-  | None ->
-      prerr_endline ("Missing ssh configuration for server " ^ ip_address);
+  match Remote_exec.ssh_config server with
+  | Error failure ->
+      prerr_endline (Remote_exec.message failure);
       Error "missing ssh configuration"
-  | Some ssh_config ->
-      with_temp_key ssh_config.private_key_contents (fun key_path ->
-          let user = ssh_config.user in
-          let host = ip_address in
-          let* context = gather_context ~user ~host ~key_path in
-          (* [plan_for_config] refuses a reading it could not take, and it does
-             not know which host it was taken from. Every failure the
-             interpreter reports names its server, and [run] below prints them
-             all at the end of a multi-server run, far from the "Processing
-             server" line that would otherwise have to identify them. *)
-          let* actions =
-            plan_for_config config context
-            |> Result.map_error (fun message ->
-                Printf.sprintf "server %s: %s" ip_address message)
-          in
-          (* Log skip/restart reason when a container is already there *)
-          (match context.orchestrator with
-          | Orchestrator_absent -> ()
-          (* Nothing to report: [plan_for_config] above has already refused a
-             listing that never ran, so this line is never reached with one. *)
-          | Orchestrator_undetermined _ -> ()
-          | Orchestrator_not_running ->
-              print_endline
-                (Printf.sprintf
-                   "bondi-orchestrator on server %s exists but is not running, \
-                    replacing it..."
-                   ip_address)
-          | Orchestrator_running { version = running } ->
-              if not (List.mem RunServer actions) then
-                print_endline
-                  (Printf.sprintf
-                     "bondi-orchestrator container is already running on \
-                      server %s: %s, skipping..."
-                     ip_address running)
-              else
-                let reason =
-                  if running <> config.bondi_server.version then
-                    Printf.sprintf "version mismatch: running %s, want %s"
-                      running config.bondi_server.version
-                  else "adding cron job support"
-                in
-                print_endline
-                  (Printf.sprintf
-                     "bondi-orchestrator on server %s: %s, stopping to \
-                      restart..."
-                     ip_address reason));
-          let* () =
-            interpret ~user ~host ~key_path ~ip_address config actions
-          in
-          match context.docker_status with
-          (* A host that had no Docker holds no container this run did not just
-             create, and it was created by a command that carries the flag. The
-             convergence exists for containers that predate the run; here there
-             are none. *)
-          | Docker_not_installed _ -> Ok ()
-          (* [plan_for_config] has already refused a Docker version it could not
-             read, so this arm is never reached with one. *)
-          | Docker_undetermined _ -> Ok ()
-          | Docker_installed _ ->
-              converge_orchestrator_restart_policy ~user ~host ~key_path
-                ~ip_address)
+  (* The credentials are read again, per call, by the module that owns the key
+     on disk. What is decided here is only whether there are any: a server with
+     no [ssh] block is reported once, by name, rather than once per command it
+     was never going to run. Which server that is, and how the absence reads,
+     are both the runner's to say -- this is the one place that asks it. *)
+  | Ok _ -> (
+      let* context = gather_context server in
+      (* [plan_for_config] refuses a reading it could not take, and it does not
+         know which host it was taken from. Every failure the interpreter
+         reports names its server, and [run] below prints them all at the end of
+         a multi-server run, far from the "Processing server" line that would
+         otherwise have to identify them. *)
+      let* actions =
+        plan_for_config config context
+        |> Result.map_error (fun message ->
+            Printf.sprintf "server %s: %s" ip_address message)
+      in
+      (* Log skip/restart reason when a container is already there *)
+      (match context.orchestrator with
+      | Orchestrator_absent -> ()
+      (* Nothing to report: [plan_for_config] above has already refused a
+         listing that never ran, so this line is never reached with one. *)
+      | Orchestrator_undetermined _ -> ()
+      | Orchestrator_not_running ->
+          print_endline
+            (Printf.sprintf
+               "bondi-orchestrator on server %s exists but is not running, \
+                replacing it..."
+               ip_address)
+      | Orchestrator_running { version = running } ->
+          if not (List.mem RunServer actions) then
+            print_endline
+              (Printf.sprintf
+                 "bondi-orchestrator container is already running on server \
+                  %s: %s, skipping..."
+                 ip_address running)
+          else
+            let reason =
+              if running <> config.bondi_server.version then
+                Printf.sprintf "version mismatch: running %s, want %s" running
+                  config.bondi_server.version
+              else "adding cron job support"
+            in
+            print_endline
+              (Printf.sprintf
+                 "bondi-orchestrator on server %s: %s, stopping to restart..."
+                 ip_address reason));
+      let* () = interpret server config actions in
+      match context.docker_status with
+      (* A host that had no Docker holds no container this run did not just
+         create, and it was created by a command that carries the flag. The
+         convergence exists for containers that predate the run; here there are
+         none. *)
+      | Docker_not_installed _ -> Ok ()
+      (* [plan_for_config] has already refused a Docker version it could not
+         read, so this arm is never reached with one. *)
+      | Docker_undetermined _ -> Ok ()
+      | Docker_installed _ -> converge_orchestrator_restart_policy server)
 
 (* What one server's run produced: whether it converged, and what the host holds
    afterwards. They are separate because a run that stopped part-way is exactly

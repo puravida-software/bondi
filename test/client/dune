@@ -5,7 +5,6 @@
   test_config_file
   test_setup_plan
   test_setup_phases
-  test_setup_process
   test_deploy_helpers
   test_status_format
   test_curl_version
@@ -20,7 +19,7 @@
   test_alloy_commands
   test_ssh_tunnel
   test_ssh_multiplex
-  test_docker_common)
+  test_remote_exec)
  (deps
   (glob_files fixtures/*.json))
- (libraries alcotest bondi.client bondi.common test_helpers yojson))
+ (libraries alcotest bondi.client bondi.common test_helpers unix yojson))

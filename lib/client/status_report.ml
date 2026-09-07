@@ -91,10 +91,31 @@ let observation_of_container ~waits (container : Host_inventory.container) =
     created_at = container.created_at;
   }
 
+(* Which of the two a failed remote read is. A host that ran the command and
+   exited non-zero has answered -- the daemon is down, the socket is not opened,
+   the CLI is not installed -- and what it printed is the answer, so it is a
+   source that was consulted and could not be understood. Every other arm is
+   nothing having been obtained: no ssh configuration to try, an ssh client that
+   never reached the far end, or the shell running it killed or stopped here.
+   The two send an operator to different places, and the whole reason this
+   arrives as a value rather than as a sentence is that the sentence cannot say
+   which.
+
+   The split is exactly as good as the classifier it reads, and no better. A
+   remote command that itself exits 255 is indistinguishable from ssh's own
+   failure -- Remote_exec's own interface records the measurement -- so such a
+   command is reported here as a source that could not be consulted although it
+   did answer. Nothing this client runs is known to exit 255 on purpose, and
+   that is a mitigation rather than a guarantee. *)
+let unavailability_of_failure failure =
+  if Remote_exec.ran_on_host failure then
+    Not_understood (Remote_exec.message failure)
+  else Not_consulted (Remote_exec.message failure)
+
 let docker_view ~docker ~waits name =
   match docker with
-  | Host_inventory.Unreadable_listing message ->
-      Unavailable (Not_consulted message)
+  | Host_inventory.Unreadable_listing failure ->
+      Unavailable (unavailability_of_failure failure)
   | Host_inventory.Observed containers -> (
       match
         List.find_opt

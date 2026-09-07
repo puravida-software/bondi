@@ -1,5 +1,6 @@
 open Alcotest
 module Listing = Bondi_client.Crontab_listing
+module Remote_exec = Bondi_client.Remote_exec
 
 let contains = Test_helpers.contains
 
@@ -251,8 +252,11 @@ let test_crontab_unreadable_spool_is_not_no_section () =
   let listing =
     Listing.of_read_output
       (Error
-         "command failed (1): cat: /var/spool/cron/crontabs/root: Permission \
-          denied")
+         (Remote_exec.Command_failed
+            {
+              code = 1;
+              output = "cat: /var/spool/cron/crontabs/root: Permission denied";
+            }))
   in
   match listing with
   | Listing.Unreadable message ->
@@ -311,8 +315,13 @@ let test_crontab_transport_error_never_carries_the_spool_it_streamed () =
   let listing =
     Listing.of_read_output
       (Error
-         (Printf.sprintf "command failed (255): %s\n%s\n%s\n%s" contents_marker
-            begin_marker daily_close rebalance))
+         (Remote_exec.Ssh_failed
+            {
+              code = 255;
+              output =
+                Printf.sprintf "%s\n%s\n%s\n%s" contents_marker begin_marker
+                  daily_close rebalance;
+            }))
   in
   match listing with
   | Listing.Unreadable message ->
@@ -335,7 +344,9 @@ let test_crontab_transport_error_never_carries_the_spool_it_streamed () =
    above. *)
 let test_crontab_transport_error_without_contents_is_kept_whole () =
   match
-    Listing.of_read_output (Error "command failed (255): Connection closed")
+    Listing.of_read_output
+      (Error
+         (Remote_exec.Ssh_failed { code = 255; output = "Connection closed" }))
   with
   | Listing.Unreadable message ->
       check bool "an error that streamed nothing keeps its detail" true

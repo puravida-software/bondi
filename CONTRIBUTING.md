@@ -109,4 +109,4 @@ Examples:
 - `feat: add blue-green deployment strategy`
 - `test: add cram tests for deploy argument validation`
 - `fix: handle missing registry credentials in deploy payload`
-- `refactor: extract SSH helpers into docker_common module`
+- `refactor: extract SSH helpers into remote_exec module`
