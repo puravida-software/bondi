@@ -2,6 +2,15 @@ module Env = Bondi_server__Env
 module Auth = Bondi_server__Auth
 module Server_config = Bondi_server__Server_config
 module Cron_secrets = Bondi_server__Cron_secrets
+module Diagnostics = Bondi_server__Diagnostics
+module Handler_error = Bondi_server__Handler_error
+module Health = Bondi_server__Health
+module Status = Bondi_server__Status
+module Deploy = Bondi_server__Deploy
+module Run = Bondi_server__Run
+module Crontab = Bondi_server__Crontab
+module Docker = Bondi_server__Docker
+module Strategy = Bondi_server__Strategy
 
 let ( let* ) = Result.bind
 
@@ -12,7 +21,7 @@ let run () =
   let client = Docker.Client.create () in
   let* config = Server_config.load () in
   (* Build the outbound TLS handler once at startup; if the trust store cannot
-     be loaded, run with delivery disabled rather than [~https:None] (FR-5). *)
+     be loaded, run with delivery disabled rather than [~https:None]. *)
   let deliver =
     match Alert_delivery.make_https () with
     | Ok https -> Alert_delivery.deliver ~https

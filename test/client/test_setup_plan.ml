@@ -172,9 +172,7 @@ let transport_error = Remote_exec.message transport_failure
    shell's exit 127 for a missing command, and every non-zero exit arrives as
    an [Error] — so a fixture that answered [Ok] for an absent Docker would pin
    a reading [gather_context] can never produce. What tells them apart is the
-   status, which is why these carry the failure rather than its rendering.
-   [docker_missing_merged] is the same absence from a transport that folds
-   stderr into stdout and exits zero. *)
+   status, which is why these carry the failure rather than its rendering. *)
 let docker_present = Ok "Docker version 24.0"
 
 let docker_missing =
@@ -182,7 +180,6 @@ let docker_missing =
     (Remote_exec.Command_failed
        { code = 127; output = "bash: docker: command not found\n" })
 
-let docker_missing_merged = Ok "bash: docker: command not found"
 let docker_unreachable = Error transport_failure
 
 let docker_status_string = function
@@ -404,13 +401,6 @@ let test_docker_probe_command_not_found_is_not_installed () =
       (Setup.Docker_not_installed
          "command failed (127): bash: docker: command not found")
     docker_missing
-
-(* A transport that folds stderr into stdout and exits zero reports the same
-   absence on the success channel. Both spellings are the host answering. *)
-let test_docker_probe_command_not_found_on_stdout_is_not_installed () =
-  check_docker_status
-    ~expected:(Setup.Docker_not_installed "bash: docker: command not found")
-    docker_missing_merged
 
 let test_docker_probe_version_output_is_installed () =
   check_docker_status
@@ -1764,8 +1754,6 @@ let () =
             test_docker_probe_error_is_undetermined;
           test_case "command not found is a positive absence" `Quick
             test_docker_probe_command_not_found_is_not_installed;
-          test_case "command not found on stdout is a positive absence" `Quick
-            test_docker_probe_command_not_found_on_stdout_is_not_installed;
           test_case "a version string is an installed Docker" `Quick
             test_docker_probe_version_output_is_installed;
           test_case "absence is the exit status, not the wording" `Quick

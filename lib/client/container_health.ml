@@ -80,11 +80,7 @@ let timed_out_of_detail detail =
    host that was never reached has said nothing, and giving both the same
    sentence sends an operator to the key when the answer is on the box. *)
 let unreadable_of_failure failure =
-  if Remote_exec.ran_on_host failure then
-    Unreadable
-      (Printf.sprintf "the wait ran on the host and failed: %s"
-         (Remote_exec.message failure))
-  else Unreadable (Remote_exec.message failure)
+  Unreadable (Remote_exec.explain ~subject:"the wait" failure)
 
 let verdict_of_output reading =
   match reading with

@@ -17,7 +17,12 @@ let run container_name =
         List.map
           (fun server ->
             match
+              (* The container's own error stream is most of what [docker
+                 logs] has to show, and this command exists to show it. The
+                 stdout-only default is for the probes setup reads by shape,
+                 not for a printer. *)
               Remote_exec.docker_command_output_text
+                ~standard_error:Remote_exec.Merged_always
                 ~command:("logs " ^ container_name) server
             with
             | Ok output ->

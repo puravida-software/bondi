@@ -17,20 +17,36 @@ let tunnel_command ~key_path ~user ~host ~local_port ~remote_port =
     local_port remote_port
     (Filename.quote (user ^ "@" ^ host))
 
+(* Opening and binding the socket are inside the result, not beside it. Both
+   fail in ordinary ways -- no descriptors left, a privileged port refused --
+   and those are the reachable failures; the kernel naming an internet socket
+   with a Unix-domain address, which the arm below describes, is ruled out by
+   the socket's own family. A function whose result type covers only the
+   unreachable case and raises on the reachable ones is worse than one that
+   raises on both, because its signature says otherwise. *)
+let reservation_failed reason =
+  Error (Printf.sprintf "ssh tunnel could not reserve a local port: %s" reason)
+
 let free_local_port () =
-  let s = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
-  Fun.protect
-    ~finally:(fun () -> Unix.close s)
-    (fun () ->
-      Unix.bind s (Unix.ADDR_INET (Unix.inet_addr_loopback, 0));
-      match Unix.getsockname s with
-      | Unix.ADDR_INET (_, port) -> Ok port
-      | Unix.ADDR_UNIX path ->
-          Error
-            (Printf.sprintf
-               "ssh tunnel could not reserve a local port: the kernel named an \
-                internet socket %s"
-               path))
+  match Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 with
+  | exception Unix.Unix_error (code, _, _) ->
+      reservation_failed (Unix.error_message code)
+  | s ->
+      Fun.protect
+        ~finally:(fun () ->
+          try Unix.close s with
+          | Unix.Unix_error _ -> ())
+        (fun () ->
+          match
+            Unix.bind s (Unix.ADDR_INET (Unix.inet_addr_loopback, 0));
+            Unix.getsockname s
+          with
+          | exception Unix.Unix_error (code, _, _) ->
+              reservation_failed (Unix.error_message code)
+          | Unix.ADDR_INET (_, port) -> Ok port
+          | Unix.ADDR_UNIX path ->
+              reservation_failed
+                (Printf.sprintf "the kernel named an internet socket %s" path))
 
 let port_accepts port =
   let s = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
@@ -80,10 +96,13 @@ let early_exit_message status =
   | Error (Remote_exec.Signalled _)
   | Error (Remote_exec.Stopped _) ->
       killed
-  (* Not reachable from a status -- [ssh_config] is its only producer -- and
-     rendered by the module that owns it rather than given a tunnel sentence
-     that would be untrue if it ever arrived. *)
-  | Error (Remote_exec.Not_configured _ as failure) ->
+  (* Not reachable from a status -- the configuration and this client's own
+     inability to spawn are the only producers -- and rendered by the module
+     that owns them rather than given a tunnel sentence that would be untrue if
+     one ever arrived. *)
+  | Error (Remote_exec.Not_configured _ as failure)
+  | Error (Remote_exec.Ssh_not_found _ as failure)
+  | Error (Remote_exec.Local_failure _ as failure) ->
       Remote_exec.message failure
 
 let wait_until_ready ~port ~pid =

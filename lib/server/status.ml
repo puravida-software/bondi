@@ -193,7 +193,8 @@ let plan ~(service_name : string option) (ctx : status_context) :
 let inspect_by_name client ~net ~clock ~container_name =
   match Docker.Client.get_container_by_name client ~net ~container_name with
   | Error msg ->
-      Dream.log "failed to look up container %s: %s" container_name msg;
+      Diagnostics.write
+        (Printf.sprintf "failed to look up container %s: %s" container_name msg);
       None
   | Ok None -> None
   | Ok (Some container) -> (
@@ -203,7 +204,9 @@ let inspect_by_name client ~net ~clock ~container_name =
       with
       | Ok inspect -> Some (container, inspect)
       | Error msg ->
-          Dream.log "failed to inspect container %s: %s" container_name msg;
+          Diagnostics.write
+            (Printf.sprintf "failed to inspect container %s: %s" container_name
+               msg);
           None)
 
 (** Impure: inspect Docker containers and read crontab. *)
@@ -239,8 +242,9 @@ let gather ~client ~net ~clock ~(service_name : string option) : status_context
               with
               | Ok inspect -> Some (container, inspect)
               | Error msg ->
-                  Dream.log "failed to inspect managed container %s: %s"
-                    container.id msg;
+                  Diagnostics.write
+                    (Printf.sprintf "failed to inspect managed container %s: %s"
+                       container.id msg);
                   None)
             (managed_containers_of containers),
           None )
@@ -258,7 +262,9 @@ let gather ~client ~net ~clock ~(service_name : string option) : status_context
             ~container_name:job.name
         with
         | Error msg ->
-            Dream.log "failed to look up cron container %s: %s" job.name msg;
+            Diagnostics.write
+              (Printf.sprintf "failed to look up cron container %s: %s" job.name
+                 msg);
             None
         | Ok None -> None
         | Ok (Some container) -> (
@@ -268,7 +274,9 @@ let gather ~client ~net ~clock ~(service_name : string option) : status_context
             with
             | Ok inspect -> Some (job.name, inspect)
             | Error msg ->
-                Dream.log "failed to inspect cron container %s: %s" job.name msg;
+                Diagnostics.write
+                  (Printf.sprintf "failed to inspect cron container %s: %s"
+                     job.name msg);
                 None))
       scheduled_cron_jobs
   in
@@ -284,19 +292,48 @@ let gather ~client ~net ~clock ~(service_name : string option) : status_context
     managed_error;
   }
 
+(* The whole of what the endpoint decides, with no transport named. Ported
+   from the route body: gather, plan, and narrate the per-subsystem warnings
+   the plan collected.
+
+   The catch-all is the route's former [Lwt.catch], moved here so the caller is
+   handed a value instead of an escaping exception. It stays a catch-all rather
+   than filtering [Stdlib.Exit]: nothing on this path calls [exit], and
+   narrowing it would answer a raised [Exit] differently than this endpoint
+   answers it today. [Eio.Cancel.Cancelled] is different, and it is the
+   boundary move that makes it so: the old catch sat outside
+   [Lwt_eio.run_eio], where a cancelled fiber had already been converted before
+   it could be seen, while this one runs inside that fiber. Absorbing it there
+   would let a cancelled status report return normally and break structured
+   concurrency, so it is re-raised rather than classified. A subsystem that merely failed does not come through here
+   at all -- those are collected as values into [errors] and returned with
+   whatever else could be read, because a status that reports nothing is worse
+   than a status that reports what it could not reach. *)
+let report ~client ~net ~clock ~(service_name : string option) :
+    (comprehensive_status, Handler_error.t) result =
+  try
+    let ctx = gather ~client ~net ~clock ~service_name in
+    let status = plan ~service_name ctx in
+    List.iter
+      (fun e -> Diagnostics.write (Printf.sprintf "status warning: %s" e))
+      status.errors;
+    Ok status
+  with
+  | Eio.Cancel.Cancelled _ as cancelled -> raise cancelled
+  | exn -> Error (Handler_error.Orchestrator_failure (Printexc.to_string exn))
+
 let route ~client ~net ~clock =
   Dream.get "/status" @@ fun req ->
   let open Lwt.Infix in
   let service_name = Dream.query req "service" in
-  Lwt.catch
-    (fun () ->
-      (Lwt_eio.run_eio @@ fun () -> gather ~client ~net ~clock ~service_name)
-      >>= fun ctx ->
-      let status = plan ~service_name ctx in
-      List.iter (fun e -> Dream.log "status warning: %s" e) status.errors;
+  (Lwt_eio.run_eio @@ fun () -> report ~client ~net ~clock ~service_name)
+  >>= function
+  | Ok status ->
       status
       |> comprehensive_status_to_yojson
       |> Yojson.Safe.to_string
-      |> Dream.json)
-    (fun exn ->
-      Dream.respond ~status:`Internal_Server_Error (Printexc.to_string exn))
+      |> Dream.json
+  | Error err ->
+      Dream.respond
+        ~status:(Handler_error.http_status err)
+        (Handler_error.message err)

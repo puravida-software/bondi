@@ -194,10 +194,7 @@ let health_to_wait_for = function
    difference has nowhere to go but the words; the listing carries its outcome
    out as a value instead and is not routed through this. *)
 let inspection_failure_message failure =
-  if Remote_exec.ran_on_host failure then
-    Printf.sprintf "the inspection ran on the host and failed: %s"
-      (Remote_exec.message failure)
-  else Remote_exec.message failure
+  Remote_exec.explain ~subject:"the inspection" failure
 
 let of_reads ~listing ~inspection =
   match listing with

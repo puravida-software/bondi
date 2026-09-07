@@ -66,5 +66,6 @@ let middleware ~(token : string option) inner req =
   with
   | Allow -> inner req
   | Deny reason ->
-      Dream.log "auth: rejected %s: %s" (Dream.target req) reason;
+      Diagnostics.write
+        (Printf.sprintf "auth: rejected %s: %s" (Dream.target req) reason);
       Dream.respond ~status:`Unauthorized ""

@@ -26,10 +26,12 @@ val free_local_port : unit -> (int, string) result
     started with [ExitOnForwardFailure] and its readiness is confirmed rather
     than assumed.
 
-    The error arm is the kernel naming an internet socket with a Unix-domain
-    address, which the socket's own family rules out. It is a value rather than
-    a raise because nothing in this client raises for a case it can describe,
-    and a caller that already threads results spends one line on it. *)
+    Every way this can fail is an arm, which is what the result type is for: no
+    descriptors left to open a socket with, a bind the kernel refuses, and --
+    unreachable, but the compiler asks for it -- the kernel naming an internet
+    socket with a Unix-domain address. Opening and binding used to sit outside
+    the result and raise, so the type covered the one case that cannot happen
+    and not the two that can. *)
 
 val early_exit_message : Unix.process_status -> string
 (** What to report when the [ssh] process finishes before the forward is usable.

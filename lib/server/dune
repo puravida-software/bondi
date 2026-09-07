@@ -7,7 +7,9 @@
   bondi.common
   eio
   eio_main
+  lwt
   lwt_eio
+  cohttp
   cohttp-eio
   tls-eio
   tls
@@ -16,6 +18,7 @@
   base64
   yojson
   uri
+  unix
   dream
   ppx_deriving.show
   ppx_deriving_yojson)
