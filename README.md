@@ -119,6 +119,64 @@ bondi setup
 - `bondi deploy NAME:TAG [NAME:TAG ...]` - Deploy services and cron jobs by name and tag
 - `bondi status` - Get the status of the deployed workload on all servers
 
+## Server Commands
+
+The orchestrator image's entrypoint is the `bondi-server` binary, and that binary
+is a command group. Run with no command it serves the HTTP API — which is what
+`bondi setup` starts on your server, and what every existing deployment relies on
+— and the other subcommands answer the same questions without an HTTP request,
+for an operator who is already on the box:
+
+```bash
+ssh YOUR_USER@YOUR_SERVER -- 'docker exec -i bondi-orchestrator bondi-server status'
+```
+
+- `bondi-server serve` - Serve the HTTP API. Also what running the binary with no command does.
+- `bondi-server deploy` - Deploy the payload read on standard input, and write its cron jobs.
+- `bondi-server run` - Run the one cron job described by the payload on standard input.
+- `bondi-server status [--service=NAME]` - Report what this box is running, as JSON on standard output.
+- `bondi-server check [--cron-configured]` - Report whether this box is in a state to serve.
+
+`deploy` and `run` read their payload from standard input and never from the
+command line. Argv is readable by every process on the box, and those payloads
+carry registry credentials and the service's environment variables. `status`
+takes a service selector and `check` takes whether the deployment configures
+cron; neither is a credential, so both are ordinary flags.
+
+`status` writes the same bytes the `GET /api/v1/status` route writes, produced by
+the same encoder — the subcommands are a second caller of the server's decisions,
+not a second implementation of them.
+
+`check` is the readiness question the `health` endpoint was standing in for. It
+connects to the Docker socket, creates and removes a file in the crontab spool
+when `--cron-configured` is given, and writes a marker line to the diagnostic
+sink, then reports **every** probe that failed rather than the first — a box with
+two faults that reports one costs a second trip to it. The JSON verdict goes to
+standard output whether or not the box is ready, since the failing document is
+the one that names what is wrong; the reasons go to standard error beside it.
+
+Taking that reading is not free, which matters if you are thinking of wiring it
+into a `HEALTHCHECK` or a polling loop: the marker line lands in the container's
+log stream on every invocation, and `--cron-configured` bumps the spool
+directory's mtime, which is the signal cron watches for a changed database and so
+makes the host's cron reload. Both are unremarkable for a one-shot gate. Ask
+once, not on a timer.
+
+Every subcommand leaves behind one of these:
+
+| Exit code | Meaning |
+|---|---|
+| `0` | Success. |
+| `1` | A failure to carry out a well-formed request. |
+| `2` | A request that was wrong as written — a payload that does not decode, an image with no tag. |
+| `3` | The box is not in a state to serve. |
+
+`123`, `124` and `125` belong to the command-line library itself and mean an
+error reported on standard error, a command-line parsing error, and an unexpected
+internal error respectively. `bondi-server --help` lists every code, per
+subcommand; `bondi-server --version` reports the version the image was built
+with, and `unknown` where no release built the binary.
+
 ## Deployment Strategies
 
 Bondi will eventually support two deployment strategies:

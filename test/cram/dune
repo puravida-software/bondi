@@ -1,2 +1,10 @@
 (cram
  (deps %{bin:bondi-client}))
+
+; The server binary is a dependency of the one file that runs it, rather than of
+; every cram test in this directory: a client test that does not name it should
+; not be rebuilt or invalidated by a change to the server.
+
+(cram
+ (applies_to server_cli)
+ (deps %{bin:bondi-server}))

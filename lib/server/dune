@@ -19,6 +19,7 @@
   yojson
   uri
   unix
+  cmdliner
   dream
   ppx_deriving.show
   ppx_deriving_yojson)

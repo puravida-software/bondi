@@ -195,9 +195,11 @@ let test_plan_image_tag_parsed () =
       check string "traefik tag" "v3.3.3" t.tag
   | None -> fail "expected traefik to be present");
   (* Cron *)
-  let first_cron = List.hd result.cron_jobs in
-  check string "cron image_name" "ghcr.io/org/backup" first_cron.image_name;
-  check string "cron tag" "v2.1.0" first_cron.tag
+  match result.cron_jobs with
+  | [] -> fail "expected a cron job to be present"
+  | first_cron :: _ ->
+      check string "cron image_name" "ghcr.io/org/backup" first_cron.image_name;
+      check string "cron tag" "v2.1.0" first_cron.tag
 
 (* 8. test_plan_grouping *)
 let test_plan_grouping () =
@@ -422,7 +424,8 @@ let test_plan_cron_job_running () =
     result.cron_jobs
 
 (* 18. test_status_lists_managed_containers — a managed container that is not
-   running is still listed, which is what separates FR-4 from a liveness check. *)
+   running is still listed, which is what separates the managed-container
+   listing from a liveness check. *)
 let test_status_lists_managed_containers () =
   let ctx =
     {
@@ -455,7 +458,7 @@ let test_status_lists_managed_containers () =
     result.infrastructure.managed;
   check (list string) "no errors" [] result.errors
 
-(* 19. test_status_json_omits_empty_managed — NFR-1: the field is additive, so a
+(* 19. test_status_json_omits_empty_managed — the field is additive, so a
    server with no managed containers puts nothing new on the wire. *)
 let infrastructure_keys (status : Status.comprehensive_status) =
   match Status.comprehensive_status_to_yojson status with
@@ -530,6 +533,11 @@ let test_report_reports_an_escaping_exception () =
       Alcotest.failf
         "an exception out of the gather is Bondi's fault, not the caller's, \
          but it answered Invalid_request: %s"
+        msg
+  | Error (Bondi_server__Handler_error.Not_ready msg) ->
+      Alcotest.failf
+        "an exception out of the gather is a fault during a request, not a box \
+         that cannot serve, but it answered Not_ready: %s"
         msg
   | Error (Bondi_server__Handler_error.Orchestrator_failure msg) ->
       check bool "the failure carries the exception that escaped" true

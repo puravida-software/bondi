@@ -18,7 +18,7 @@ default: build test fmt lint build-server-ci
 # Verification sits before the push for the same reason it does in the release
 # workflow: nothing reaches the registry that has not been shown to run.
 # Assumes bondi.yaml has a service named "bondi"
-docker-all TAG: (build-server TAG) (tag-server TAG) (verify-server-image TAG) (verify-server-image-negative TAG) (push-server TAG) (update-bondi-version TAG)
+docker-all TAG: (build-server TAG) (tag-server TAG) (verify-server-image TAG) (verify-server-image-negative TAG) (check-server-image TAG) (push-server TAG) (update-bondi-version TAG)
 
 build-server TAG:
     docker build --load --build-arg VERSION={{ TAG }} -t {{ IMAGE_NAME }} .
@@ -34,6 +34,17 @@ verify-server-image TAG:
 # a check.
 verify-server-image-negative TAG:
     ./scripts/verify-server-image-negative.sh {{ IMAGE_NAME }}:{{ TAG }}
+
+# Every subcommand is exercised inside a container started by the exact command
+# an unchanged client uses, with its exit code and its JSON asserted against the
+# corresponding route's. The negative arm runs in the same recipe rather than
+# beside it, so this file and CI each hold one line for the pair and cannot come
+# to hold different numbers of them. The script refuses any engine that is not
+# Docker Engine: a rootless one reinterprets the two flags it exercises.
+# Prove the image answers on the command line what it answers over HTTP.
+check-server-image TAG:
+    ./scripts/check-server-image.sh {{ IMAGE_NAME }}:{{ TAG }}
+    ./scripts/check-server-image-negative.sh {{ IMAGE_NAME }}:{{ TAG }}
 
 # Build the server Docker image the way release-dry-run CI does, then prove the
 # result runs: verifies the Dockerfile, that every dependency resolves from a
@@ -57,6 +68,7 @@ build-server-ci:
     just build-server "$VERSION"
     just verify-server-image latest
     just verify-server-image-negative latest
+    just check-server-image latest
 
 tag-server TAG:
     docker tag {{ IMAGE_NAME }}:latest {{ IMAGE_NAME }}:{{ TAG }}

@@ -1,5 +1,4 @@
-let () =
-  match Bondi_server.run () with
-  | Ok _ -> ()
-  | Error (Bondi_server.Server_config.Invalid_port msg) ->
-      Printf.eprintf "Error: %s\n" msg
+(* The process exits exactly once, here, outside any Eio switch: [Stdlib.exit]
+   terminates where it stands and would skip every [Eio.Switch.on_release] a
+   switch entered further in still holds. *)
+let () = exit (Bondi_server.Cli.eval ())

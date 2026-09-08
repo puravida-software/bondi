@@ -1,0 +1,20 @@
+# The command `bondi setup` runs to start an orchestrator, produced by Bondi's
+# own client rather than transcribed. Generated: do not edit by hand. `dune
+# runtest` regenerates and diffs it, and `dune promote` accepts a change.
+#
+# One line per rootless-sensitive deployment shape, which is not one line
+# per deployment shape. The command varies on four config inputs; the two
+# lines below are the input that moves the flags a rootless engine
+# reinterprets: `no-cron` and, with cron jobs configured, `cron`, which
+# additionally carries `--user root` and the spool mount.
+#
+# Held constant at their defaults, and named here rather than left to be
+# inferred from the builder: `bondi_server.bind_address`, which only
+# changes the address in `-p ADDR:3030:3030`, and `bondi_server.api_token`,
+# which only adds `-e BONDI_API_TOKEN=`. Neither reaches a flag a rootless
+# engine reinterprets, which is what this fixture exists to pin. The
+# residue is that everything asserted through these lines is asserted
+# against an unauthenticated API; a token-gated orchestrator is a shape
+# nothing here covers.
+no-cron docker run -d --name bondi-orchestrator --restart unless-stopped -p 127.0.0.1:3030:3030 -v /var/run/docker.sock:/var/run/docker.sock --group-add $(stat -c %g /var/run/docker.sock) --label bondi.managed=true --label bondi.type=infrastructure --label bondi.logs=true mlopez1506/bondi-server:0.12.0
+cron docker run -d --name bondi-orchestrator --restart unless-stopped -p 127.0.0.1:3030:3030 -v /var/run/docker.sock:/var/run/docker.sock -v /var/spool/cron/crontabs:/var/spool/cron/crontabs --user root --group-add $(stat -c %g /var/run/docker.sock) --label bondi.managed=true --label bondi.type=infrastructure --label bondi.logs=true mlopez1506/bondi-server:0.12.0

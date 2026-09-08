@@ -3,9 +3,10 @@
     The endpoint reads nothing and answers 204 with an empty body. What it
     reports is that this process is up and its router reachable, and nothing
     beyond that: it does not establish that Docker can be reached, that Traefik
-    is running, or that a deploy would succeed. A readiness check that
-    establishes those is separate work, and until it exists this must not be
-    read as one. *)
+    is running, or that a deploy would succeed. The check that establishes those
+    is [Readiness], which the binary's [check] subcommand runs and which
+    supersedes this endpoint wherever readiness is what a caller wanted. This
+    route is still not one, and must not be read as one. *)
 
 val health : unit -> (unit, Handler_error.t) result
 (** What the endpoint decides, naming no transport, so a caller holding no HTTP
