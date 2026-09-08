@@ -278,9 +278,17 @@ no_cron_command="$(run_command_for no-cron)"
 cron_command="$(run_command_for cron)"
 
 printf '{"image": 5}' > "$work/invalid-deploy.json"
-# Well formed, and Bondi cannot carry it out: port 1 on the box's own loopback
-# refuses immediately, so the pull fails at once rather than being waited out.
-printf '{"job": "image-gate-probe", "image": "127.0.0.1:1/absent:0.0.1"}' \
+# Well formed, and Bondi cannot carry it out: `.invalid` is reserved by RFC 2606
+# and resolves nowhere, so the pull fails at once rather than being waited out.
+#
+# It does not name a registry port, though a port is the more direct way to make
+# a pull fail fast, because `Simple.parse_image_and_tag` splits on every colon
+# and rejects any reference carrying one -- see D-35. A payload written that way
+# is refused as `Invalid_request` before a pull is attempted, which exits 2 and
+# answers 400: this assertion would then be pinning the decode arm it has
+# already pinned above, and the orchestrator-failure arm would go unasserted
+# while the check reported green.
+printf '{"job": "image-gate-probe", "image": "absent.invalid/absent:0.0.1"}' \
     > "$work/unrunnable-run.json"
 
 echo "==> $image: the command a client with no cron jobs starts an orchestrator with"
