@@ -169,6 +169,15 @@ val step_after : offset:int -> remaining:int -> attempt -> step
     them here or nowhere. It is kept out of the loop that calls it so that the
     loop is a syscall and a recursion with no decision of its own. *)
 
+val pid_one_stderr : string
+(** The path a line is duplicated to so that the container log stream carries
+    it: PID 1's standard error, which is the only stream the engine captures.
+
+    Exported because a readiness check must probe the same stream this module
+    writes to, and a second literal of the path in the module that probes it
+    would be two statements of one fact -- with the probe's copy the one an
+    operator would be misled by if they drifted. *)
+
 val write : string -> unit
 (** Write one diagnostic line to this process's stderr, and -- when
     {!should_duplicate} says so of this process -- to PID 1's stderr as well.

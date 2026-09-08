@@ -1,0 +1,20 @@
+; The command an unchanged client starts an orchestrator with, generated from
+; the client itself and committed beside the script that reads it. The script
+; runs where there is no OCaml toolchain, so the string cannot be computed at
+; the moment it is used; the diff below is what stops the committed copy from
+; drifting away from the client that produces it.
+
+(executable
+ (name print_orchestrator_run_command)
+ (modules print_orchestrator_run_command)
+ (libraries bondi.client))
+
+(rule
+ (with-stdout-to
+  orchestrator-run-command.generated
+  (run %{exe:print_orchestrator_run_command.exe})))
+
+(rule
+ (alias runtest)
+ (action
+  (diff orchestrator-run-command.txt orchestrator-run-command.generated)))

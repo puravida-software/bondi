@@ -67,7 +67,9 @@ let result_testable ok_t =
       match (a, b) with
       | Ok a, Ok b -> Alcotest.equal ok_t a b
       | Error a, Error b -> String.equal a b
-      | _ -> false)
+      | Ok _, Error _
+      | Error _, Ok _ ->
+          false)
 
 let test_serveraddress_from_image () =
   Alcotest.check
@@ -666,6 +668,11 @@ let test_deploy_reports_an_escaping_exception () =
       Alcotest.failf
         "an exception out of a strategy is Bondi's fault, not the caller's, \
          but it answered Invalid_request: %s"
+        msg
+  | Error (Handler_error.Not_ready msg) ->
+      Alcotest.failf
+        "an exception out of a strategy is a fault during a request, not a box \
+         that cannot serve, but it answered Not_ready: %s"
         msg
   | Error (Handler_error.Orchestrator_failure msg) ->
       Alcotest.(check bool)

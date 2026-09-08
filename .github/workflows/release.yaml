@@ -104,6 +104,15 @@ jobs:
       - name: Verify that the check itself can fail
         run: just verify-server-image-negative "$VERSION"
 
+      # The command surface answers on the command line what the routes answer
+      # over HTTP, asserted against the image rather than the build tree. This
+      # runner is Docker Engine, which is the only engine the check accepts: a
+      # rootless one reinterprets the group and user flags it exercises. It runs
+      # here and not only on the pull request because this is the path that
+      # publishes; the estate rolls back to this image.
+      - name: Check the image's command surface
+        run: just check-server-image "$VERSION"
+
       - name: Push server image
         run: |
           just push-server "$VERSION"

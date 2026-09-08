@@ -82,14 +82,22 @@ jobs:
       - name: Build server Docker image (dry run)
         run: just build-server "$VERSION"
 
-      # The same two assertions the release runs before pushing, so a change
-      # that would publish an image that cannot start fails on the pull request
-      # rather than on a production host.
+      # The same three checks the release runs before pushing -- the two here
+      # and the command-surface one below -- so a change that would publish an
+      # image that cannot start, or whose subcommands disagree with its routes,
+      # fails on the pull request rather than on a production host.
       - name: Verify the built image runs
         run: just verify-server-image latest
 
       - name: Verify that the check itself can fail
         run: just verify-server-image-negative latest
+
+      # The command surface answers on the command line what the routes answer
+      # over HTTP, asserted against the image rather than the build tree. This
+      # runner is Docker Engine, which is the only engine the check accepts: a
+      # rootless one reinterprets the group and user flags it exercises.
+      - name: Check the image's command surface
+        run: just check-server-image latest
 
   update-homebrew-tap-dry-run:
     name: update-homebrew-tap-dry-run

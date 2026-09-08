@@ -24,7 +24,11 @@
   test_cron_secrets
   test_handler_error
   test_diagnostics
-  test_health)
+  test_health
+  test_readiness
+  test_readiness_probes
+  test_cmd_io
+  test_cli)
  (modules
   test_env
   test_simple_plan
@@ -43,7 +47,11 @@
   test_cron_secrets
   test_handler_error
   test_diagnostics
-  test_health)
+  test_health
+  test_readiness
+  test_readiness_probes
+  test_cmd_io
+  test_cli)
  (libraries
   alcotest
   bondi.client
