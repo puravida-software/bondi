@@ -75,9 +75,11 @@ val entry_of_cron_job : Strategy.Simple.cron_job -> string
     they remain visible in [docker inspect]; the exposure closed here is the
     crontab and the process table.
 
-    The redirection is evaluated inside the container. [/etc/bondi/cron] is in
-    the orchestrator's filesystem and not on the host, so a host-side redirect
-    would read a path that does not exist.
+    The redirection is evaluated inside the container, which is why the command
+    is wrapped in [sh -c]. [/etc/bondi/cron] is the orchestrator's own view of
+    the job's files; setup bind-mounts the host directory at the same path so a
+    rebuilt container does not lose them, and the reader inside the container is
+    the only side that has to be right about where they are.
 
     The name is interpolated into a shell command unescaped, which is safe only
     for a name {!Cron_secrets.is_valid_name} accepts. Callers write the job's
@@ -91,7 +93,10 @@ val json_from_cron_line : string -> Yojson.Safe.t option
 (** Recover the JSON payload embedded in a legacy [curl] line — the shape Bondi
     wrote before the payload moved to a file, still present in every crontab in
     the estate. [None] when the line carries no payload or the payload does not
-    parse, which is what a line from {!entry_of_cron_job} returns. *)
+    parse, which is what a line from {!entry_of_cron_job} returns.
+
+    The grammar is {!Bondi_common.Cron_legacy_line}'s, so this and the client's
+    reader of the same lines answer alike; this adds the parse. *)
 
 val job_name_from_cron_line : string -> string option
 (** The job name from a crontab line's embedded payload, or [None] when the line
@@ -116,9 +121,11 @@ val job_name_from_exec_line : string -> string option
     shape either side reads back are one definition. *)
 
 val parse_listed_jobs :
-  read_file:(string -> string option) -> string list -> listed_job list
+  read_file:(string -> string option) ->
+  string list ->
+  (listed_job list, string) result
 (** Pure: every Bondi entry these crontab lines hold, in order, each resolved as
-    far as it can be.
+    far as it can be, or the refusal for a crontab whose markers do not balance.
 
     An entry written by {!entry_of_cron_job} is resolved by reading the run file
     its line points at: the name comes from the path and the image from the
@@ -138,12 +145,15 @@ val list_scheduled_jobs : unit -> (listed_job list, string) result
 (** Read the system crontab and return every Bondi-managed entry in it. A
     crontab that does not exist yet reads as no entries rather than as an error;
     an entry that cannot be resolved reads as {!Unreadable} rather than as
-    nothing. *)
+    nothing. A crontab whose markers do not balance is the error, carrying
+    {!parse_listed_jobs}'s refusal as its message. *)
 
 val merge_bondi_section :
-  Strategy.Simple.cron_job list option -> string list -> string list
+  Strategy.Simple.cron_job list option ->
+  string list ->
+  (string list, string) result
 (** Pure: the crontab {!upsert} writes, given the jobs of a deploy and the lines
-    it read.
+    it read, or the refusal for a crontab whose markers do not balance.
 
     Entries inside the section are addressed by name across both shapes, so a
     job these jobs name replaces whichever shape held it and stands where that
@@ -152,6 +162,13 @@ val merge_bondi_section :
     which has no name to be merged by and would otherwise be dropped by every
     rewrite. Jobs the section did not hold follow, in the order given. [None] or
     an empty list removes the section.
+
+    One section is written, whichever number the crontab arrived with. A file
+    holding two balanced sections is not malformed and is not refused — it is
+    what an earlier reader that matched markers untrimmed left behind — so every
+    section's entries are merged into the one this writes and the surplus marker
+    pairs go. Left alone, each deploy would update one of them and leave the
+    other stale, and cron would fire both.
 
     A name the section holds more than once is written once: the first entry
     these jobs name is replaced and later entries of that name are dropped. A
@@ -172,6 +189,13 @@ val upsert : Strategy.Simple.cron_job list option -> (unit, string) result
     the lines outside and does not extend to the lines inside: an entry the
     merge keeps is written back with the bytes it was read with, including a
     legacy line's whitespace and the order of the fields in its payload. [None]
-    or an empty list removes the section entirely. On success the crontab file
-    has been rewritten with owner-only permissions and the spool directory's
-    mtime bumped so cron picks the change up. *)
+    or an empty list removes the section entirely — every section, on a crontab
+    that somehow holds more than one. On success the crontab file has been
+    rewritten with owner-only permissions and the spool directory's mtime bumped
+    so cron picks the change up.
+
+    A crontab whose markers do not balance is refused with
+    {!merge_bondi_section}'s message and nothing is written: which lines are
+    Bondi's is exactly what such a file does not say, and a rewrite that guessed
+    would leave a job's old line outside the markers and its new one inside,
+    both firing. *)

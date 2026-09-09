@@ -37,7 +37,7 @@ Before you start, you need:
 - **DNS records** — an `A` (or `AAAA`) record pointing your domain to the server IP
 - **Firewall rules** — inbound ports `80/tcp` and `443/tcp` must be open (Traefik handles TLS)
 - **If you use [cron jobs](#3-cron-jobs)**, four more things about the server:
-  - **`bondi-server` 0.15.0 or later must already be running on it.** The crontab line Bondi writes is a `docker exec` into the orchestrator that runs the server binary's `run` subcommand, and older images do not have that subcommand. `bondi deploy` reads the orchestrator's version off the box and refuses a cron-declaring deploy against an older one, naming both versions. Run `bondi setup` first, with the version you want pinned under `bondi_server:`.
+  - **`bondi-server` 0.16.0 or later must already be running on it.** The crontab line Bondi writes is a `docker exec` into the orchestrator that runs the server binary's `run` subcommand. That subcommand arrived in 0.15.0, but 0.15.0's own crontab writer still emits the older `curl` line and writes no run file — and the deploy that rewrites a box's crontab runs on the box, so an orchestrator below 0.16.0 answers a cron deploy with success and changes nothing. `bondi deploy` reads the orchestrator's version off the box and refuses a cron-declaring deploy against an older one, naming both versions. Run `bondi setup` first, with the version you want pinned under `bondi_server:`.
   - **The server must be reachable over SSH from wherever you run `bondi deploy`.** That version check is a read of the box, and a box that cannot be consulted is refused rather than assumed good — so a cron job's `server:` block needs a working `ssh:` section, not just an `ip_address`.
   - **`docker` must be on the `PATH` cron runs jobs with** — `/usr/bin:/bin` on Debian and Ubuntu. The line invokes `docker exec` by name, and cron gives a job a minimal environment rather than a login one, so a Docker installed under `/usr/local/bin` answers over SSH and still fails every scheduled run. `bondi setup` asks the server what an empty environment resolves and stops if the answer is nothing. The apt install `get.docker.com` performs — which is what Bondi installs — puts it at `/usr/bin/docker`.
   - **`curl` 7.76 or later**, only if the server still holds cron lines written by an older Bondi. Those lines are `curl` invocations using `--fail-with-body`, which an older curl rejects as an unknown option; they keep firing on their schedule until each job is deployed again. `bondi setup` checks the version and stops with what it found. Debian 12 and Ubuntu 22.04 or later are fine; Debian 11 and Ubuntu 20.04 are not.
@@ -188,10 +188,11 @@ This will:
 1. Connect to the server via SSH
 2. Install Docker if it is not already installed
 3. Create the ACME directory for TLS certificates
-4. Pull and run the bondi-orchestrator container
-5. Read back the restart policy the server actually applied to the orchestrator, and correct it in place if it is not `unless-stopped`
-6. Wait for every container that declares a healthcheck to pass it
-7. Print the same table `bondi status` prints, describing the server as the run left it
+4. Copy the directory the server's cron jobs keep their run and secret files in out of the orchestrator onto the host, before that container is replaced — on a server set up before Bondi bind-mounted that directory the files live inside the container, and replacing it takes them with it while the crontab lines that read them keep firing. The copy is skipped when the orchestrator already bind-mounts that directory: the files are then already on the host, so there is nothing to rescue, and copying a bind-mounted path into itself would truncate the very files it was meant to save. Any job whose files did not survive is named in the report the run prints, one sentence per job, without printing the files
+5. Pull and run the bondi-orchestrator container
+6. Read back the restart policy the server actually applied to the orchestrator, and correct it in place if it is not `unless-stopped`
+7. Wait for every container that declares a healthcheck to pass it
+8. Print the same table `bondi status` prints, describing the server as the run left it
 
 You only need to run `bondi setup` once per server, or again when you change the `bondi_server.version` or add features that require server-side changes (like Alloy).
 
@@ -471,6 +472,8 @@ ssh YOUR_USER@YOUR_SERVER -- crontab -e
 ```
 
 Delete the offending entry from between the markers and save; the next `bondi status` is clean. Cron entries of your own belong **outside** the markers, where Bondi neither rewrites nor counts them.
+
+That is the remedy for a line Bondi cannot read. If `bondi status` reports `markers malformed: …` instead, the defect is in the markers themselves rather than in what sits between them, deleting entries does not clear it, and a deploy of any job with cron jobs is refused until it is fixed — see the `Crontab` row under `bondi status` below.
 
 ### Alerting on job outcomes
 
@@ -766,6 +769,22 @@ Bondi never adds a healthcheck of its own — it reports whichever one the image
 `setup` writes the cron entries it manages into a marked section of the server's crontab, and that file is a different fact from the `cron_jobs` you declared. The `Crontab` row reports what is actually in the section: a job count and the job names (`1 jobs (daily-close)`), `0 jobs`, `no Bondi section on the host`, `markers malformed: …` where the `BEGIN`/`END` markers are unbalanced, or `not read: …`.
 
 Only counts, names and positions are ever printed. Crontab lines are never shown, in the table or in the JSON — each one carries the orchestrator API secret in plaintext.
+
+`markers malformed: …` is not only a status row. A `bondi deploy` of a job that declares cron jobs against that server fails:
+
+```
+Deploy succeeded but crontab update failed: the Bondi section of the crontab is malformed: a begin marker opens a section the file never closes
+```
+
+The container deploy has already happened and the job's run and secret files are written, but the crontab is left exactly as it was — no line is added, changed or removed. A file whose markers do not balance has no unambiguous section to rewrite, and rewriting it on a guess is how a job ends up firing twice a schedule. The three sentences are distinct, so the message alone says which defect to look for: an end marker closing a section that was never opened, a begin marker opening a section the file never closes, or a begin marker opening a section inside one already open.
+
+No Bondi command repairs it, and deleting entries does not: the defect is in the markers, not in what sits between them. Balance them by hand on the server:
+
+```bash
+ssh YOUR_USER@YOUR_SERVER -- crontab -e
+```
+
+Each `# BEGIN BONDI CRON` needs exactly one `# END BONDI CRON` after it, with no second `# BEGIN BONDI CRON` in between. Save, confirm with `bondi status` that the `Crontab` row reports a job count again, then re-run the deploy.
 
 For machine-readable output:
 

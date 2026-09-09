@@ -3,6 +3,8 @@ module Config_file = Bondi_client.Config_file
 module Remote_exec = Bondi_client.Remote_exec
 module Managed_container = Bondi_common.Managed_container
 module Setup = Bondi_client.Cmd.Setup
+module Setup_phases = Bondi_client.Setup_phases
+module Crontab_listing = Bondi_client.Crontab_listing
 
 (* Production always passes the declared specs; the existing tests predate them
    and are about the non-managed parts of the plan. *)
@@ -14,6 +16,10 @@ let action_string = function
   | Setup.EnsureNetwork name -> "EnsureNetwork " ^ name
   | Setup.RequireCronDocker -> "RequireCronDocker"
   | Setup.RequireCronCurl -> "RequireCronCurl"
+  | Setup.PreserveCronPayloads { jobs } ->
+      "PreserveCronPayloads "
+      ^ String.concat ","
+          (List.map (fun (named : Crontab_listing.named_job) -> named.job) jobs)
   | Setup.StopOrchestrator -> "StopOrchestrator"
   | Setup.RemoveOrchestrator -> "RemoveOrchestrator"
   | Setup.RunServer -> "RunServer"
@@ -39,6 +45,7 @@ let is_ensure_network = function
   | Setup.EnsureAcmeFile
   | Setup.RequireCronDocker
   | Setup.RequireCronCurl
+  | Setup.PreserveCronPayloads _
   | Setup.StopOrchestrator
   | Setup.RemoveOrchestrator
   | Setup.RunServer
@@ -67,6 +74,7 @@ let joins_network = function
   | Setup.EnsureNetwork _
   | Setup.RequireCronDocker
   | Setup.RequireCronCurl
+  | Setup.PreserveCronPayloads _
   | Setup.StopOrchestrator
   | Setup.RemoveOrchestrator
   | Setup.EnsureAlloyConfig
@@ -94,6 +102,7 @@ let is_managed = function
   | Setup.EnsureNetwork _
   | Setup.RequireCronDocker
   | Setup.RequireCronCurl
+  | Setup.PreserveCronPayloads _
   | Setup.StopOrchestrator
   | Setup.RemoveOrchestrator
   | Setup.RunServer
@@ -150,13 +159,19 @@ let make_config ?(alloy = None) ?(managed_containers = None) ~user_service
    so every arm of the plan is reached through the same derivation production
    uses: a fixture that bypassed it could pin a state [gather_context] can
    never produce. *)
+(* [crontab] defaults to the host having no Bondi section, which is the arm that
+   plans nothing: a case that leaves it out cannot silently acquire an action it
+   did not ask for. Both cases that care about it pass it, including the one
+   asserting its absence, so neither rests on this default. *)
 let ctx ?(alloy_state = Setup.Alloy_absent)
-    ?(managed = Setup.Managed_observed []) ~orchestrator ~docker_probe () =
+    ?(managed = Setup.Managed_observed [])
+    ?(crontab = Crontab_listing.No_section) ~orchestrator ~docker_probe () =
   {
     Setup.docker_status = Setup.docker_status_of_probe docker_probe;
     Setup.orchestrator;
     Setup.alloy_state;
     Setup.managed;
+    Setup.crontab;
   }
 
 (* One distinctive transport failure, shared by every probe fixture in this
@@ -811,6 +826,177 @@ let test_plan_fresh_install_runs_server () =
   check bool "no StopOrchestrator on fresh install"
     (List.mem Setup.StopOrchestrator actions)
     false
+
+(* The orchestrator phase, in the order the plan emits it. Filtering by the
+   production mapping rather than by a list spelled here keeps the assertion
+   about ordering within the phase and independent of everything the plan does
+   before and after it. *)
+let orchestrator_phase actions =
+  actions
+  |> List.filter (fun action ->
+      Setup.phase_of_action action = Setup_phases.Orchestrator)
+  |> List.map action_string
+
+(* A section holding one line the reader could name and one it could not. The
+   unnamed entry is what proves the preserve carries jobs rather than lines: a
+   position is not a job, and nothing downstream could look for its files. *)
+let section_with_one_named_job =
+  Crontab_listing.Section
+    {
+      entries =
+        [
+          Crontab_listing.Named
+            { job = "nightly-report"; shape = Crontab_listing.Exec_line };
+          Crontab_listing.Unnamed { position = 2 };
+        ];
+    }
+
+(* The copy has to be planned before the container it copies out of is stopped
+   and removed, because removing it is what destroys the files on any host that
+   does not bind-mount them. Planned after, it would copy from a container that
+   is no longer there and report every job as having lost everything -- on a
+   host where this run is what lost it. *)
+let test_plan_preserve_precedes_the_orchestrator_recreate () =
+  let config =
+    make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
+  in
+  let context =
+    ctx
+      ~orchestrator:(Setup.Orchestrator_running { version = "0.9.0" })
+      ~crontab:section_with_one_named_job ~docker_probe:docker_present ()
+  in
+  check (list string) "orchestrator phase"
+    [
+      "PreserveCronPayloads nightly-report";
+      "StopOrchestrator";
+      "RemoveOrchestrator";
+      "RunServer";
+    ]
+    (orchestrator_phase (plan config context))
+
+(* The same configuration and the same recreate, differing only in what the host
+   said its crontab holds. A host Bondi has never written a section on holds no
+   line whose file a recreate could orphan, so there is nothing to preserve --
+   and the case above is what shows this absence is the reading's doing rather
+   than the fixture never reaching the branch. *)
+let test_plan_no_preserve_without_a_section () =
+  let config =
+    make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
+  in
+  let context =
+    ctx
+      ~orchestrator:(Setup.Orchestrator_running { version = "0.9.0" })
+      ~crontab:Crontab_listing.No_section ~docker_probe:docker_present ()
+  in
+  check (list string) "orchestrator phase"
+    [ "StopOrchestrator"; "RemoveOrchestrator"; "RunServer" ]
+    (orchestrator_phase (plan config context))
+
+(* A stopped container is a recreate like any other, and its files are still
+   there to lose: [docker cp] reads a container's writable layer whether or not
+   it is running, and the removal that follows is what deletes them while the
+   line that reads them stays in the spool. The running arm above was the only
+   one pinned, so this arm could have reached that same removal with nothing
+   copied out first. *)
+let test_plan_preserve_precedes_a_stopped_orchestrator_recreate () =
+  let config =
+    make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
+  in
+  let context =
+    ctx ~orchestrator:Setup.Orchestrator_not_running
+      ~crontab:section_with_one_named_job ~docker_probe:docker_present ()
+  in
+  check (list string) "orchestrator phase"
+    [ "PreserveCronPayloads nightly-report"; "RemoveOrchestrator"; "RunServer" ]
+    (orchestrator_phase (plan config context))
+
+(* A section whose markers do not balance, and a spool file that was never read,
+   are the two hosts whose crontab Bondi understands least -- and both are
+   copied out of all the same. Neither reading can name a job, so the copy
+   carries an empty job list and the run reports nothing about the box; the
+   directory it costs is a directory on a host nothing is about to rewrite,
+   while skipping it is how the recreate deletes the files of lines that go on
+   firing. A read that failed is not the host saying there is nothing here.
+
+   The negative arm is the third reading in the same shape: a host that
+   positively said it holds no Bondi section and declares no job plans no copy
+   at all, so the two copies above are these readings' doing rather than a copy
+   planned unconditionally. *)
+let test_plan_preserve_for_a_crontab_that_could_not_be_understood () =
+  let config =
+    make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
+  in
+  let phase_for crontab =
+    orchestrator_phase
+      (plan config
+         (ctx
+            ~orchestrator:(Setup.Orchestrator_running { version = "0.9.0" })
+            ~crontab ~docker_probe:docker_present ()))
+  in
+  let recreate = [ "StopOrchestrator"; "RemoveOrchestrator"; "RunServer" ] in
+  List.iter
+    (fun (label, crontab) ->
+      check (list string) label
+        ("PreserveCronPayloads " :: recreate)
+        (phase_for crontab))
+    [
+      ( "markers that do not balance",
+        Crontab_listing.Malformed Crontab_listing.Begin_without_end );
+      ( "a spool file that was never read",
+        Crontab_listing.Unreadable "the host refused sudo -n" );
+    ];
+  check (list string) "a host that answered it holds no section" recreate
+    (phase_for Crontab_listing.No_section)
+
+(* The mount and the copy have to agree, and until they were derived from one
+   value they did not. The copy is planned from the section the host holds, so a
+   box whose configuration declares no cron job still gets its payload directory
+   copied onto the host -- and the mount that makes that directory the
+   replacement container's own view was planned from the configuration, which on
+   this box declares nothing. The files landed where nothing reads them, the
+   crontab line's redirect is evaluated inside the container, and the listing
+   read the host directory and found both files, so the run reported success on
+   a job that was already broken. *)
+let test_run_command_mounts_the_payload_directory_for_a_held_section () =
+  let config =
+    make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
+  in
+  let context =
+    ctx
+      ~orchestrator:(Setup.Orchestrator_running { version = "0.9.0" })
+      ~crontab:section_with_one_named_job ~docker_probe:docker_present ()
+  in
+  let needed = Setup.cron_payload_needed config context in
+  check bool "the section alone makes the payload directory needed" true needed;
+  check bool "and the same value plans the copy" true
+    (List.mem "PreserveCronPayloads nightly-report"
+       (orchestrator_phase (plan config context)));
+  match Setup.orchestrator_run_command ~cron_payload_needed:needed config with
+  | Error message -> fail message
+  | Ok command ->
+      check bool "the replacement container sees the host directory" true
+        (Bondi_common.String_utils.contains
+           ~needle:"-v /etc/bondi/cron:/etc/bondi/cron" command)
+
+(* The negative arm, so the assertion above is the section's doing rather than a
+   mount added unconditionally. A host with no section and no declared cron job
+   has nothing under that path and gets neither the copy nor the mount. *)
+let test_run_command_omits_the_payload_mount_without_cron () =
+  let config =
+    make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
+  in
+  let context =
+    ctx
+      ~orchestrator:(Setup.Orchestrator_running { version = "0.9.0" })
+      ~crontab:Crontab_listing.No_section ~docker_probe:docker_present ()
+  in
+  let needed = Setup.cron_payload_needed config context in
+  check bool "nothing needs the payload directory" false needed;
+  match Setup.orchestrator_run_command ~cron_payload_needed:needed config with
+  | Error message -> fail message
+  | Ok command ->
+      check bool "no payload mount" false
+        (Bondi_common.String_utils.contains ~needle:"/etc/bondi/cron" command)
 
 let test_plan_version_mismatch_stops_and_runs () =
   let config =
@@ -1940,6 +2126,18 @@ let () =
             test_plan_exited_orchestrator_is_removed_before_running;
           test_case "removes a running orchestrator after stopping it" `Quick
             test_plan_running_orchestrator_is_removed_after_stopping;
+          test_case "the preserve copy precedes the orchestrator recreate"
+            `Quick test_plan_preserve_precedes_the_orchestrator_recreate;
+          test_case "no preserve action for a box without a section" `Quick
+            test_plan_no_preserve_without_a_section;
+          test_case "the preserve copy precedes a stopped container's recreate"
+            `Quick test_plan_preserve_precedes_a_stopped_orchestrator_recreate;
+          test_case "a crontab that could not be understood is still copied out"
+            `Quick test_plan_preserve_for_a_crontab_that_could_not_be_understood;
+          test_case "a held section mounts the payload directory" `Quick
+            test_run_command_mounts_the_payload_directory_for_a_held_section;
+          test_case "no payload mount without a section or a declared job"
+            `Quick test_run_command_omits_the_payload_mount_without_cron;
         ] );
       ( "orchestrator observation",
         [

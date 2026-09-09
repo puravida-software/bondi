@@ -1,6 +1,7 @@
 open Alcotest
 module Crontab = Bondi_server__Crontab
 module Alert = Bondi_common.Alert
+module String_utils = Bondi_common.String_utils
 
 let test_job_name_from_cron_line_valid () =
   let line =
@@ -238,6 +239,21 @@ let run_file_contents (job : Bondi_server__Strategy__Simple.cron_job) =
 
 let section lines = ("# BEGIN BONDI CRON" :: lines) @ [ "# END BONDI CRON" ]
 
+(* Both section readers answer a result: a crontab whose markers do not balance
+   is refused rather than read as having no section. Every fixture below is well
+   formed except the ones whose subject is a malformation, so a refusal here is
+   a broken fixture and not the case's answer. The message is rendered into the
+   failure because it names a malformation and never a line. *)
+let parsed ~read_file lines =
+  match Crontab.parse_listed_jobs ~read_file lines with
+  | Ok jobs -> jobs
+  | Error refusal -> fail refusal
+
+let merged jobs lines =
+  match Crontab.merge_bondi_section jobs lines with
+  | Ok crontab -> crontab
+  | Error refusal -> fail refusal
+
 let test_image_from_cron_line () =
   let line =
     "0 * * * * /usr/bin/curl -s -X POST http://localhost:3030/api/v1/run -H \
@@ -273,11 +289,11 @@ let test_parse_listed_jobs () =
     ]
   in
   check (list listed_job_testable) "parses two scheduled jobs" expected
-    (Crontab.parse_listed_jobs ~read_file:no_files lines)
+    (parsed ~read_file:no_files lines)
 
 let test_parse_listed_jobs_empty () =
   check (list listed_job_testable) "empty input" []
-    (Crontab.parse_listed_jobs ~read_file:no_files [])
+    (parsed ~read_file:no_files [])
 
 (* [upsert] leaves a line for a job the deploy does not name exactly where it
    found it, so both legacy shapes outlive this change and both must still read.
@@ -295,7 +311,7 @@ let test_crontab_parse_reads_hardened_line () =
     (Crontab.image_from_cron_line line);
   check (list listed_job_testable) "scheduled jobs from hardened line"
     [ Crontab.Job { name = "backup"; image = "ghcr.io/org/backup:v2.1.0" } ]
-    (Crontab.parse_listed_jobs ~read_file:no_files (section [ line ]))
+    (parsed ~read_file:no_files (section [ line ]))
 
 (* --- the reader: two shapes, and a third answer that is not silence ------- *)
 
@@ -306,7 +322,7 @@ let test_exec_line_resolves_through_its_run_file () =
   check (list listed_job_testable)
     "the exec line resolves to the job its file declares"
     [ Crontab.Job { name = "backup"; image = "myimg:v1" } ]
-    (Crontab.parse_listed_jobs
+    (parsed
        ~read_file:(reader_for [ (backup_run_file, run_file_contents job) ])
        (section [ Crontab.entry_of_cron_job job ]))
 
@@ -315,7 +331,7 @@ let test_exec_line_resolves_through_its_run_file () =
 let test_legacy_line_still_resolves_through_the_scanner () =
   check (list listed_job_testable) "the legacy line resolves without any file"
     [ Crontab.Job { name = "backup"; image = "ghcr.io/org/backup:v2.1.0" } ]
-    (Crontab.parse_listed_jobs ~read_file:no_files
+    (parsed ~read_file:no_files
        (section
           [
             legacy_line {|{"job":"backup","image":"ghcr.io/org/backup:v2.1.0"}|};
@@ -332,7 +348,7 @@ let test_unparseable_line_is_unreadable_not_omitted () =
       Crontab.Job { name = "backup"; image = "myimg:v1" };
       Crontab.Unreadable { position = 2 };
     ]
-    (Crontab.parse_listed_jobs
+    (parsed
        ~read_file:(reader_for [ (backup_run_file, run_file_contents job) ])
        (section [ Crontab.entry_of_cron_job job; "0 * * * * echo hello" ]))
 
@@ -342,13 +358,13 @@ let test_missing_run_file_is_unreadable_not_omitted () =
   check (list listed_job_testable)
     "a line whose file is gone is reported, not dropped"
     [ Crontab.Unreadable { position = 1 } ]
-    (Crontab.parse_listed_jobs ~read_file:no_files lines);
+    (parsed ~read_file:no_files lines);
   (* Affirmative arm on the same fixture: the line does reach the resolver and
      the resolver can answer [Job] for it, so the entry above is unreadable
      because of the missing file and not because the line was never resolved. *)
   check (list listed_job_testable) "the same line with its file present"
     [ Crontab.Job { name = "backup"; image = "myimg:v1" } ]
-    (Crontab.parse_listed_jobs
+    (parsed
        ~read_file:(reader_for [ (backup_run_file, run_file_contents job) ])
        lines)
 
@@ -365,13 +381,11 @@ let test_job_disagreeing_with_path_is_unreadable () =
   check (list listed_job_testable)
     "backup's file declaring restore is unreadable"
     [ Crontab.Unreadable { position = 1 } ]
-    (Crontab.parse_listed_jobs
-       ~read_file:(reader_for [ (backup_run_file, impostor) ])
-       lines);
+    (parsed ~read_file:(reader_for [ (backup_run_file, impostor) ]) lines);
   (* Affirmative arm: the same path, the same reader, a file that agrees. *)
   check (list listed_job_testable) "backup's file declaring backup reads"
     [ Crontab.Job { name = "backup"; image = "myimg:v1" } ]
-    (Crontab.parse_listed_jobs
+    (parsed
        ~read_file:(reader_for [ (backup_run_file, run_file_contents job) ])
        lines)
 
@@ -386,7 +400,7 @@ let test_job_disagreeing_with_path_is_unreadable () =
    the second in the section, so a reader counting file lines fails here. *)
 let test_unreadable_entry_reports_a_position_not_a_line () =
   let job = payload_fixture () in
-  let line_holding_a_value =
+  let unresolvable_line_holding_a_value =
     "0 * * * * /usr/bin/curl -d 'RUN_ENV=" ^ distinctive_env_value ^ "'"
   in
   check (list listed_job_testable)
@@ -395,10 +409,12 @@ let test_unreadable_entry_reports_a_position_not_a_line () =
       Crontab.Job { name = "backup"; image = "myimg:v1" };
       Crontab.Unreadable { position = 2 };
     ]
-    (Crontab.parse_listed_jobs
+    (parsed
        ~read_file:(reader_for [ (backup_run_file, run_file_contents job) ])
        ("# some other cron"
-       :: section [ Crontab.entry_of_cron_job job; line_holding_a_value ]))
+       :: section
+            [ Crontab.entry_of_cron_job job; unresolvable_line_holding_a_value ]
+       ))
 
 (* --- upsert: merging across a section that holds both shapes -------------- *)
 
@@ -441,9 +457,7 @@ let mixed_crontab_lines =
        ]
 
 let merged_mixed_section () =
-  Crontab.merge_bondi_section
-    (Some [ redeployed_backup; added_metrics ])
-    mixed_crontab_lines
+  merged (Some [ redeployed_backup; added_metrics ]) mixed_crontab_lines
 
 let is_legacy_line line = Option.is_some (Crontab.json_from_cron_line line)
 
@@ -469,33 +483,30 @@ let doubly_held_backup_lines =
     ]
 
 let test_a_name_the_section_holds_twice_is_written_once () =
-  let merged =
-    Crontab.merge_bondi_section (Some [ redeployed_backup ])
-      doubly_held_backup_lines
-  in
+  let crontab = merged (Some [ redeployed_backup ]) doubly_held_backup_lines in
   check int "the redeployed job's line is written once, not once per entry" 1
     (List.length
        (List.filter
           (String.equal (Crontab.entry_of_cron_job redeployed_backup))
-          merged));
+          crontab));
   check (list string) "and an entry naming another job is untouched"
     [ cleanup_legacy_line ]
-    (List.filter is_legacy_line merged)
+    (List.filter is_legacy_line crontab)
 
 (* The other half of the same rule. The place matters as much as the shape: the new line
    stands where the legacy one stood, which is what keeps a redeploy from
    reordering a section it only meant to update. *)
 let test_legacy_line_for_a_redeployed_job_is_replaced_by_the_new_shape () =
-  let merged = merged_mixed_section () in
+  let crontab = merged_mixed_section () in
   check (option int) "the legacy line for backup stood third in the crontab"
     (Some 2)
     (List.find_index (String.equal backup_legacy_line) mixed_crontab_lines);
   check (option int) "backup's new-shape line stands where it stood" (Some 2)
     (List.find_index
        (String.equal (Crontab.entry_of_cron_job redeployed_backup))
-       merged);
+       crontab);
   check (option int) "and the legacy line for backup is gone" None
-    (List.find_index (String.equal backup_legacy_line) merged)
+    (List.find_index (String.equal backup_legacy_line) crontab)
 
 (* The section goes out through the real generator and comes back through
    the real reader, with the run files the deploy would have written: the
@@ -518,30 +529,63 @@ let test_mixed_section_round_trips_through_generate_and_parse () =
       Crontab.Job { name = "cleanup"; image = "ghcr.io/org/cleanup:v1" };
       Crontab.Job { name = "metrics"; image = "ghcr.io/org/metrics:v1" };
     ]
-    (Crontab.parse_listed_jobs ~read_file:(reader_for files)
-       (merged_mixed_section ()))
+    (parsed ~read_file:(reader_for files) (merged_mixed_section ()))
 
 (* A line no reader names cannot be merged by name, and dropping it is what the
    merge did before: the whole crontab is asserted here rather than the line's
    presence, because presence is not placement -- an entry appended at the end
    of the section would satisfy "it survived" and still have moved. *)
+let mixed_crontab_merged () =
+  [
+    "# some other cron";
+    "# BEGIN BONDI CRON";
+    Crontab.entry_of_cron_job redeployed_backup;
+    Crontab.entry_of_cron_job reports_job;
+    unresolvable_line;
+    cleanup_legacy_line;
+    Crontab.entry_of_cron_job added_metrics;
+    "# END BONDI CRON";
+  ]
+
 let test_unreadable_line_keeps_its_place_in_the_section () =
   check (list string) "the whole crontab the merge writes"
+    (mixed_crontab_merged ()) (merged_mixed_section ())
+
+(* A crontab already holding two balanced sections, which is the state the
+   estate's own history produces: the server matched markers untrimmed, so a
+   marker carrying a carriage return read as no section and the next write
+   appended a second section below the first. Neither is a malformation --
+   both balance -- so nothing refuses, and the job stands in both and fires
+   twice a schedule. *)
+let doubled_crontab =
+  ("# some other cron" :: section [ backup_legacy_line ])
+  @ section [ Crontab.entry_of_cron_job redeployed_backup ]
+
+let test_a_doubled_section_is_collapsed_into_one () =
+  check (list string) "the merge writes one section holding the job once"
     [
       "# some other cron";
       "# BEGIN BONDI CRON";
       Crontab.entry_of_cron_job redeployed_backup;
-      Crontab.entry_of_cron_job reports_job;
-      unresolvable_line;
-      cleanup_legacy_line;
-      Crontab.entry_of_cron_job added_metrics;
       "# END BONDI CRON";
     ]
-    (merged_mixed_section ())
+    (merged (Some [ redeployed_backup ]) doubled_crontab);
+  (* The removal arm on the same fixture: "removes the section entirely" is a
+     claim about every section, not about the first one. *)
+  check (list string) "and removing the section removes both of them"
+    [ "# some other cron" ]
+    (merged None doubled_crontab);
+  (* The reader half. A second section read by nothing reports the box as
+     holding one job while cron fires two. *)
+  check (list listed_job_testable) "both sections' entries are read, in order"
+    [
+      Crontab.Job { name = "backup"; image = "ghcr.io/org/backup:v1" };
+      Crontab.Unreadable { position = 2 };
+    ]
+    (parsed ~read_file:no_files doubled_crontab)
 
 let test_merge_of_no_lines_at_all () =
-  check (list string) "no jobs and no crontab is no crontab" []
-    (Crontab.merge_bondi_section None [])
+  check (list string) "no jobs and no crontab is no crontab" [] (merged None [])
 
 (* The lines outside the section keep their content but not their place: they
    are hoisted above the section, trimmed, which is the carve-out the section
@@ -555,7 +599,7 @@ let test_merge_keeps_the_lines_outside_the_section () =
       Crontab.entry_of_cron_job redeployed_backup;
       "# END BONDI CRON";
     ]
-    (Crontab.merge_bondi_section (Some [ redeployed_backup ])
+    (merged (Some [ redeployed_backup ])
        [
          "  # some other cron  ";
          "# BEGIN BONDI CRON";
@@ -567,7 +611,167 @@ let test_merge_keeps_the_lines_outside_the_section () =
 let test_merge_without_markers_touches_no_line () =
   let lines = [ "0 * * * * echo hello"; "30 * * * * echo world" ] in
   check (list string) "a crontab Bondi does not own is left as it is" lines
-    (Crontab.merge_bondi_section None lines)
+    (merged None lines)
+
+(* --- a section whose markers do not balance ------------------------------- *)
+
+(* The line the malformed fixtures hold. It carries an environment value so
+   that a refusal rendering any part of the line it stumbled over is a red here
+   rather than a discovery in a mailed cron message. *)
+let line_holding_a_value =
+  legacy_line
+    ({|{"job": "backup", "image": "ghcr.io/org/backup:v1", "env_vars": {"RUN_ENV": "|}
+   ^ distinctive_env_value ^ {|"}}|})
+
+(* The live state of a box in the estate on the day this was written: a job
+   line, and below it an end marker with no begin marker. The reader that
+   walked with a flag answered "no section", and the next merge appended a
+   fresh section for the job it had not found -- leaving the original line
+   outside it. Both fired. *)
+let end_without_begin = [ line_holding_a_value; "# END BONDI CRON" ]
+let begin_without_end = [ "# BEGIN BONDI CRON"; line_holding_a_value ]
+
+let nested_begin =
+  [
+    "# BEGIN BONDI CRON";
+    line_holding_a_value;
+    "# BEGIN BONDI CRON";
+    "# END BONDI CRON";
+  ]
+
+let malformed = "the Bondi section of the crontab is malformed: "
+
+let end_without_begin_refusal =
+  malformed ^ "an end marker closes a section that was never opened"
+
+let begin_without_end_refusal =
+  malformed ^ "a begin marker opens a section the file never closes"
+
+let nested_begin_refusal =
+  malformed ^ "a begin marker opens a section inside one already open"
+
+(* A refusal is asserted through its message rather than its constructor: the
+   message is what an operator is left with, and what a malformed crontab must
+   not be able to leak through. A merge that answered [Ok] is reported by its
+   length, which is the shape of the defect -- the section it wrote is a second
+   one. *)
+let refusal_of_merge lines =
+  match Crontab.merge_bondi_section (Some [ redeployed_backup ]) lines with
+  | Ok crontab ->
+      failf "the malformed crontab was rewritten into %d lines"
+        (List.length crontab)
+  | Error refusal -> refusal
+
+let refusal_of_parse lines =
+  match Crontab.parse_listed_jobs ~read_file:no_files lines with
+  | Ok jobs ->
+      failf "the malformed crontab read as %d entries" (List.length jobs)
+  | Error refusal -> refusal
+
+let test_an_end_marker_with_no_begin_is_refused () =
+  check string "the merge refuses rather than appending a second section"
+    end_without_begin_refusal
+    (refusal_of_merge end_without_begin);
+  check string "the reader refuses rather than reading no section"
+    end_without_begin_refusal
+    (refusal_of_parse end_without_begin);
+  (* The affirmative arm, on the same line: with a begin marker above it the
+     merge writes the section and the job's line stands in it, so the refusal
+     above is the markers and not a line the walk never reached. *)
+  check (list string) "the same line inside balanced markers merges"
+    [
+      "# BEGIN BONDI CRON";
+      Crontab.entry_of_cron_job redeployed_backup;
+      "# END BONDI CRON";
+    ]
+    (merged (Some [ redeployed_backup ]) (section [ line_holding_a_value ]))
+
+let test_a_begin_marker_with_no_end_is_refused () =
+  check string "the merge refuses a section the file never closes"
+    begin_without_end_refusal
+    (refusal_of_merge begin_without_end);
+  check string "and so does the reader" begin_without_end_refusal
+    (refusal_of_parse begin_without_end);
+  check (list listed_job_testable)
+    "the same line under a closed marker pair reads as its job"
+    [ Crontab.Job { name = "backup"; image = "ghcr.io/org/backup:v1" } ]
+    (parsed ~read_file:no_files (section [ line_holding_a_value ]))
+
+let test_a_nested_begin_is_refused () =
+  check string "the merge refuses a section opened inside one already open"
+    nested_begin_refusal
+    (refusal_of_merge nested_begin);
+  check string "and so does the reader" nested_begin_refusal
+    (refusal_of_parse nested_begin);
+  (* The same file with the inner marker removed is a section the merge writes,
+     so the refusal is the nesting and not the second marker pair's existence. *)
+  check (list string) "the same lines without the inner begin marker"
+    [
+      "# BEGIN BONDI CRON";
+      Crontab.entry_of_cron_job redeployed_backup;
+      "# END BONDI CRON";
+    ]
+    (merged (Some [ redeployed_backup ])
+       [ "# BEGIN BONDI CRON"; line_holding_a_value; "# END BONDI CRON" ])
+
+(* The refusal is the only text an operator is given, and it is returned over
+   HTTP, mailed by cron and shipped with the diagnostics stream. Every line in a
+   crontab may be a job's payload, so the three malformations are told apart by
+   the message itself and none of them renders any part of the line that
+   exposed them. *)
+let test_the_refusal_names_the_malformation_and_no_part_of_any_line () =
+  let refusals =
+    [
+      refusal_of_merge end_without_begin;
+      refusal_of_merge begin_without_end;
+      refusal_of_merge nested_begin;
+      refusal_of_parse end_without_begin;
+      refusal_of_parse begin_without_end;
+      refusal_of_parse nested_begin;
+    ]
+  in
+  check int "three malformations, three distinct messages" 3
+    (List.length (List.sort_uniq String.compare refusals));
+  List.iter
+    (fun refusal ->
+      List.iter
+        (fun needle ->
+          check bool
+            (Printf.sprintf "the refusal holds no %S" needle)
+            false
+            (String_utils.contains ~needle refusal))
+        [ distinctive_env_value; "curl"; "ghcr.io"; "backup"; "0 * * * *" ])
+    refusals
+
+(* None of this may become a reason a working box fails. A crontab whose markers
+   balance is answered exactly as it was answered before the refusal existed:
+   the same entries out of the reader, the same crontab out of the merge. *)
+let test_a_well_formed_section_is_unaffected () =
+  check (list listed_job_testable) "every entry of a mixed section, in place"
+    [
+      Crontab.Job { name = "backup"; image = "ghcr.io/org/backup:v1" };
+      Crontab.Unreadable { position = 2 };
+      Crontab.Unreadable { position = 3 };
+      Crontab.Job { name = "cleanup"; image = "ghcr.io/org/cleanup:v1" };
+    ]
+    (parsed ~read_file:no_files mixed_crontab_lines);
+  check (list string) "and the crontab the merge writes for it"
+    (mixed_crontab_merged ()) (merged_mixed_section ())
+
+(* The two readers of these markers disagreed about trailing whitespace: one
+   trimmed before matching and this one did not. A crontab an editor left a
+   carriage return on read as having no section at all, and the next merge
+   appended a second one below the first -- the same double fire an unbalanced
+   marker causes, from a byte nobody can see. *)
+let test_a_marker_carrying_whitespace_is_still_the_section () =
+  check (list string) "the section is found and rewritten in place"
+    [
+      "# BEGIN BONDI CRON";
+      Crontab.entry_of_cron_job redeployed_backup;
+      "# END BONDI CRON";
+    ]
+    (merged (Some [ redeployed_backup ])
+       [ "# BEGIN BONDI CRON\r"; line_holding_a_value; "# END BONDI CRON  " ])
 
 let () =
   run "Crontab"
@@ -599,6 +803,8 @@ let () =
             `Quick test_mixed_section_round_trips_through_generate_and_parse;
           test_case "an unreadable line keeps its place in the section" `Quick
             test_unreadable_line_keeps_its_place_in_the_section;
+          test_case "a doubled section is collapsed into one" `Quick
+            test_a_doubled_section_is_collapsed_into_one;
         ] );
       ( "entry_of_cron_job",
         [
@@ -639,6 +845,22 @@ let () =
             test_parse_listed_jobs_empty;
           test_case "parse reads hardened line" `Quick
             test_crontab_parse_reads_hardened_line;
+        ] );
+      ( "malformed sections",
+        [
+          test_case "an end marker with no begin is refused" `Quick
+            test_an_end_marker_with_no_begin_is_refused;
+          test_case "a begin marker with no end is refused" `Quick
+            test_a_begin_marker_with_no_end_is_refused;
+          test_case "a nested begin is refused" `Quick
+            test_a_nested_begin_is_refused;
+          test_case "the refusal names the malformation and no part of any line"
+            `Quick
+            test_the_refusal_names_the_malformation_and_no_part_of_any_line;
+          test_case "a well-formed section is unaffected" `Quick
+            test_a_well_formed_section_is_unaffected;
+          test_case "a marker carrying whitespace is still the section" `Quick
+            test_a_marker_carrying_whitespace_is_still_the_section;
         ] );
       ( "parse_listed_jobs",
         [

@@ -32,8 +32,14 @@ let a_cron_job : Config_file.cron_job =
 
 let contains ~needle s = Bondi_common.String_utils.contains ~needle s
 
-let ok_cmd c =
-  match Setup.orchestrator_run_command c with
+(* The mount arm is a parameter rather than a reading of the config, so these
+   cases name what they are asserting about. Everything here that is not about
+   the payload directory passes the value the configuration implies. *)
+let run_command ?(cron_payload_needed = false) c =
+  Setup.orchestrator_run_command ~cron_payload_needed c
+
+let ok_cmd ?cron_payload_needed c =
+  match run_command ?cron_payload_needed c with
   | Ok s -> s
   | Error e -> failf "expected Ok, got Error: %s" e
 
@@ -51,7 +57,7 @@ let test_explicit_loopback () =
 (* Public bind is allowed, but not unauthenticated -- that combination is the
    finding itself. *)
 let test_public_without_token_refused () =
-  match Setup.orchestrator_run_command (cfg ~bind_address:"0.0.0.0" ()) with
+  match run_command (cfg ~bind_address:"0.0.0.0" ()) with
   | Ok _ -> fail "0.0.0.0 without api_token must be refused"
   | Error e ->
       check bool "names the address" true (contains ~needle:"0.0.0.0" e);
@@ -80,7 +86,9 @@ let test_run_command_declares_restart_policy () =
    crontab through a bind mount. Dropping that flag leaves a container that
    answers health checks but cannot deploy a cron job -- which happened. *)
 let test_cron_jobs_imply_root_and_mount () =
-  let cmd = ok_cmd (cfg ~cron_jobs:[ a_cron_job ] ()) in
+  let cmd =
+    ok_cmd ~cron_payload_needed:true (cfg ~cron_jobs:[ a_cron_job ] ())
+  in
   check bool "runs as root" true (contains ~needle:"--user root" cmd);
   check bool "mounts crontab spool" true
     (contains ~needle:"/var/spool/cron/crontabs" cmd);
@@ -98,7 +106,9 @@ let test_cron_jobs_imply_root_and_mount () =
    and through a shared constant this would pass for whatever the constant
    became. Both sides of the colon are asserted for the same reason. *)
 let test_cron_jobs_mount_the_payload_directory () =
-  let cmd = ok_cmd (cfg ~cron_jobs:[ a_cron_job ] ()) in
+  let cmd =
+    ok_cmd ~cron_payload_needed:true (cfg ~cron_jobs:[ a_cron_job ] ())
+  in
   check bool "mounts the payload directory from the host" true
     (contains ~needle:"-v /etc/bondi/cron:/etc/bondi/cron" cmd);
   (* The affirmative arm above passes against a mount added unconditionally.

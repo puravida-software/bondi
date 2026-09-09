@@ -605,7 +605,11 @@ let test_render_crontab_row_shows_counts_and_names () =
         (Crontab.Section
            {
              entries =
-               [ Crontab.Named "daily-close"; Crontab.Unnamed { position = 2 } ];
+               [
+                 Crontab.Named
+                   { job = "daily-close"; shape = Crontab.Exec_line };
+                 Crontab.Unnamed { position = 2 };
+               ];
            })
       (report ())
   in

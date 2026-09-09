@@ -111,6 +111,44 @@ let mixed_shapes = [ begin_marker; daily_close; rebalance_exec; end_marker; "" ]
 let mixed_with_unresolvable =
   [ begin_marker; daily_close; escaping_exec; rebalance_exec; end_marker; "" ]
 
+(* A legacy payload whose [job] field is text no job could have been deployed
+   under. The name on a legacy line comes out of JSON the host wrote and nothing
+   else on the line constrains it -- unlike the exec shape, where the path is
+   rebuilt from the name and the line is named only when the two agree. So this
+   is the one shape by which host-controlled text can reach standard output, and
+   the path a later reader builds from a reported name. *)
+let hostile_legacy = entry ~schedule:"0 4 * * *" ~job:"../../etc/passwd" ~secret
+
+let hostile_legacy_section =
+  [ begin_marker; daily_close; hostile_legacy; end_marker; "" ]
+
+(* Two separately balanced sections, which is a state boxes are actually in: an
+   earlier reader matched its markers untrimmed, read a section carrying a
+   carriage return as absent, and the next write appended a second one below it.
+   Both sections' jobs fire, so a report naming only the first describes a box
+   that does not exist. *)
+let two_sections =
+  [
+    begin_marker;
+    daily_close;
+    end_marker;
+    hand_added;
+    begin_marker;
+    rebalance_exec;
+    end_marker;
+    "";
+  ]
+
+(* An expected entry states which shape named it as well as what it named. The
+   two are different facts about a job -- an exec-line name has a run file
+   beside it and a legacy name has none and never had one -- so a case that
+   pinned the name alone would go on passing while a reader that had lost the
+   distinction reported every unmigrated job as about to fail. *)
+let named_by_exec_line job = Listing.Named { job; shape = Listing.Exec_line }
+
+let named_by_legacy_line job =
+  Listing.Named { job; shape = Listing.Legacy_line }
+
 (* Entries are compared as a list rather than one at a time, so a case states
    the whole of what the section reads as: the entries around the one it is
    about are asserted by the same call that asserts it, and a case about an
@@ -118,7 +156,11 @@ let mixed_with_unresolvable =
 let entry_testable =
   of_pp (fun formatter entry ->
       match entry with
-      | Listing.Named name -> Format.fprintf formatter "Named %S" name
+      | Listing.Named { job; shape } ->
+          Format.fprintf formatter "Named %S from %s" job
+            (match shape with
+            | Listing.Exec_line -> "an exec line"
+            | Listing.Legacy_line -> "a legacy line")
       | Listing.Unnamed { position } ->
           Format.fprintf formatter "Unnamed %d" position)
 
@@ -132,6 +174,25 @@ let check_entries label expected listing =
       failf "%s: this fixture is a well-formed section and must read as one"
         label
 
+(* The names alone, read out of the one reader that reports them. Every case
+   below is about which jobs are named and in what order; the shape each name
+   came from is the subject of its own case. *)
+let check_named_jobs label expected listing =
+  check (list string) label expected
+    (List.map
+       (fun (named : Listing.named_job) -> named.job)
+       (Listing.named_jobs_with_shape listing))
+
+let rendered_named_job (named : Listing.named_job) =
+  Printf.sprintf "%s from %s" named.job
+    (match named.shape with
+    | Listing.Exec_line -> "an exec line"
+    | Listing.Legacy_line -> "a legacy line")
+
+let check_named_jobs_with_shape label expected listing =
+  check (list string) label expected
+    (List.map rendered_named_job (Listing.named_jobs_with_shape listing))
+
 (* --- Tests --- *)
 
 let test_crontab_section_counts_jobs () =
@@ -141,7 +202,7 @@ let test_crontab_section_counts_jobs () =
 
 let test_crontab_section_returns_job_names () =
   check_entries "names the jobs in the order the file lists them"
-    [ Listing.Named "daily-close"; Listing.Named "rebalance" ]
+    [ named_by_legacy_line "daily-close"; named_by_legacy_line "rebalance" ]
     (spool_of well_formed)
 
 (* The affirmative arm the absence test below is measured against: a section
@@ -170,7 +231,7 @@ let test_crontab_empty_section_is_zero_jobs () =
    every box, and the exact inverse of the failure the unnamed arm exists for. *)
 let test_crontab_exec_line_is_named_from_its_path () =
   check_entries "takes the job's name from the run file's directory"
-    [ Listing.Named "daily-close" ]
+    [ named_by_exec_line "daily-close" ]
     (spool_of exec_only_section)
 
 (* Every crontab in the estate still holds legacy lines and they still fire, so
@@ -179,7 +240,7 @@ let test_crontab_exec_line_is_named_from_its_path () =
    in front of it. *)
 let test_crontab_legacy_line_is_still_named_from_its_payload () =
   check_entries "takes the job's name from the payload the line carries"
-    [ Listing.Named "daily-close" ]
+    [ named_by_legacy_line "daily-close" ]
     (spool_of legacy_only_section)
 
 (* A box mid-migration holds both shapes at once, because a job's line is
@@ -188,7 +249,7 @@ let test_crontab_legacy_line_is_still_named_from_its_payload () =
    a reader that names only one of the two describes a box that does not exist. *)
 let test_crontab_mixed_section_names_every_job () =
   check_entries "names both shapes, in the order the file lists them"
-    [ Listing.Named "daily-close"; Listing.Named "rebalance" ]
+    [ named_by_legacy_line "daily-close"; named_by_exec_line "rebalance" ]
     (spool_of mixed_shapes)
 
 (* A line of neither shape keeps its place and reports its position, and the
@@ -199,9 +260,9 @@ let test_crontab_mixed_section_names_every_job () =
 let test_crontab_line_of_neither_shape_is_unnamed_with_its_position () =
   check_entries "leaves the line of neither shape unnamed, at its position"
     [
-      Listing.Named "daily-close";
+      named_by_legacy_line "daily-close";
       Listing.Unnamed { position = 2 };
-      Listing.Named "rebalance";
+      named_by_exec_line "rebalance";
     ]
     (spool_of mixed_with_unresolvable)
 
@@ -294,10 +355,13 @@ let test_crontab_unreadable_entry_is_counted_and_located () =
         (Some 2)
         (Listing.job_count (spool_of with_truncated_entry));
       match entries with
-      | [ Listing.Named "daily-close"; Listing.Unnamed { position } ] ->
+      | [
+       Listing.Named { job = "daily-close"; shape = _ };
+       Listing.Unnamed { position };
+      ] ->
           check int "says which entry it was, so the operator can find it" 2
             position
-      | [ Listing.Named _; Listing.Named name ] ->
+      | [ Listing.Named _; Listing.Named { job = name; shape = _ } ] ->
           failf "an entry whose payload does not parse must not be named %S"
             name
       | [ _; _ ]
@@ -314,7 +378,8 @@ let test_crontab_unreadable_entry_is_counted_and_located () =
   match spool_of well_formed with
   | Listing.Section { entries } -> (
       match entries with
-      | [ Listing.Named _; Listing.Named "rebalance" ] -> ()
+      | [ Listing.Named _; Listing.Named { job = "rebalance"; shape = _ } ] ->
+          ()
       | [ Listing.Named _; Listing.Unnamed { position } ] ->
           failf "the same entry, intact, must be read as named, not as entry %d"
             position
@@ -372,7 +437,7 @@ let strings_returned listing =
       List.concat_map
         (fun entry ->
           match entry with
-          | Listing.Named name -> [ name ]
+          | Listing.Named { job; shape = _ } -> [ job ]
           | Listing.Unnamed { position = _ } -> [])
         entries
   | Listing.No_section -> []
@@ -525,6 +590,96 @@ let test_crontab_never_returns_command_lines () =
         (contains ~needle:"env_vars" returned))
     spools
 
+(* [named_jobs] is what the preserve action and the operator report are built
+   from, and until now it was reached only through a plan test asserting on the
+   order of actions. The names it returns are the section's, in the order its
+   lines appear. *)
+let test_named_jobs_names_the_section_in_order () =
+  check_named_jobs "names the section's jobs in file order"
+    [ "daily-close"; "rebalance" ]
+    (spool_of well_formed);
+  check_named_jobs "and does so across both line shapes"
+    [ "daily-close"; "rebalance" ]
+    (spool_of mixed_shapes)
+
+(* An entry whose job could not be read is a line for a human to go and look at
+   and not a job another reader can act on, so it is not one of the names. The
+   affirmative arm is the same fixture's other two entries: without them, a
+   [named_jobs] returning nothing at all would satisfy the absence. *)
+let test_named_jobs_omits_an_entry_that_could_not_be_read () =
+  let listing = spool_of mixed_with_unresolvable in
+  check (option int) "the unreadable entry is still counted" (Some 3)
+    (Listing.job_count listing);
+  check_named_jobs "but it is not one of the names it reports"
+    [ "daily-close"; "rebalance" ]
+    listing
+
+(* Every section is the section. A file holding a second, separately balanced
+   one holds jobs that fire, and the next write folds the two together -- so a
+   report that named only the first would disagree with both the box and the
+   rewrite. The hand-added line between them is outside both, and stays out. *)
+let test_named_jobs_covers_every_section_in_the_file () =
+  check_named_jobs "names the jobs of both sections, in file order"
+    [ "daily-close"; "rebalance" ]
+    (spool_of two_sections)
+
+(* A name read off a legacy line is a JSON field the host wrote, and it leaves
+   here for standard output and for whatever path a caller builds from it. One
+   [create] would have rejected cannot have come from a job Bondi deployed, so
+   it is not reported at all. The line remains an entry: it is on the box and
+   the next rewrite removes it, which is a fact the count still carries.
+   The affirmative arm is the same builder with a name a job could carry. *)
+let test_named_jobs_drops_a_legacy_name_no_job_could_carry () =
+  let listing = spool_of hostile_legacy_section in
+  check (option int) "the line is still an entry of the section" (Some 2)
+    (Listing.job_count listing);
+  check_named_jobs
+    "a name no job could have been deployed under is not reported"
+    [ "daily-close" ] listing;
+  check_named_jobs "while the same line carrying a name one could is"
+    [ "daily-close"; "rebalance" ]
+    (spool_of well_formed)
+
+(* Nothing on the host supports a claim about what is scheduled there unless a
+   section was read, so every other outcome names nothing. Each absence arm is
+   paired with the same lines read as a section: without the pair, a
+   [named_jobs] that always answered [[]] would pass all four. *)
+let test_named_jobs_is_empty_for_every_outcome_that_is_not_a_section () =
+  check_named_jobs "a file carrying no markers names nothing" []
+    (spool_of no_markers);
+  check_named_jobs "though the same line inside markers is named"
+    [ "operator-cleanup" ]
+    (spool_of [ begin_marker; hand_added; end_marker; "" ]);
+  check_named_jobs "an end marker without a begin names nothing" []
+    (spool_of end_without_begin);
+  check_named_jobs "though the same lines with both markers are named"
+    [ "daily-close" ]
+    (spool_of [ begin_marker; daily_close; end_marker; "" ]);
+  check_named_jobs "a section that never ends names nothing" []
+    (spool_of never_ends);
+  check_named_jobs "nested markers name nothing" [] (spool_of nested);
+  check_named_jobs "a read that never happened names nothing" []
+    (Listing.of_read_output
+       (Error
+          (Remote_exec.Ssh_failed { code = 255; output = "Connection closed" })));
+  check_named_jobs "though the same section read successfully is named"
+    [ "daily-close"; "rebalance" ]
+    (spool_of well_formed)
+
+(* The shape that named a job, out where the caller reporting on its files can
+   read it. A legacy line has no run file and no environment file by definition
+   -- its payload is on the line -- so a report built from names alone tells the
+   operator that every unmigrated job on the box fails at its next fire, which
+   is the common case on the boxes this reads and the false alarm they would
+   act on. The fixture holds one job of each shape, so a reader that answered
+   the same shape for both cannot pass. *)
+let test_named_jobs_carry_the_shape_that_named_them () =
+  check_named_jobs_with_shape "says which shape named each job"
+    [ "daily-close from a legacy line"; "rebalance from an exec line" ]
+    (spool_of mixed_shapes);
+  check_named_jobs_with_shape "and names nothing where nothing was read" []
+    (spool_of no_markers)
+
 let () =
   run "Crontab_listing"
     [
@@ -549,6 +704,21 @@ let () =
           test_case "a line of neither shape is still unnamed with its position"
             `Quick
             test_crontab_line_of_neither_shape_is_unnamed_with_its_position;
+        ] );
+      ( "named jobs",
+        [
+          test_case "names the section's jobs in order" `Quick
+            test_named_jobs_names_the_section_in_order;
+          test_case "an entry that could not be read is not a name" `Quick
+            test_named_jobs_omits_an_entry_that_could_not_be_read;
+          test_case "every section in the file is covered" `Quick
+            test_named_jobs_covers_every_section_in_the_file;
+          test_case "a legacy name no job could carry is dropped" `Quick
+            test_named_jobs_drops_a_legacy_name_no_job_could_carry;
+          test_case "every outcome that is not a section names nothing" `Quick
+            test_named_jobs_is_empty_for_every_outcome_that_is_not_a_section;
+          test_case "each name carries the shape it was read from" `Quick
+            test_named_jobs_carry_the_shape_that_named_them;
         ] );
       ( "absence and failure",
         [

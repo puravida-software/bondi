@@ -465,7 +465,7 @@ let section title rows =
       ([ title; table_header ] @ List.concat_map row_lines rows) @ [ "" ]
 
 let entry_cell = function
-  | Crontab_listing.Named job -> job
+  | Crontab_listing.Named { job; shape = _ } -> job
   | Crontab_listing.Unnamed { position } ->
       Printf.sprintf "entry %d could not be read" position
 

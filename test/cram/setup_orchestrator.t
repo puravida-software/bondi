@@ -42,7 +42,10 @@ leaves a running one.
   >     fi ;;
   >   'docker ps -aq | while read -r id'*)
   >     printf '/bondi-orchestrator\tundeclared\t\t0\t2026-08-01T09:00:00.222222222Z\n' ;;
-  >   *'/var/spool/cron/crontabs/root'*) echo BONDI_CRONTAB_ABSENT ;;
+  >   *'/var/spool/cron/crontabs/root'*)
+  >     if [ -n "$CRONTAB_SPOOL" ]; then cat "$CRONTAB_SPOOL"; else echo BONDI_CRONTAB_ABSENT; fi ;;
+  >   *'docker cp'*) : ;;
+  >   *BONDI_CRON_PAYLOAD_LISTED*) echo BONDI_CRON_PAYLOAD_LISTED ;;
   >   *'PortBindings'*) echo "${PUBLISHED_ON-127.0.0.1}" ;;
   >   'docker update'*)
   >     if [ -n "$RESTART_UPDATE_STICKS" ]; then printf 'unless-stopped\n' > "$RESTART_POLICY"; fi
@@ -300,3 +303,79 @@ proof of itself is the same assumption the run command's flag already made.
   [1]
   $ grep 'still' out.log
   Error: bondi-orchestrator restart policy on server 127.0.0.1 is still no after asking for unless-stopped -- refusing to report success on a posture that was not applied
+
+
+A host holding a Bondi section gets its cron payload directory copied out of the
+orchestrator before that container is stopped and removed. On a box that does
+not bind-mount the directory the files live in the container's writable layer,
+so the removal deletes every job's run file while the line that reads it stays
+in the spool -- and the job then fails silently at every fire until someone
+deploys it again.
+
+The stub answers the copy and the listing positively. A command falling through
+to the stub's last arm answers with nothing, which this client reads as "the
+directory could not be listed" rather than as an empty one, so an unanswered arm
+would make the assertions below pass while proving nothing reached the host.
+
+  $ printf 'BONDI_CRONTAB_CONTENTS\n# BEGIN BONDI CRON\n0 3 * * * docker exec bondi-orchestrator sh -c '"'"'bondi-server run < /etc/bondi/cron/nightly-report/run.json'"'"'\n# END BONDI CRON\n' > crontab-spool.txt
+  $ export CRONTAB_SPOOL="$PWD/crontab-spool.txt"
+  $ printf 'running\tmlopez1506/bondi-server:0.9.0\n' > "$ORCHESTRATOR_PS"
+  $ printf 'unless-stopped\n' > "$RESTART_POLICY"
+  $ : > ssh-argv.log
+  $ bondi-client setup > out.log 2>&1
+  $ grep 'Preserved the cron payload' out.log
+  Preserved the cron payload directory on server 127.0.0.1 ahead of the orchestrator recreate
+
+The listing comes back empty, so the job the section names holds neither file --
+which is the loss this phase exists to report rather than to hide.
+
+  $ grep 'cron job nightly-report' out.log
+  cron job nightly-report on server 127.0.0.1 has neither its run file nor its secret environment file on the box, so it fails at its next fire until it is deployed again
+
+The line above is worth nothing on its own: it is the only assertion in this
+block that a degraded read silences, and it is silenced by absence. A crontab
+that came back unreadable names no job, so no shortfall line prints, the grep
+above returns nothing, and every other assertion here -- the copy, its ordering,
+the mount -- goes on passing. So the same run is made to say out loud that the
+section was read and read as holding this job.
+
+  $ grep 'bondi section' out.log
+    bondi section          docker  1 jobs (nightly-report)
+
+The other half of the same silence is the payload listing. A directory that
+could not be listed names no job either, and it says so on its own line; that
+line not being here is what makes the emptiness the directory's answer rather
+than a read that never happened.
+
+  $ grep -c 'still hold their files could not be read' out.log
+  0
+  [1]
+
+The copy reached the host, and it reached it before the stop. Planned the other
+way round it would copy out of a container that is already gone and report every
+job as having lost everything, on the run that lost it.
+
+  $ grep -c -- 'docker cp' ssh-argv.log
+  1
+  $ awk '/docker cp/ { copy = NR } / stop bondi-orchestrator/ { stop = NR } END { print (copy && stop && copy < stop) ? "the copy is first" : "out of order" }' ssh-argv.log
+  the copy is first
+
+No job's name reaches a command line on either machine. The whole directory
+moves in one copy, so nothing read out of the section is ever built into argv --
+where it would be visible in the host's process table to anyone who can read
+/proc.
+
+  $ grep -c 'nightly-report' ssh-argv.log
+  0
+  [1]
+
+The replacement container is given the host directory the copy just wrote into.
+The crontab line's redirect is evaluated inside the container, so an orchestrator
+started without this mount reads an empty /etc/bondi/cron -- and the listing,
+which reads the host's copy, would go on reporting every job as holding its
+files while every one of them failed at its next fire. The configuration here
+declares no cron job at all: what asks for the mount is the section the host is
+holding, which is the same fact that asked for the copy.
+
+  $ grep -c 'etc/bondi/cron:/etc/bondi/cron' ssh-argv.log
+  1

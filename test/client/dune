@@ -13,6 +13,7 @@
   test_host_inventory
   test_container_health
   test_crontab_listing
+  test_cron_payload
   test_status_report
   test_status_gather
   test_status_decode

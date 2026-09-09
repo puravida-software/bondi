@@ -1,5 +1,5 @@
-(** Whether the orchestrator a box is running can execute the command Bondi
-    writes into its crontab.
+(** Whether the orchestrator a box is running can write the command Bondi puts
+    into its crontab, and execute it.
 
     A generated cron line runs [bondi-server run] inside the orchestrator
     container. That subcommand arrived in 0.15.0; an older image ignores its
@@ -8,13 +8,21 @@
     when someone is watching -- it fails at its next fire, which is 3am on a box
     nobody is looking at.
 
+    Writing the line is the later capability, and it is the one this gate is set
+    to. The deploy that rewrites a box's crontab runs on the box, so a release
+    that can execute a generated line while its own writer still emits the
+    legacy curl shape answers the deploy with success and changes nothing. That
+    describes 0.15.0 exactly, which is why the floor is 0.16.0 rather than the
+    release the subcommand arrived in.
+
     This module exists so the check is a pure, tested decision made against the
     version the box itself reports, taken before the deploy is posted rather
     than discovered by a cron job later. It performs no I/O: the caller reads
     the orchestrator's image over SSH and passes what it found here. *)
 
 val minimum_for_exec_lines : string
-(** The oldest orchestrator release that carries the [run] subcommand.
+(** The oldest orchestrator release whose server writes exec lines and run
+    files.
 
     Named so that a caller reporting the requirement and the caller deciding
     against it cannot drift apart. *)
@@ -27,15 +35,17 @@ val orchestrator_version_of_image : string -> string
     other -- a fork, a locally built image, a mirror -- is still the
     orchestrator by name, and is answered with the whole image string rather
     than a guess at which part of it is a version. That string carries no
-    recognisable version, so {!supports_run_subcommand} refuses it and names it,
-    which is what lets an operator recognise what their box is running.
+    recognisable version, so {!writes_exec_lines} refuses it and names it, which
+    is what lets an operator recognise what their box is running.
 
     Total by construction: every string is either a published tag or something
     reported as it stands, and there is no arm that fails. *)
 
-val supports_run_subcommand : string -> (unit, string) result
-(** [supports_run_subcommand version] decides whether an orchestrator reporting
-    [version] can execute a generated cron line.
+val writes_exec_lines : string -> (unit, string) result
+(** [writes_exec_lines version] decides whether an orchestrator reporting
+    [version] is one whose own server writes exec lines and run files -- not
+    whether it can execute a generated cron line, which is the earlier and
+    weaker capability.
 
     The comparison is an ordering, not an equality: everything from
     {!minimum_for_exec_lines} upwards is accepted. Comparing for equality would

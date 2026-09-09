@@ -1,27 +1,31 @@
-(* Observed, in a session that had just run git fetch origin: v0.15.0 is
-   published, it is the current origin/main, and it is the release that carries
-   the [run] subcommand a generated cron line invokes. git rev-parse
-   v0.15.0^{commit} and git rev-parse origin/main both answered
-   b2fee6c4a54208e7e41e2a14cd3016bf244db752, and git show
-   v0.15.0:lib/server/cli.ml carries the subcommand group. The floor below is
-   that tag read off the remote, not the number a conventional-commit bump was
-   expected to produce.
+(* The floor is the first release whose *server* writes exec lines and run
+   files, which is not the same as the first release that can execute one.
 
-   Keeping it that way is the release recipe's job, not a future reader's: the
+   0.15.0 -- tag v0.15.0, commit b2fee6c -- carries the [run] subcommand, so a
+   generated line fires against it. But its own crontab writer still emits the
+   legacy curl shape and it writes no run file at all; that arrived one release
+   later, in daa784e. The deploy that rewrites a box's crontab runs on the box,
+   so a floor of 0.15.0 accepted a box that answered every cron deploy with 200
+   while replacing a legacy line with an identical legacy line. Observed on the
+   estate's one box with a crontab: three consecutive deploys reporting success
+   and changing nothing, which is the silent failure this gate exists to
+   prevent, produced by the gate itself.
+
+   Keeping it correct is the release recipe's job, not a future reader's: the
    justfile refuses to publish a tag that orders below this floor, so a release
    numbered beneath it fails once at the release instead of refusing every cron
    deploy in the estate.
 
    Held as a pair as well as a string so the comparison below is numeric: "0.9"
-   is newer than "0.15" under string ordering and older under the ordering that
+   is newer than "0.16" under string ordering and older under the ordering that
    matters.
 
-   The patch level is not read, because this floor's patch is 0 and every 0.15.x
-   therefore carries the subcommand. That also keeps a suffixed tag such as
-   "0.15.0-rc1" readable rather than turning it into a refusal. *)
+   The patch level is not read, because this floor's patch is 0 and every 0.16.x
+   therefore carries the writer. That also keeps a suffixed tag such as
+   "0.16.0-rc1" readable rather than turning it into a refusal. *)
 let minimum_major = 0
-let minimum_minor = 15
-let minimum_for_exec_lines = "0.15.0"
+let minimum_minor = 16
+let minimum_for_exec_lines = "0.16.0"
 
 (* The repository the orchestrator is published under. Anything else is a fork,
    a mirror, or a locally built image; see the .mli for why those are answered
@@ -52,7 +56,7 @@ let ordering_of_version version =
   | [ _ ] ->
       None
 
-let supports_run_subcommand version =
+let writes_exec_lines version =
   match ordering_of_version version with
   | None ->
       Error

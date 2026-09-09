@@ -22,7 +22,12 @@ val dir_of : string -> string
     Only meaningful for a name accepted by {!is_valid_name}. *)
 
 val env_file_of : string -> string
-(** Path to the job's secret environment file inside {!dir_of}. *)
+(** Path to the job's secret environment file inside {!dir_of}.
+
+    This is {!Bondi_common.Cron_exec_line.env_file_of} rather than a second way
+    of spelling the same path, for the reason {!run_file_of} gives and for one
+    more: the client looks for this file to tell whether a job survived a
+    rebuilt orchestrator, and it cannot look for a name written only here. *)
 
 val run_file_of : string -> string
 (** Path to the job's run payload file inside {!dir_of}, beside {!env_file_of}.

@@ -76,6 +76,7 @@ type setup_context = {
   orchestrator : orchestrator_state;
   alloy_state : alloy_state;
   managed : managed_observation;
+  crontab : Crontab_listing.t;
 }
 
 type action =
@@ -84,6 +85,7 @@ type action =
   | EnsureNetwork of string
   | RequireCronDocker
   | RequireCronCurl
+  | PreserveCronPayloads of { jobs : Crontab_listing.named_job list }
   | StopOrchestrator
   | RemoveOrchestrator
   | RunServer
@@ -110,6 +112,7 @@ let phase_of_action : action -> Setup_phases.phase = function
   | RequireCronDocker -> Setup_phases.Cron_docker
   | RequireCronCurl -> Setup_phases.Cron_curl
   | EnsureAcmeFile -> Setup_phases.Acme
+  | PreserveCronPayloads _
   | StopOrchestrator
   | RemoveOrchestrator
   | RunServer ->
@@ -158,8 +161,8 @@ let orchestrator_ps_command =
 let orchestrator_bind_address (config : Config_file.t) =
   Option.value config.bondi_server.bind_address ~default:"127.0.0.1"
 
-let orchestrator_run_command (config : Config_file.t) : (string, string) result
-    =
+let orchestrator_run_command ~cron_payload_needed (config : Config_file.t) :
+    (string, string) result =
   let bind = orchestrator_bind_address config in
   if
     (not (Bondi_common.Net.is_loopback bind))
@@ -176,19 +179,26 @@ let orchestrator_run_command (config : Config_file.t) : (string, string) result
          bind)
   else
     let volume_mounts, user_flag =
-      match config.cron_jobs with
-      | Some jobs when jobs <> [] ->
-          (* The payload directory is mounted from the host because a job's
-             definition has to outlive the container. A version bump stops,
-             removes and re-runs the orchestrator by design, and in the writable
-             layer that deletes every declared job's run.json while its exec
-             line stays in the crontab — every job on the box then fails at its
-             next fire. Both sides name the same path so the mount and
-             Cron_secrets agree on where a job's files are. *)
-          ( " -v /var/spool/cron/crontabs:/var/spool/cron/crontabs -v \
-             /etc/bondi/cron:/etc/bondi/cron",
-            " --user root" )
-      | _ -> ("", "")
+      (* The payload directory is mounted from the host because a job's
+         definition has to outlive the container. A version bump stops, removes
+         and re-runs the orchestrator by design, and in the writable layer that
+         deletes every job's run.json while its exec line stays in the crontab —
+         every job on the box then fails at its next fire. Both sides name the
+         same path so the mount and Cron_secrets agree on where a job's files
+         are.
+
+         Whether this host needs the directory is [cron_payload_needed]'s
+         answer, and it is the same answer that plans the copy out of the old
+         container. Read from the configuration here and from the host's crontab
+         there, the two disagreed on exactly the box the copy exists for: the
+         files landed on a host the replacement container could not see, and the
+         listing — which reads the host — reported every job as holding its
+         own. *)
+      if cron_payload_needed then
+        ( " -v /var/spool/cron/crontabs:/var/spool/cron/crontabs -v \
+           /etc/bondi/cron:/etc/bondi/cron",
+          " --user root" )
+      else ("", "")
     in
     let token_env =
       match config.bondi_server.api_token with
@@ -765,7 +775,19 @@ let gather_context (server : Config_file.server) :
         | Ok output -> Managed_observed (managed_of_ps_output output)
         | Error err -> Managed_unobserved err)
   in
-  Ok { docker_status; orchestrator; alloy_state; managed }
+  (* Read on every run, including on a host whose configuration declares no cron
+     job at all. What the plan needs to know is whether the box holds a Bondi
+     section, and a box holding one that the configuration no longer declares is
+     exactly the box whose files a recreate would take with it. Reading only
+     where jobs are declared would skip it.
+
+     Not gated on the Docker reading either: the section is a file on the host,
+     and a host with no Docker can still be holding one. *)
+  let crontab =
+    Crontab_listing.of_read_output
+      (Remote_exec.command_output ~command:Crontab_listing.read_command server)
+  in
+  Ok { docker_status; orchestrator; alloy_state; managed; crontab }
 
 (* ------------------------------------------------------------------------- *)
 (* Phase 2: Plan (pure)                                                      *)
@@ -781,6 +803,49 @@ let has_cron_jobs (config : Config_file.t) : bool =
   | None ->
       false
 
+(* Whether this host keeps cron payloads at all — the one value the copy out of
+   the old container and the mount into the new one are both read from.
+
+   Two authorities could answer it and they do not answer alike. The
+   configuration knows what is declared; the host's crontab knows what is
+   scheduled, including a line for a job the configuration no longer declares.
+   Either alone leaves a real box wrong. Reading only the configuration would
+   plan no copy for a section it does not declare — the case this whole phase
+   exists for. Reading only the section would give a host its first cron job's
+   mount only after the deploy that writes the line, which is after the run file
+   it names has already been written into a layer the next recreate deletes. So
+   the answer is the disjunction, taken once and consumed twice: a mount without
+   a copy loses the files, and a copy without a mount puts them where nothing
+   reads them and then reports success.
+
+   A host that positively said it has no Bondi section and declares no job holds
+   no line whose file a recreate could orphan. A section that could not be read,
+   and one whose markers do not balance, both count: a read that failed is not
+   the host answering "there is nothing here", and the copy costs a directory
+   that may turn out to be empty. *)
+let cron_payload_needed (config : Config_file.t) (ctx : setup_context) : bool =
+  match ctx.crontab with
+  | Crontab_listing.Section _
+  | Crontab_listing.Malformed _
+  | Crontab_listing.Unreadable _ ->
+      true
+  | Crontab_listing.No_section -> has_cron_jobs config
+
+(* A job's files live in the orchestrator's writable layer on any host that does
+   not bind-mount them, so removing that container is what deletes them — while
+   the crontab line that reads them stays in the spool file and goes on firing.
+   The directory is copied out onto the host first.
+
+   Only the names leave here. A line, and every part of one, stays on the box. *)
+let cron_payload_preserve (config : Config_file.t) (ctx : setup_context) :
+    action list =
+  if cron_payload_needed config ctx then
+    [
+      PreserveCronPayloads
+        { jobs = Crontab_listing.named_jobs_with_shape ctx.crontab };
+    ]
+  else []
+
 (* Converge on "the declared version is serving". Every state that is not that
    ends in [RunServer], and every state that leaves a container behind removes
    it first: [docker run] refuses a name that is already taken, and without the
@@ -789,15 +854,23 @@ let has_cron_jobs (config : Config_file.t) : bool =
 let orchestrator_actions (config : Config_file.t) (ctx : setup_context) :
     action list =
   match ctx.orchestrator with
+  (* Nothing to copy out of: there is no container here, so nothing this run
+     does can take a job's files with it. *)
   | Orchestrator_absent -> [ RunServer ]
   (* Nothing is planned against a listing that never ran; [plan_for_config] is
      where that becomes an error rather than a silent no-op. *)
   | Orchestrator_undetermined _ -> []
-  | Orchestrator_not_running -> [ RemoveOrchestrator; RunServer ]
+  (* A stopped container still holds its writable layer, and [docker cp] reads
+     one whether or not it is running — so this is a recreate like any other,
+     and the files go with it unless they are copied out first. *)
+  | Orchestrator_not_running ->
+      cron_payload_preserve config ctx @ [ RemoveOrchestrator; RunServer ]
   | Orchestrator_running { version } ->
       if version = config.bondi_server.version && not (has_cron_jobs config)
       then []
-      else [ StopOrchestrator; RemoveOrchestrator; RunServer ]
+      else
+        cron_payload_preserve config ctx
+        @ [ StopOrchestrator; RemoveOrchestrator; RunServer ]
 
 let managed_state_of observed name =
   match List.assoc_opt name observed with
@@ -1027,8 +1100,8 @@ let alloy_river_config (config : Config_file.t) (alloy : Config_file.alloy) :
 (* Phase 3: Interpreter                                                      *)
 (* ------------------------------------------------------------------------- *)
 
-let interpret (server : Config_file.server) (config : Config_file.t)
-    (actions : action list) : (unit, string) result =
+let interpret ~cron_payload_needed (server : Config_file.server)
+    (config : Config_file.t) (actions : action list) : (unit, string) result =
   let ip_address = server.Config_file.ip_address in
   (* One action, applied. No arm here knows what follows it: the plan stops at
      the first failure, and saying what that leaves undone is [run]'s job
@@ -1186,6 +1259,37 @@ let interpret (server : Config_file.server) (config : Config_file.t)
                 | [] -> output
                 | line :: _ -> line)));
         Ok ()
+    | PreserveCronPayloads { jobs } ->
+        (* The copy runs on the box and the files never come here. What is
+           preserved is a run payload and a credential file, and a client that
+           read them in and wrote them back would put both through the
+           operator's machine for no gain.
+
+           This is planned ahead of the stop, so a host this cannot reach is a
+           host nothing has been stopped on yet. *)
+        let* _ =
+          Remote_exec.command_output_text ~command:Cron_payload.preserve_command
+            server
+        in
+        print_endline
+          (Printf.sprintf
+             "Preserved the cron payload directory on server %s ahead of the \
+              orchestrator recreate"
+             ip_address);
+        (* What survived is read back rather than assumed: the copy tolerates a
+           container that never held the directory, which is precisely the host
+           whose jobs have already lost their files. Which of them did is
+           decided in [Cron_payload.shortfalls] and said in
+           [Cron_payload.report]; this arm only obtains the listing and prints
+           what comes back. *)
+        let listing =
+          Cron_payload.of_listing_output
+            (Remote_exec.command_output ~command:Cron_payload.listing_command
+               server)
+        in
+        List.iter print_endline
+          (Cron_payload.report ~server:ip_address ~jobs listing);
+        Ok ()
     | StopOrchestrator ->
         let* _ =
           Remote_exec.docker_command_output_text
@@ -1214,7 +1318,7 @@ let interpret (server : Config_file.server) (config : Config_file.t)
         Ok ()
     | RunServer ->
         let image = "mlopez1506/bondi-server:" ^ config.bondi_server.version in
-        let* run_cmd = orchestrator_run_command config in
+        let* run_cmd = orchestrator_run_command ~cron_payload_needed config in
         let* _ = Remote_exec.command_output_text ~command:run_cmd server in
         (* Assert the posture rather than assume the run command took. This is
            the step whose absence let an undeclared loopback binding be reverted
@@ -1629,7 +1733,11 @@ let setup_server config server =
               (Printf.sprintf
                  "bondi-orchestrator on server %s: %s, stopping to restart..."
                  ip_address reason));
-      let* () = interpret server config actions in
+      let* () =
+        interpret
+          ~cron_payload_needed:(cron_payload_needed config context)
+          server config actions
+      in
       match context.docker_status with
       (* A host that had no Docker holds no container this run did not just
          create, and it was created by a command that carries the flag. The

@@ -1,8 +1,8 @@
 (* Crontab management for Bondi cron jobs.
    Writes to root's crontab at /var/spool/cron/crontabs/root.
    A generated line carries a schedule, a command and a path; the job itself
-   sits in the file that path names. The curl shape below is read, never
-   written. *)
+   sits in the file that path names. The curl shape it replaced is read but
+   never written, and the reader for it is Bondi_common.Cron_legacy_line. *)
 
 open Json_helpers
 module Alert = Bondi_common.Alert
@@ -18,8 +18,8 @@ type listed_job = Job of scheduled_job | Unreadable of { position : int }
 
 let crontab_path = "/var/spool/cron/crontabs/root"
 let crontab_spool_dir = "/var/spool/cron/crontabs"
-let bondi_begin_marker = "# BEGIN BONDI CRON"
-let bondi_end_marker = "# END BONDI CRON"
+let bondi_begin_marker = Bondi_common.Cron_section.begin_marker
+let bondi_end_marker = Bondi_common.Cron_section.end_marker
 
 (* Run payload sent to /run endpoint *)
 type run_payload = {
@@ -59,49 +59,26 @@ let read_crontab () : (string, string) result =
   | Sys_error _ -> Ok ""
   | exn -> Error (Printexc.to_string exn)
 
-(* Extract the JSON payload from a cron line's -d '...' argument. *)
+(* The legacy [curl -d '<json>'] line's readers are
+   Bondi_common.Cron_legacy_line's, not a second copy of them. The client reads
+   a host's spool file with the same grammar, and one reader undoing the
+   writer's quoting while the other did not is how the same line came to name a
+   job on one side and nothing on the other.
+
+   What stays here is the parse. That module hands back the shell's argument as
+   the bytes curl would have been given, which are not required to be JSON at
+   all; this module's callers want a value, so this is where the text becomes
+   one and where a payload that does not parse becomes None. *)
 let json_from_cron_line line =
-  let prefix = "-d '" in
-  let rec find_prefix i =
-    if i + String.length prefix > String.length line then None
-    else if String.sub line i (String.length prefix) = prefix then Some i
-    else find_prefix (i + 1)
-  in
-  match find_prefix 0 with
+  match Bondi_common.Cron_legacy_line.payload_of line with
   | None -> None
-  | Some idx -> (
-      let start = idx + String.length prefix in
-      let rec find_end i =
-        if i >= String.length line then None
-        else if line.[i] = '\'' then
-          if i + 4 <= String.length line && String.sub line i 4 = "'\\''" then
-            find_end (i + 4)
-          else Some i
-        else find_end (i + 1)
-      in
-      match find_end start with
-      | None -> None
-      | Some end_idx -> (
-          try
-            let json_str = String.sub line start (end_idx - start) in
-            Some (Yojson.Safe.from_string json_str)
-          with
-          | _ -> None))
+  | Some payload -> (
+      match Yojson.Safe.from_string payload with
+      | json -> Some json
+      | exception Yojson.Json_error _ -> None)
 
-(* Extract a string field from the JSON payload in a cron line. *)
-let string_field_from_cron_line ~field line =
-  match json_from_cron_line line with
-  | Some (`Assoc assoc) -> (
-      match List.assoc_opt field assoc with
-      | Some (`String v) -> Some v
-      | _ -> None)
-  | _ -> None
-
-(* Extract job name from a Bondi cron line by parsing the JSON in -d '...' *)
-let job_name_from_cron_line line = string_field_from_cron_line ~field:"job" line
-
-(** Extract the image field from a cron line's embedded JSON payload. *)
-let image_from_cron_line line = string_field_from_cron_line ~field:"image" line
+let job_name_from_cron_line = Bondi_common.Cron_legacy_line.job_name_of
+let image_from_cron_line = Bondi_common.Cron_legacy_line.image_of
 
 (* The path in a generated line, recovered and then re-derived: the name is the
    directory the run file sits in, and the line is accepted only when
@@ -192,35 +169,70 @@ let name_of_section_line line =
   | Some name -> Some name
   | None -> job_name_from_cron_line line
 
+let malformed_section = "the Bondi section of the crontab is malformed: "
+
+(* The refusal for a crontab whose markers do not balance. It names which of the
+   three malformations it is and nothing else -- not the line, not the contents
+   of the position it stopped at, not a payload. Every line in a crontab may be
+   a job's payload including its credentials, and this text is returned over
+   HTTP, mailed by cron and shipped with the diagnostics stream; the convention
+   that a decode error carries the input it rejected is inverted here for that
+   reason. The three sentences are pairwise distinct, so the message alone
+   answers which defect an operator is going to look for.
+
+   A message rather than a classified failure: this module's other error path is
+   a string, both callers turn the refusal straight back into one, and neither
+   handler asks it what HTTP status or exit code it deserves. A vocabulary no
+   consumer reads is a vocabulary that goes out of step with the ones that do. *)
+let refusal_of_malformation : Bondi_common.Cron_section.malformation -> string =
+  function
+  | End_without_begin ->
+      malformed_section ^ "an end marker closes a section that was never opened"
+  | Begin_without_end ->
+      malformed_section ^ "a begin marker opens a section the file never closes"
+  | Nested_begin ->
+      malformed_section
+      ^ "a begin marker opens a section inside one already open"
+
+(* A blank line inside the section is an entry of neither shape: it is dropped
+   here rather than carried, which is why parse_listed_jobs gives it no position
+   and the merge does not write it back. Whether a line inside the section
+   counts as an entry is Bondi_common.Cron_section's answer, so the position
+   this module addresses and the position the client reports are one rule. *)
+let entry_of_section_line line =
+  if not (Bondi_common.Cron_section.is_entry_line line) then None
+  else
+    match name_of_section_line line with
+    | Some name -> Some (Named { name; line })
+    | None -> Some (Anonymous line)
+
 (* Split the crontab into the lines outside the section and the entries inside
    it, both in their original order and, inside the section, byte for byte.
-   Blank lines inside the section are entries of neither shape and are dropped.
 
-   The one walk over a crontab. The merge and parse_listed_jobs both read the
-   section through it, so what counts as inside the section, what an unbalanced
-   marker does and which lines are entries at all are decided once. Two walks
-   agreeing by prose is how they come to disagree: the rules are the same rules
-   because they are the same fold, not because a comment says so. *)
+   The walk is not this module's. Where the section is, what an unbalanced
+   marker does and whether a marker an editor left whitespace on is still a
+   marker are decided in one place for both libraries, so the file the
+   orchestrator writes and the file the client reads back are cut the same way.
+   This module keeps only what an entry is, which is the half the client has no
+   use for.
+
+   An unbalanced marker is a refusal rather than a section read short. Answering
+   it as no section is what appended a second section beneath the first, leaving
+   a job's old line outside the markers and its new line inside them, both
+   firing. A crontab already in that state is not refused -- both its sections
+   balance -- and every section's entries arrive here in one list, so the merge
+   below writes them back as one section and the box heals. *)
 let split_bondi_section lines =
-  let rec loop in_bondi outside entries = function
-    | [] -> (List.rev outside, List.rev entries)
-    | line :: rest ->
-        if String.equal line bondi_begin_marker then
-          loop true outside entries rest
-        else if String.equal line bondi_end_marker then
-          loop false outside entries rest
-        else if not in_bondi then loop in_bondi (line :: outside) entries rest
-        else if String.equal (String.trim line) "" then
-          loop in_bondi outside entries rest
-        else
-          let entry =
-            match name_of_section_line line with
-            | Some name -> Named { name; line }
-            | None -> Anonymous line
-          in
-          loop in_bondi outside (entry :: entries) rest
-  in
-  loop false [] [] lines
+  match Bondi_common.Cron_section.split_lines lines with
+  | Error malformation -> Error (refusal_of_malformation malformation)
+  | Ok Bondi_common.Cron_section.{ before; section; after } ->
+      let entries =
+        match section with
+        | None -> []
+        | Some section_lines ->
+            List.filter_map entry_of_section_line section_lines
+      in
+      Ok (before @ after, entries)
 
 let name_of_entry = function
   | Named { name; _ } -> Some name
@@ -242,17 +254,22 @@ let line_of_entry = function
    fire the job twice a schedule, so the first entry a deploy names is replaced
    and later entries of that name are dropped. The written names are carried
    through the fold for exactly that: the answer depends on what has already
-   been emitted, which a map over the entries cannot see. *)
+   been emitted, which a map over the entries cannot see.
+
+   A crontab holding two whole sections is collapsed for the same reason: the
+   markers written back are one pair, whichever number the file arrived with,
+   and the entries of every section it held are merged into that one. Otherwise
+   each deploy updates one section and leaves the other stale, and both fire. *)
 let merge_bondi_section (cron_jobs : Strategy.Simple.cron_job list option)
-    (lines : string list) : string list =
-  let outside, entries = split_bondi_section lines in
+    (lines : string list) : (string list, string) result =
+  let* outside, entries = split_bondi_section lines in
   let trimmed =
     outside |> List.map String.trim |> List.filter (fun l -> l <> "")
   in
   match cron_jobs with
   | None
   | Some [] ->
-      trimmed
+      Ok trimmed
   | Some jobs ->
       let deployed name =
         List.find_opt
@@ -283,13 +300,19 @@ let merge_bondi_section (cron_jobs : Strategy.Simple.cron_job list option)
             not (List.exists (String.equal c.name) held))
         |> List.map entry_of_cron_job
       in
-      trimmed @ (bondi_begin_marker :: (kept @ added)) @ [ bondi_end_marker ]
+      (* Assembled by the module that cut the file rather than by hand here, so
+         the markers this writes and the markers both libraries look for cannot
+         come apart. *)
+      Ok
+        (Bondi_common.Cron_section.join
+           { before = trimmed; section = Some (kept @ added); after = [] })
 
 let upsert (cron_jobs : Strategy.Simple.cron_job list option) :
     (unit, string) result =
   let* current = read_crontab () in
   let lines = String.split_on_char '\n' current in
-  let contents = string_of_lines (merge_bondi_section cron_jobs lines) in
+  let* merged = merge_bondi_section cron_jobs lines in
+  let contents = string_of_lines merged in
   let* () = write_crontab contents in
   let* () = chmod crontab_path 0o600 in
   touch_spool_dir ()
@@ -350,12 +373,14 @@ let resolve_line ~read_file ~position line =
    same line to a report and to the next rewrite; the same way
    Crontab_listing.scan counts, the crontab being split on newlines, a trailing
    newline alone would otherwise become an entry. *)
-let parse_listed_jobs ~read_file (lines : string list) : listed_job list =
-  let _outside, entries = split_bondi_section lines in
-  List.mapi
-    (fun index entry ->
-      resolve_line ~read_file ~position:(index + 1) (line_of_entry entry))
-    entries
+let parse_listed_jobs ~read_file (lines : string list) :
+    (listed_job list, string) result =
+  let* _outside, entries = split_bondi_section lines in
+  Ok
+    (List.mapi
+       (fun index entry ->
+         resolve_line ~read_file ~position:(index + 1) (line_of_entry entry))
+       entries)
 
 (* What a run file may be, before anything looks at it. The whole file is read
    into memory first, and the path is root-owned and written by this server, so
@@ -386,4 +411,4 @@ let read_job_file path =
 let list_scheduled_jobs () : (listed_job list, string) result =
   let* contents = read_crontab () in
   let lines = String.split_on_char '\n' contents in
-  Ok (parse_listed_jobs ~read_file:read_job_file lines)
+  parse_listed_jobs ~read_file:read_job_file lines
