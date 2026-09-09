@@ -1,7 +1,7 @@
 module Server_version = Bondi_client.Server_version
 
 let accepted version =
-  match Server_version.supports_run_subcommand version with
+  match Server_version.writes_exec_lines version with
   | Ok () -> ()
   | Error msg ->
       Alcotest.fail
@@ -9,7 +9,7 @@ let accepted version =
            (String.escaped version) msg)
 
 let rejection version =
-  match Server_version.supports_run_subcommand version with
+  match Server_version.writes_exec_lines version with
   | Ok () ->
       Alcotest.fail
         (Printf.sprintf "expected a refusal for: %s" (String.escaped version))
@@ -21,26 +21,37 @@ let names ~what needle msg =
     true
     (Bondi_common.String_utils.contains ~needle msg)
 
-(* 0.15.0 is the first release carrying the [run] subcommand the generated line
-   invokes, so it is accepted and the release before it is not. Asserting the
-   boundary from both sides pins the boundary rather than the direction. *)
-let test_the_minimum_version_supports_the_run_subcommand () =
+(* 0.16.0 is the first release whose server writes exec lines and run files, so
+   it is accepted and the release before it is not. Asserting the boundary from
+   both sides pins the boundary rather than the direction. *)
+let test_the_minimum_version_writes_exec_lines () =
   accepted Server_version.minimum_for_exec_lines;
-  accepted "0.15.0"
+  accepted "0.16.0"
+
+(* Executing the generated line and writing it are separate capabilities, and
+   this floor is the second one. 0.15.0 carries the [run] subcommand, so a line
+   written against it would fire -- but its own server still writes legacy curl
+   lines and no run file, and the deploy that writes them answers 200. Observed
+   on the estate's one box with a crontab: three deploys reported success and
+   left the crontab on the shape they were meant to replace, which is a silent
+   no-op wearing a success message. A floor set at 0.15.0 accepts exactly that
+   box. *)
+let test_a_release_that_runs_the_line_but_cannot_write_it_is_refused () =
+  names ~what:"the version it refused" "0.15.0" (rejection "0.15.0")
 
 let test_a_version_below_the_minimum_is_refused () =
   (* 0.12.0 is what the estate was running when this gate was written. *)
   List.iter
     (fun version ->
       names ~what:"the version it refused" version (rejection version))
-    [ "0.14.0"; "0.12.0"; "0.9.0" ]
+    [ "0.15.0"; "0.14.0"; "0.12.0"; "0.9.0" ]
 
 (* The comparison is an ordering, not equality: every one of these is newer than
    the floor, and an equality test would refuse all three. 0.9.0 above is the
    half string ordering gets wrong in the other direction. *)
 let test_a_version_above_the_minimum_is_accepted () =
-  accepted "0.15.1";
-  accepted "0.16.0";
+  accepted "0.16.1";
+  accepted "0.17.0";
   accepted "1.0.0"
 
 let test_the_refusal_names_the_running_version_and_the_required_one () =
@@ -81,10 +92,13 @@ let test_a_forks_image_name_is_reported_as_it_stands () =
 let () =
   Alcotest.run "Server_version"
     [
-      ( "supports_run_subcommand",
+      ( "writes_exec_lines",
         [
-          Alcotest.test_case "the minimum version supports the run subcommand"
-            `Quick test_the_minimum_version_supports_the_run_subcommand;
+          Alcotest.test_case "the minimum version writes exec lines" `Quick
+            test_the_minimum_version_writes_exec_lines;
+          Alcotest.test_case
+            "a release that runs the line but cannot write it is refused" `Quick
+            test_a_release_that_runs_the_line_but_cannot_write_it_is_refused;
           Alcotest.test_case "a version below the minimum is refused" `Quick
             test_a_version_below_the_minimum_is_refused;
           Alcotest.test_case "a version above the minimum is accepted" `Quick

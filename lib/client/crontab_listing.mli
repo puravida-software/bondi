@@ -39,6 +39,30 @@
     the output here, in the same shape as {!Host_inventory} and
     {!Orchestrator_probe}. *)
 
+(** Which of the section's two line shapes a name was read from.
+
+    The two are different facts about a job and not a detail of the parse. A job
+    named by an exec line keeps its payload in a file beside the line, so that
+    file's absence is a job that fails at its next fire. A job named by a legacy
+    line has no such file and never had one — the payload is on the line — so
+    the same absence is not a shortfall at all, and reporting it as one tells an
+    operator that every unmigrated job on the box is about to break. The
+    distinction is available only here, at the read, which is why it leaves here
+    rather than being recovered by a later guess. *)
+type shape =
+  | Exec_line
+      (** the shape written now: the line names a run file that holds the
+          payload *)
+  | Legacy_line
+      (** the shape nothing writes and every box still holds: the payload is on
+          the line *)
+
+type named_job = {
+  job : string;  (** the job's name *)
+  shape : shape;  (** the line shape the name was read from *)
+}
+(** A job the section names, and where its name came from. *)
+
 (** One line of the section, and the whole of what may be said about it.
 
     A line whose job cannot be read is still a line: dropping it would report a
@@ -48,7 +72,7 @@
     entry's place in the section, which is enough to go and look at the line
     without this module rendering it. *)
 type entry =
-  | Named of string  (** the job the entry names *)
+  | Named of named_job  (** the job the entry names *)
   | Unnamed of { position : int }
       (** an entry whose job could not be read, counting from one *)
 
@@ -57,7 +81,7 @@ type entry =
     Each is a defect an operator fixes differently, and none of them is zero
     jobs. Carrying which one rather than a description of the offending line is
     what makes it impossible to report a secret while reporting a defect. *)
-type malformation =
+type malformation = Bondi_common.Cron_section.malformation =
   | End_without_begin  (** a section closes that was never opened *)
   | Begin_without_end  (** a section opens and the file ends inside it *)
   | Nested_begin  (** a section opens inside one already open *)
@@ -112,6 +136,28 @@ val of_read_output : (string, Remote_exec.failure) result -> t
 
     An error is cut at the marker that precedes the file's contents before it
     reaches {!Unreadable}. See this module's own description for why. *)
+
+val named_jobs_with_shape : t -> named_job list
+(** The jobs the section names, each with the line shape it was read from, in
+    the order its entries appear.
+
+    An entry whose job could not be read is not one of them: the position
+    {!Unnamed} carries locates a line for a human to go and look at, and it is
+    not a job any other reader can act on. Empty for every outcome that is not a
+    section, for the reason {!job_count} is absent for them — nothing on the
+    host supports a claim about what is scheduled there.
+
+    A name read from a legacy line is the [job] field of the payload the host
+    wrote, so it is held to {!Bondi_common.Managed_container.is_valid_name}
+    before it leaves: a name that constructor would have rejected cannot have
+    come from a job Bondi deployed, and reporting it would put host-controlled
+    text into standard output and into any path a reader builds from a reported
+    name. A name read from an exec line is already held to that rule by
+    {!Bondi_common.Cron_exec_line.job_name_of}, which rebuilds the path from the
+    name and accepts the line only when the two agree. The line a dropped name
+    was on is still an entry, and still counted.
+
+    What leaves here is a name, never a line and never any part of one. *)
 
 val job_count : t -> int option
 (** How many entries the section holds, when there is a section to count.

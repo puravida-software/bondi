@@ -1,5 +1,11 @@
-type entry = Named of string | Unnamed of { position : int }
-type malformation = End_without_begin | Begin_without_end | Nested_begin
+type shape = Exec_line | Legacy_line
+type named_job = { job : string; shape : shape }
+type entry = Named of named_job | Unnamed of { position : int }
+
+type malformation = Bondi_common.Cron_section.malformation =
+  | End_without_begin
+  | Begin_without_end
+  | Nested_begin
 
 type t =
   | Section of { entries : entry list }
@@ -40,106 +46,34 @@ let read_command =
     quoted contents_marker quoted unreadable_marker absent_marker
     unreadable_marker
 
-(* The section the server writes, delimited exactly as it delimits it. *)
-let begin_marker = "# BEGIN BONDI CRON"
-let end_marker = "# END BONDI CRON"
+(* The legacy shape, still on every box: the whole job as a single-quoted JSON
+   argument to curl, secrets included. The grammar is Bondi_common's rather than
+   a second copy of it -- the orchestrator reads these lines to merge a deploy
+   into the section and this reads them to report what is scheduled, and one
+   reader undoing the writer's quoting while the other does not is how the same
+   line names a job on one side and nothing on the other.
 
-type line_kind = Begin | End | Blank | Entry of string
-
-(* Markers are recognised after trimming, so an editor that left a carriage
-   return or a trailing space on one still leaves a section a reader can see.
-   The alternative reports a plainly marked section as having none. *)
-let kind_of_line line =
-  let trimmed = String.trim line in
-  match trimmed with
-  | "" -> Blank
-  | _ when String.equal trimmed begin_marker -> Begin
-  | _ when String.equal trimmed end_marker -> End
-  | _ -> Entry line
-
-let payload_prefix = "-d '"
-let shell_escaped_quote = "'\\''"
-
-(* The argument the writer quoted, taken back out of the line. A single quote
-   inside it was escaped by ending the quoted run, emitting one, and starting a
-   new run, so the sequence that does that is not the end of the argument. *)
-let quoted_argument line ~from =
-  let start = from + String.length payload_prefix in
-  let length = String.length line in
-  let escape_length = String.length shell_escaped_quote in
-  let rec find_end index =
-    if index >= length then None
-    else if line.[index] <> '\'' then find_end (index + 1)
-    else if
-      index + escape_length <= length
-      && String.sub line index escape_length = shell_escaped_quote
-    then find_end (index + escape_length)
-    else Some index
-  in
-  match find_end start with
-  | None -> None
-  | Some stop -> Some (String.sub line start (stop - start))
-
-(* Undo the writer's escaping, so what is parsed is what the shell would have
-   handed to curl rather than the spool file's rendering of it. *)
-let unescape_shell_quotes value =
-  let buffer = Buffer.create (String.length value) in
-  let length = String.length value in
-  let escape_length = String.length shell_escaped_quote in
-  let rec loop index =
-    if index >= length then Buffer.contents buffer
-    else if
-      index + escape_length <= length
-      && String.sub value index escape_length = shell_escaped_quote
-    then (
-      Buffer.add_char buffer '\'';
-      loop (index + escape_length))
-    else (
-      Buffer.add_char buffer value.[index];
-      loop (index + 1))
-  in
-  loop 0
-
-(* The job's name is the only field this reads, and the only one it can return.
-   A payload that does not parse yields nothing at all rather than a fragment of
-   itself: every other field on that line is a secret or a command, and there is
-   no rendering of them this report is allowed to make. *)
-let job_name_of_payload payload =
-  match Yojson.Safe.from_string payload with
-  | `Assoc fields -> (
-      match List.assoc_opt "job" fields with
-      | Some (`String name) -> Some name
-      | Some
-          (`Assoc _ | `Bool _ | `Float _ | `Int _ | `Intlit _ | `List _ | `Null)
-      | None ->
-          None)
-  | `Bool _
-  | `Float _
-  | `Int _
-  | `Intlit _
-  | `List _
-  | `Null
-  | `String _ ->
-      None
-  | exception Yojson.Json_error _ -> None
-
+   The name that comes back is a JSON field the host wrote, and nothing else on
+   the line constrains it. So it is held to the rule a declared job's name is
+   held to: one [Managed_container.create] would have rejected cannot have come
+   from a job Bondi deployed, and it is not reported at all rather than reported
+   and then interpolated into a path by whoever reads it next. The line stays an
+   entry -- it is on the box, and the next rewrite removes it. *)
 let job_name_of_legacy_line line =
-  match Bondi_common.String_utils.index_of ~needle:payload_prefix line with
+  match Bondi_common.Cron_legacy_line.job_name_of line with
   | None -> None
-  | Some from -> (
-      match quoted_argument line ~from with
-      | None -> None
-      | Some argument -> job_name_of_payload (unescape_shell_quotes argument))
+  | Some name ->
+      if Bondi_common.Managed_container.is_valid_name name then Some name
+      else None
 
 (* The shape the orchestrator writes now: a schedule, a docker exec into it, and
    the path of the job's run file. The line carries nothing else, so the name is
    in the path or it is nowhere.
 
    The reader is Bondi_common.Cron_exec_line's rather than a second copy of it.
-   The client may not depend on bondi_server — which is why the legacy shape's
-   "-d '" is written out above — but both libraries depend on bondi_common, so
-   the marker the server writes and the marker this looks for are one string and
-   the two cannot drift.
+   The client may not depend on bondi_server, but both libraries depend on
+   bondi_common, so the marker the server writes and the marker this looks for
+   are one string and the two cannot drift.
 
    That reader re-derives the path from the name taken out of it and accepts the
    line only when the two are the same string. A hand-edited line reading
@@ -154,32 +88,31 @@ let job_name_of_exec_line = Bondi_common.Cron_exec_line.job_name_of
    marker. *)
 let entry_of_line ~position line =
   match job_name_of_exec_line line with
-  | Some name -> Named name
+  | Some job -> Named { job; shape = Exec_line }
   | None -> (
       match job_name_of_legacy_line line with
-      | Some name -> Named name
+      | Some job -> Named { job; shape = Legacy_line }
       | None -> Unnamed { position })
 
-let rec scan lines ~inside ~seen_section ~position ~entries =
-  match lines with
-  | [] -> (
-      match (inside, seen_section) with
-      | true, _ -> Malformed Begin_without_end
-      | false, true -> Section { entries = List.rev entries }
-      | false, false -> No_section)
-  | line :: rest -> (
-      match (kind_of_line line, inside) with
-      | Begin, true -> Malformed Nested_begin
-      | Begin, false ->
-          scan rest ~inside:true ~seen_section:true ~position ~entries
-      | End, true -> scan rest ~inside:false ~seen_section ~position ~entries
-      | End, false -> Malformed End_without_begin
-      | Blank, _
-      | Entry _, false ->
-          scan rest ~inside ~seen_section ~position ~entries
-      | Entry text, true ->
-          scan rest ~inside ~seen_section ~position:(position + 1)
-            ~entries:(entry_of_line ~position text :: entries))
+(* Where the section is, is Bondi_common.Cron_section's answer and not a second
+   one taken here. This module and the orchestrator's writer disagreeing about
+   which line opens a section is the defect that reports every job on a box as
+   absent while both suites stay green.
+
+   What this adds is what only a reader needs: a blank line inside the section
+   is not an entry and does not advance the count, so the position a report
+   names is the position of an entry rather than of a line. *)
+let entries_of_section section =
+  section
+  |> List.filter Bondi_common.Cron_section.is_entry_line
+  |> List.mapi (fun index line -> entry_of_line ~position:(index + 1) line)
+
+let scan lines =
+  match Bondi_common.Cron_section.split_lines lines with
+  | Error malformation -> Malformed malformation
+  | Ok { before = _; section = None; after = _ } -> No_section
+  | Ok { before = _; section = Some section; after = _ } ->
+      Section { entries = entries_of_section section }
 
 (* A transport's account of why it could not answer is the merged output of a
    command that may already have streamed the file. Everything from the
@@ -220,10 +153,7 @@ let of_read_output reading =
          the file and a line of the file is free to hold any of the words
          below. *)
       match contents_after_marker output with
-      | Some contents ->
-          scan
-            (String.split_on_char '\n' contents)
-            ~inside:false ~seen_section:false ~position:1 ~entries:[]
+      | Some contents -> scan (String.split_on_char '\n' contents)
       | None -> (
           match (said unreadable_marker output, said absent_marker output) with
           | true, _ ->
@@ -235,6 +165,26 @@ let of_read_output reading =
               Unreadable
                 "the host answered without saying whether it could read its \
                  crontab spool file"))
+
+(* The names the section holds, in the order the entries appear. An entry whose
+   job could not be read contributes nothing: what it is is unknown, and a
+   position is not a job any other reader could act on. Every other outcome
+   yields nothing at all rather than an empty section, for the reason
+   {!job_count} gives -- a file that was never read supports no claim about what
+   is scheduled on the host. *)
+let named_jobs_with_shape listing =
+  match listing with
+  | Section { entries } ->
+      List.filter_map
+        (fun entry ->
+          match entry with
+          | Named named -> Some named
+          | Unnamed { position = _ } -> None)
+        entries
+  | No_section
+  | Malformed _
+  | Unreadable _ ->
+      []
 
 let job_count listing =
   match listing with

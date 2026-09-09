@@ -21,9 +21,32 @@ val cron_root : string
     path inside the orchestrator container; setup bind-mounts the host directory
     at the same path so a rebuilt container does not lose them. *)
 
+val cron_root_mode : int
+(** The permissions {!cron_root} is created with, by whichever of the two
+    creates it first.
+
+    The server creates it when it writes a job's files; the client creates it on
+    the host before copying those files out of a container that is about to be
+    removed. The files inside are mode 600 and hold a job's secret environment,
+    so a directory the world can traverse would undo them — and a client that
+    spelled the mode a second time could come to disagree with the writer about
+    what "the mode the writer uses" is, silently, on the run that creates the
+    directory. *)
+
 val run_file_of : string -> string
 (** The path of a job's run payload file, under {!cron_root}. Only meaningful
     for a name accepted by [Managed_container.is_valid_name]. *)
+
+val env_file_of : string -> string
+(** The path of a job's secret environment file, beside {!run_file_of} in the
+    same directory. Only meaningful for a name accepted by
+    [Managed_container.is_valid_name].
+
+    No line names this file — the orchestrator passes its contents to the
+    container rather than reading it from the crontab — so it is here for the
+    other reason the run file is: the client checks that a job's files survived
+    a rebuilt container, and a client spelling this path a second time is a
+    client that can come to disagree with the server about where the file is. *)
 
 val exec_marker : string
 (** The part of the line that precedes the run file's path: the server binary's

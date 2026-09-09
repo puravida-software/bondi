@@ -19,9 +19,15 @@ module Setup = Bondi_client.Cmd.Setup
 let deployed_version = "0.12.0"
 
 (* Only whether the list is non-empty reaches the run command -- it decides the
-   spool mount, the /etc/bondi/cron payload mount and `--user root`. The values are named anyway rather than left
-   to a fixture builder's optional arguments: a field that defaults out of sight
-   is a field nobody chose. *)
+   spool mount, the /etc/bondi/cron payload mount and `--user root`. The values
+   are named anyway rather than left to a fixture builder's optional arguments:
+   a field that defaults out of sight is a field nobody chose.
+
+   What the run command actually reads is `cron_payload_needed`, which setup
+   derives from the configuration *or* the section the host is already holding.
+   A host holding a section it does not declare therefore gets the `cron` line
+   below rather than a third shape -- the string is the same one -- so the two
+   lines still cover every command this can emit. *)
 let a_cron_job : Config_file.cron_job =
   {
     Config_file.name = "nightly";
@@ -57,7 +63,11 @@ let config ~(cron_jobs : Config_file.cron_job list option) : Config_file.t =
   }
 
 let print_labelled label config =
-  match Setup.orchestrator_run_command config with
+  match
+    Setup.orchestrator_run_command
+      ~cron_payload_needed:(Setup.has_cron_jobs config)
+      config
+  with
   | Ok command -> Printf.printf "%s %s\n" label command
   | Error message ->
       prerr_endline message;

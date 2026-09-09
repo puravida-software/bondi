@@ -197,7 +197,7 @@ let cron_version_gate ~read_version cron_jobs =
   | Some (_ :: _) -> (
       match read_version () with
       | Error message -> Error message
-      | Ok version -> Server_version.supports_run_subcommand version)
+      | Ok version -> Server_version.writes_exec_lines version)
 
 let validate_deployments (config : Config_file.t) deployments :
     ((string * string) list, string) result =

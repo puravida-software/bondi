@@ -1,8 +1,8 @@
 let cron_root = "/etc/bondi/cron"
-
-let run_file_of name =
-  Filename.concat (Filename.concat cron_root name) "run.json"
-
+let cron_root_mode = 0o700
+let dir_of name = Filename.concat cron_root name
+let run_file_of name = Filename.concat (dir_of name) "run.json"
+let env_file_of name = Filename.concat (dir_of name) "env"
 let exec_marker = "bondi-server run < "
 
 (* The path in a generated line, recovered and then re-derived. The name is the

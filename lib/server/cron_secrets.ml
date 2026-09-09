@@ -1,10 +1,20 @@
-(* The root and the run file's path are Bondi_common.Cron_exec_line's, because
-   the crontab line the server writes names that same file and the client reads
-   the name back out of that same path. A second spelling of either here is a
-   spelling that can drift from the line. *)
+(* The root and both file paths are Bondi_common.Cron_exec_line's, because the
+   crontab line the server writes names the run file and the client reads the
+   name back out of that same path. A second spelling of either here is a
+   spelling that can drift from the line.
+
+   The environment file's path is there for the second reason: the client checks
+   that a job's files survived a rebuilt container, and it cannot look for a
+   file whose name is written only in this library.
+
+   The mode comes from the same place, because the client creates this directory
+   too -- on the host, ahead of copying the files out of a container it is about
+   to remove -- and a second spelling of 0700 is a second spelling that can
+   drift. *)
 let root = Bondi_common.Cron_exec_line.cron_root
+let root_mode = Bondi_common.Cron_exec_line.cron_root_mode
 let dir_of name = Filename.concat root name
-let env_file_of name = Filename.concat (dir_of name) "env"
+let env_file_of = Bondi_common.Cron_exec_line.env_file_of
 let run_file_of = Bondi_common.Cron_exec_line.run_file_of
 
 (* Managed_container's rule, called rather than restated: this name arrives in a
@@ -38,7 +48,7 @@ let rec mkdir_p path =
   if path = "/" || path = "." || Sys.file_exists path then ()
   else begin
     mkdir_p (Filename.dirname path);
-    try Unix.mkdir path 0o700 with
+    try Unix.mkdir path root_mode with
     | Unix.Unix_error (Unix.EEXIST, _, _) -> ()
   end
 

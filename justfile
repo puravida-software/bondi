@@ -31,7 +31,7 @@ docker-all TAG: (check-version-floor TAG) (build-server TAG) (tag-server TAG) (v
 # The floor is read out of the OCaml source that enforces it. A second copy of
 # the number here would be free to drift from the one that decides, which is the
 # whole failure this recipe exists to prevent. Only major and minor are compared,
-# matching what Server_version reads, so a suffixed tag such as 0.15.0-rc1 is
+# matching what Server_version reads, so a suffixed tag such as 0.16.0-rc1 is
 # judged on its ordering rather than refused for its shape.
 check-version-floor TAG:
     #!/usr/bin/env bash
