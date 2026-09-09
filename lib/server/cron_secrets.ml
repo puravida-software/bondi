@@ -1,24 +1,18 @@
-let root = "/etc/bondi/cron"
+(* The root and the run file's path are Bondi_common.Cron_exec_line's, because
+   the crontab line the server writes names that same file and the client reads
+   the name back out of that same path. A second spelling of either here is a
+   spelling that can drift from the line. *)
+let root = Bondi_common.Cron_exec_line.cron_root
 let dir_of name = Filename.concat root name
 let env_file_of name = Filename.concat (dir_of name) "env"
+let run_file_of = Bondi_common.Cron_exec_line.run_file_of
 
-(* Same rule as Managed_container.is_valid_name, and for the same reason: this
-   name arrives in a deploy payload from the network and is interpolated into a
-   path that gets written. A leading dot or any separator must not be
-   representable, or "job" could name its way out of its own directory. *)
-let is_valid_name name =
-  let valid_char c =
-    (c >= 'a' && c <= 'z')
-    || (c >= 'A' && c <= 'Z')
-    || (c >= '0' && c <= '9')
-    || c = '_'
-    || c = '.'
-    || c = '-'
-  in
-  let alnum c =
-    (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
-  in
-  String.length name > 0 && alnum name.[0] && String.for_all valid_char name
+(* Managed_container's rule, called rather than restated: this name arrives in a
+   deploy payload from the network and is interpolated into a path that gets
+   written, so a leading dot or any separator must not be representable, or
+   "job" could name its way out of its own directory. Restating it gave two
+   predicates that agreed and were held together by nothing. *)
+let is_valid_name = Bondi_common.Managed_container.is_valid_name
 
 let file_contents entries =
   String.concat ""
@@ -48,38 +42,49 @@ let rec mkdir_p path =
     | Unix.Unix_error (Unix.EEXIST, _, _) -> ()
   end
 
-let write_env_file ~name entries =
+(* 0o600 at creation. A chmod after the fact leaves a window in which the
+   contents are world-readable, and O_TRUNC means a withdrawn secret does not
+   survive in the tail of the old file. *)
+let write_600 path contents =
+  let fd =
+    Unix.openfile path [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC ] 0o600
+  in
+  Fun.protect
+    ~finally:(fun () ->
+      try Unix.close fd with
+      | Unix.Unix_error _ -> ())
+    (fun () ->
+      let n = Unix.write_substring fd contents 0 (String.length contents) in
+      if n <> String.length contents then
+        failwith (Printf.sprintf "short write to %s" path));
+  (* An existing file created before this ran, or by an older Bondi, keeps its
+     old mode through O_CREAT. Set it explicitly. *)
+  Unix.chmod path 0o600
+
+(* The name check runs before any I/O, so a name that could escape the job's
+   directory never reaches mkdir or open. No error message names the contents:
+   for both files the contents are the thing the file exists to keep out of the
+   crontab, and this text is returned over HTTP and mailed by cron. *)
+let write_job_file ~name ~path_of contents =
   if not (is_valid_name name) then
     Error (Printf.sprintf "unsafe cron job name for a config path: %S" name)
   else
     try
       mkdir_p (dir_of name);
-      let path = env_file_of name in
-      (* 0o600 at creation. A chmod after the fact leaves a window in which the
-         credential is world-readable, and O_TRUNC means a withdrawn secret does
-         not survive in the tail of the old file. *)
-      let fd =
-        Unix.openfile path [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_TRUNC ] 0o600
-      in
-      Fun.protect
-        ~finally:(fun () ->
-          try Unix.close fd with
-          | Unix.Unix_error _ -> ())
-        (fun () ->
-          let s = file_contents entries in
-          let n = Unix.write_substring fd s 0 (String.length s) in
-          if n <> String.length s then
-            failwith "short write to cron secret env file");
-      (* An existing file created before this ran, or by an older Bondi, keeps
-         its old mode through O_CREAT. Set it explicitly. *)
-      Unix.chmod path 0o600;
+      write_600 (path_of name) contents;
       Ok ()
     with
     | Unix.Unix_error (e, _, _) ->
         Error
-          (Printf.sprintf "could not write %s: %s" (env_file_of name)
+          (Printf.sprintf "could not write %s: %s" (path_of name)
              (Unix.error_message e))
     | Failure msg -> Error msg
+
+let write_env_file ~name entries =
+  write_job_file ~name ~path_of:env_file_of (file_contents entries)
+
+let write_run_file ~name payload =
+  write_job_file ~name ~path_of:run_file_of (Yojson.Safe.to_string payload)
 
 let read_env_file name =
   if not (is_valid_name name) then []

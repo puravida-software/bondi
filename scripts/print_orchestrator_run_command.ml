@@ -19,7 +19,7 @@ module Setup = Bondi_client.Cmd.Setup
 let deployed_version = "0.12.0"
 
 (* Only whether the list is non-empty reaches the run command -- it decides the
-   spool mount and `--user root`. The values are named anyway rather than left
+   spool mount, the /etc/bondi/cron payload mount and `--user root`. The values are named anyway rather than left
    to a fixture builder's optional arguments: a field that defaults out of sight
    is a field nobody chose. *)
 let a_cron_job : Config_file.cron_job =
@@ -74,7 +74,8 @@ let () =
      # per deployment shape. The command varies on four config inputs; the two\n\
      # lines below are the input that moves the flags a rootless engine\n\
      # reinterprets: `no-cron` and, with cron jobs configured, `cron`, which\n\
-     # additionally carries `--user root` and the spool mount.\n\
+     # additionally carries `--user root`, the spool mount and the\n\
+     # /etc/bondi/cron payload mount.\n\
      #\n\
      # Held constant at their defaults, and named here rather than left to be\n\
      # inferred from the builder: `bondi_server.bind_address`, which only\n\

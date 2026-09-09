@@ -82,6 +82,7 @@ type action =
   | EnsureDocker
   | EnsureAcmeFile
   | EnsureNetwork of string
+  | RequireCronDocker
   | RequireCronCurl
   | StopOrchestrator
   | RemoveOrchestrator
@@ -106,6 +107,7 @@ type action =
 let phase_of_action : action -> Setup_phases.phase = function
   | EnsureDocker -> Setup_phases.Docker
   | EnsureNetwork _ -> Setup_phases.Network
+  | RequireCronDocker -> Setup_phases.Cron_docker
   | RequireCronCurl -> Setup_phases.Cron_curl
   | EnsureAcmeFile -> Setup_phases.Acme
   | StopOrchestrator
@@ -176,7 +178,15 @@ let orchestrator_run_command (config : Config_file.t) : (string, string) result
     let volume_mounts, user_flag =
       match config.cron_jobs with
       | Some jobs when jobs <> [] ->
-          ( " -v /var/spool/cron/crontabs:/var/spool/cron/crontabs",
+          (* The payload directory is mounted from the host because a job's
+             definition has to outlive the container. A version bump stops,
+             removes and re-runs the orchestrator by design, and in the writable
+             layer that deletes every declared job's run.json while its exec
+             line stays in the crontab — every job on the box then fails at its
+             next fire. Both sides name the same path so the mount and
+             Cron_secrets agree on where a job's files are. *)
+          ( " -v /var/spool/cron/crontabs:/var/spool/cron/crontabs -v \
+             /etc/bondi/cron:/etc/bondi/cron",
             " --user root" )
       | _ -> ("", "")
     in
@@ -469,17 +479,6 @@ let alloy_run_command ~image =
     Bondi_common.Defaults.bondi_restart_policy alloy_config_path
     alloy_config_path alloy_env_path (Filename.quote image) alloy_config_path
 
-let orchestrator_version_of_image image =
-  let prefix = "mlopez1506/bondi-server:" in
-  if Bondi_common.String_utils.starts_with ~prefix image then
-    String.sub image (String.length prefix)
-      (String.length image - String.length prefix)
-  else
-    (* A fork or a locally built image is still the orchestrator by name. The
-       whole image is reported so the version-mismatch message names something
-       the operator can recognise. *)
-    image
-
 let orchestrator_state_of_ps_output output =
   let line =
     output
@@ -494,7 +493,11 @@ let orchestrator_state_of_ps_output output =
           match String.trim state with
           | "running" ->
               Orchestrator_running
-                { version = orchestrator_version_of_image (String.trim image) }
+                {
+                  version =
+                    Server_version.orchestrator_version_of_image
+                      (String.trim image);
+                }
           (* "created", "restarting", "paused", "exited", "removing" and "dead".
              None of them is serving, and every one of them holds the container
              name, so all converge to the same plan: remove it, then run. *)
@@ -604,10 +607,18 @@ let docker_install_verdict_of_probe probe =
             installed: %s"
            message)
 
-(* What reading the host's curl established. The crontab command uses
-   --fail-with-body and an older curl rejects it as unknown, so the version is
-   read once at setup time rather than discovered by a job at 3am — but that
-   reading is a version string, and a command that never ran has no version
+(* What reading the host's curl established. The line this bondi writes carries
+   no curl -- it is a docker exec, and docker exec's own exit status is what
+   makes a failed run a non-zero line -- but the lines an older bondi wrote are
+   curl invocations using --fail-with-body, they keep firing until each job is
+   deployed again, and an older curl rejects that option as unknown. So the
+   version is read once at setup time rather than discovered by a job at 3am.
+   The check is deliberately kept on the whole cron path rather than narrowed to
+   hosts observed to hold such a line: setup does not read the crontab, and a
+   gate on its way out does not earn a new read. It goes when the reader for
+   those lines goes.
+
+   That reading is a version string, and a command that never ran has no version
    string in it. Folding the transport's own error into curl's output tells the
    operator that the host reported "command failed (255): Connection closed by …"
    but 7.76.0 is required, which is a failure to ask dressed as a fact about
@@ -625,6 +636,63 @@ let cron_curl_verdict_of_probe = function
       if Remote_exec.exited_with ~code:shell_command_not_found_code failure then
         Cron_curl_reported (Remote_exec.message failure)
       else Cron_curl_undetermined (Remote_exec.message failure)
+
+(* Whether the environment cron runs a job in resolves [docker] at all. The
+   generated crontab line invokes [docker exec] by bare name, and cron gives a
+   job a minimal PATH rather than the login one every other probe in this file
+   is answered under -- /usr/bin:/bin on Debian and Ubuntu, which covers the apt
+   install get.docker.com performs and does not cover /usr/local/bin, where a
+   static or hand-placed binary lands. A host of the second kind answers the
+   Docker probe above, accepts the deploy, and then fails every scheduled job at
+   its next fire, which is the class of failure setup exists to move forward.
+   [env -i] is what makes the two different questions: the shell resolves the
+   name with no inherited environment, the way cron's would.
+
+   The probe always exits 0 and says which on standard output, leaving the exit
+   status to mean "the command could be run on that host" -- the same separation
+   the ACME probe draws, and for the same reason: [command -v] reports a name it
+   cannot resolve by exiting non-zero, which is the channel a dropped connection
+   arrives on too. *)
+let cron_docker_present_marker = "BONDI_CRON_DOCKER_PRESENT"
+let cron_docker_absent_marker = "BONDI_CRON_DOCKER_ABSENT"
+
+let cron_docker_probe_command =
+  Printf.sprintf
+    "env -i sh -c 'if resolved=$(command -v docker); then echo \"%s \
+     $resolved\"; else echo %s; fi'"
+    cron_docker_present_marker cron_docker_absent_marker
+
+type cron_docker_state =
+  | Cron_docker_on_path of string
+      (** the path cron's own resolution would run *)
+  | Cron_docker_off_path
+  | Cron_docker_undetermined of string
+
+let cron_docker_state_of_probe = function
+  | Error message -> Cron_docker_undetermined message
+  | Ok output -> (
+      let present_prefix = cron_docker_present_marker ^ " " in
+      match
+        Bondi_common.String_utils.index_of ~needle:present_prefix output
+      with
+      | Some at ->
+          let from = at + String.length present_prefix in
+          let rest = String.sub output from (String.length output - from) in
+          let path =
+            match String.index_opt rest '\n' with
+            | None -> rest
+            | Some newline -> String.sub rest 0 newline
+          in
+          Cron_docker_on_path (String.trim path)
+      | None ->
+          if
+            Bondi_common.String_utils.contains ~needle:cron_docker_absent_marker
+              output
+          then Cron_docker_off_path
+          else
+            Cron_docker_undetermined
+              (Printf.sprintf "the host answered without saying which: %s"
+                 (String.trim output)))
 
 (* What reading the ACME file established. [test -f] reports an absent file by
    exiting non-zero, which is the channel a dropped connection arrives on too,
@@ -813,12 +881,27 @@ let plan (config : Config_file.t) ~(specs : Managed_container.t list)
   in
   (* A host that runs no cron jobs never sees a bondi crontab line, so it owes
      no curl version. One that does gets checked here, before the orchestrator
-     starts: the emitted command uses --fail-with-body, and an older curl
-     rejects it as unknown, which would fail every scheduled job at its next
-     tick instead of failing this command once. *)
+     starts -- not for the line this bondi writes, which uses no curl, but for
+     the lines an older one wrote: those use --fail-with-body, an older curl
+     rejects it as unknown, and they go on firing until each job is deployed
+     again. Failing here once beats failing every surviving legacy job at its
+     next tick. *)
   let cron_curl =
     match config.cron_jobs with
     | Some (_ :: _) -> [ RequireCronCurl ]
+    | Some []
+    | None ->
+        []
+  in
+  (* The same host, asked the other half of the question. The emitted line runs
+     [docker exec] by bare name and cron resolves it against its own PATH, not
+     the login one every probe here is otherwise answered under, so a box whose
+     docker sits outside that PATH passes setup and fails every job at its next
+     fire. Read before the orchestrator starts, for the reason above: a host
+     that cannot run the line never gets one written for it. *)
+  let cron_docker =
+    match config.cron_jobs with
+    | Some (_ :: _) -> [ RequireCronDocker ]
     | Some []
     | None ->
         []
@@ -827,6 +910,7 @@ let plan (config : Config_file.t) ~(specs : Managed_container.t list)
     [
       (* Docker first, then the shared network before anything joins it *)
       [ EnsureDocker; EnsureNetwork Bondi_common.Defaults.network_name ];
+      cron_docker;
       cron_curl;
       acme;
       server;
@@ -1039,6 +1123,41 @@ let interpret (server : Config_file.server) (config : Config_file.t)
           (Printf.sprintf "Network %s is present on server %s" network_name
              ip_address);
         Ok ()
+    | RequireCronDocker ->
+        (* What counts as the host having answered is decided in
+           [cron_docker_state_of_probe]; this arm only obtains the reply and
+           carries the verdict out. *)
+        let* path =
+          match
+            cron_docker_state_of_probe
+              (Remote_exec.command_output_text
+                 ~command:cron_docker_probe_command server)
+          with
+          | Cron_docker_on_path path -> Ok path
+          | Cron_docker_off_path ->
+              Error
+                (Printf.sprintf
+                   "cron cannot find docker on server %s. The crontab line \
+                    bondi writes runs `docker exec bondi-orchestrator`, and \
+                    cron gives a job a minimal PATH rather than the login one \
+                    this setup run uses, so a docker outside it answers over \
+                    ssh and still fails every scheduled job at its next fire. \
+                    Install Docker from the distribution's packages, or place \
+                    it on the PATH cron runs jobs with, then run bondi setup \
+                    again."
+                   ip_address)
+          | Cron_docker_undetermined message ->
+              Error
+                (Printf.sprintf
+                   "could not read whether cron can find docker on the server, \
+                    so setup will not act on whether it can run the crontab \
+                    line: %s"
+                   message)
+        in
+        print_endline
+          (Printf.sprintf "cron on server %s resolves docker at %s" ip_address
+             path);
+        Ok ()
     | RequireCronCurl ->
         (* The version comparison is a pure decision in [Curl_version] and what
            counts as curl having answered is one in [cron_curl_verdict_of_probe];
@@ -1058,7 +1177,9 @@ let interpret (server : Config_file.server) (config : Config_file.t)
         in
         let* () = Curl_version.supports_fail_with_body output in
         print_endline
-          (Printf.sprintf "curl on server %s supports the crontab command: %s"
+          (Printf.sprintf
+             "curl on server %s can run the crontab lines an older bondi \
+              wrote: %s"
              ip_address
              (String.trim
                 (match String.split_on_char '\n' output with

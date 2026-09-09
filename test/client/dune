@@ -8,6 +8,7 @@
   test_deploy_helpers
   test_status_format
   test_curl_version
+  test_server_version
   test_orchestrator_probe
   test_host_inventory
   test_container_health

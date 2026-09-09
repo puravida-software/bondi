@@ -77,6 +77,61 @@ let never_ends = [ begin_marker; daily_close; "" ]
 let nested =
   [ begin_marker; daily_close; begin_marker; rebalance; end_marker; "" ]
 
+(* The shape the orchestrator writes now: a schedule, a [docker exec] into the
+   orchestrator, and the path of the job's run file. There is no payload on the
+   line, which is the whole point of it — and it is also why the job's name can
+   only come from the path.
+
+   The command and the path are Bondi_common.Cron_exec_line's, which is where
+   the orchestrator's writer takes them from too. Spelled out by hand they were
+   a fixture that goes on passing after the emitted line changes, while every
+   job on every box reports as unnamed. *)
+let exec_line ~schedule ~path =
+  Printf.sprintf "%s docker exec bondi-orchestrator sh -c '%s%s'" schedule
+    Bondi_common.Cron_exec_line.exec_marker path
+
+let exec_entry ~schedule ~job =
+  exec_line ~schedule ~path:(Bondi_common.Cron_exec_line.run_file_of job)
+
+let daily_close_exec = exec_entry ~schedule:"5 21 * * 1-5" ~job:"daily-close"
+let rebalance_exec = exec_entry ~schedule:"0 6 * * *" ~job:"rebalance"
+
+(* A line carrying the exec command and a path no writer could have written.
+   The name a reader would lift straight out of it is a fragment of somebody
+   else's path, so this is a line of neither shape and has to go unnamed. The
+   path is the one thing written out here: it is precisely a path the builder
+   above cannot produce. *)
+let escaping_exec =
+  exec_line ~schedule:"0 3 * * *" ~path:"/etc/bondi/cron/../../passwd/run.json"
+
+let legacy_only_section = [ begin_marker; daily_close; end_marker; "" ]
+let exec_only_section = [ begin_marker; daily_close_exec; end_marker; "" ]
+let mixed_shapes = [ begin_marker; daily_close; rebalance_exec; end_marker; "" ]
+
+let mixed_with_unresolvable =
+  [ begin_marker; daily_close; escaping_exec; rebalance_exec; end_marker; "" ]
+
+(* Entries are compared as a list rather than one at a time, so a case states
+   the whole of what the section reads as: the entries around the one it is
+   about are asserted by the same call that asserts it, and a case about an
+   entry that must go unnamed cannot pass because nothing else was read. *)
+let entry_testable =
+  of_pp (fun formatter entry ->
+      match entry with
+      | Listing.Named name -> Format.fprintf formatter "Named %S" name
+      | Listing.Unnamed { position } ->
+          Format.fprintf formatter "Unnamed %d" position)
+
+let check_entries label expected listing =
+  match listing with
+  | Listing.Section { entries } ->
+      check (list entry_testable) label expected entries
+  | Listing.No_section
+  | Listing.Malformed _
+  | Listing.Unreadable _ ->
+      failf "%s: this fixture is a well-formed section and must read as one"
+        label
+
 (* --- Tests --- *)
 
 let test_crontab_section_counts_jobs () =
@@ -85,22 +140,9 @@ let test_crontab_section_counts_jobs () =
   | None -> fail "a well-formed section must report how many jobs it holds"
 
 let test_crontab_section_returns_job_names () =
-  match spool_of well_formed with
-  | Listing.Section { entries } ->
-      check
-        (list
-           (of_pp (fun formatter entry ->
-                match entry with
-                | Listing.Named name -> Format.fprintf formatter "Named %S" name
-                | Listing.Unnamed { position } ->
-                    Format.fprintf formatter "Unnamed %d" position)))
-        "names the jobs in the order the file lists them"
-        [ Listing.Named "daily-close"; Listing.Named "rebalance" ]
-        entries
-  | Listing.No_section
-  | Listing.Malformed _
-  | Listing.Unreadable _ ->
-      fail "a well-formed section must be read as one"
+  check_entries "names the jobs in the order the file lists them"
+    [ Listing.Named "daily-close"; Listing.Named "rebalance" ]
+    (spool_of well_formed)
 
 (* The affirmative arm the absence test below is measured against: a section
    really can hold zero jobs and report the count, so an implementation that
@@ -122,6 +164,47 @@ let test_crontab_empty_section_is_zero_jobs () =
    and after one that removed every job. Collapsing it into "zero jobs" states
    that the section is there and empty, which is a claim about a file that may
    not even exist. *)
+(* The line the orchestrator writes now holds no payload at all, so the only
+   place its job's name can come from is the path it reads. Without this every
+   correctly written line reports as unnamed: a false alarm on every job on
+   every box, and the exact inverse of the failure the unnamed arm exists for. *)
+let test_crontab_exec_line_is_named_from_its_path () =
+  check_entries "takes the job's name from the run file's directory"
+    [ Listing.Named "daily-close" ]
+    (spool_of exec_only_section)
+
+(* Every crontab in the estate still holds legacy lines and they still fire, so
+   teaching the reader the new shape may not cost it the old one. This is the
+   case that goes red if the new reader replaces the old rather than standing
+   in front of it. *)
+let test_crontab_legacy_line_is_still_named_from_its_payload () =
+  check_entries "takes the job's name from the payload the line carries"
+    [ Listing.Named "daily-close" ]
+    (spool_of legacy_only_section)
+
+(* A box mid-migration holds both shapes at once, because a job's line is
+   rewritten by the deploy that names it and by no other. So a section holds the
+   new shape for the jobs deployed since and the legacy shape for the rest, and
+   a reader that names only one of the two describes a box that does not exist. *)
+let test_crontab_mixed_section_names_every_job () =
+  check_entries "names both shapes, in the order the file lists them"
+    [ Listing.Named "daily-close"; Listing.Named "rebalance" ]
+    (spool_of mixed_shapes)
+
+(* A line of neither shape keeps its place and reports its position, and the
+   named entries on either side of it are asserted by the same call — so this
+   cannot pass because nothing reached the reader. The path is one the writer
+   could not have produced, which is what re-deriving it from the name is for:
+   taken at face value it would name a job "passwd". *)
+let test_crontab_line_of_neither_shape_is_unnamed_with_its_position () =
+  check_entries "leaves the line of neither shape unnamed, at its position"
+    [
+      Listing.Named "daily-close";
+      Listing.Unnamed { position = 2 };
+      Listing.Named "rebalance";
+    ]
+    (spool_of mixed_with_unresolvable)
+
 let test_crontab_no_section_is_not_zero_jobs () =
   let listing = spool_of no_markers in
   match listing with
@@ -422,6 +505,7 @@ let test_crontab_never_returns_command_lines () =
       ("an unbalanced end marker", end_without_begin);
       ("a section that never ends", never_ends);
       ("nested markers", nested);
+      ("a section mixing both shapes", mixed_with_unresolvable);
     ]
   in
   List.iter
@@ -456,6 +540,15 @@ let () =
             test_crontab_entries_outside_markers_are_not_counted;
           test_case "an entry that could not be read is counted and located"
             `Quick test_crontab_unreadable_entry_is_counted_and_located;
+          test_case "an exec line is named from its path" `Quick
+            test_crontab_exec_line_is_named_from_its_path;
+          test_case "a legacy line is still named from its payload" `Quick
+            test_crontab_legacy_line_is_still_named_from_its_payload;
+          test_case "a section mixing both shapes names every job" `Quick
+            test_crontab_mixed_section_names_every_job;
+          test_case "a line of neither shape is still unnamed with its position"
+            `Quick
+            test_crontab_line_of_neither_shape_is_unnamed_with_its_position;
         ] );
       ( "absence and failure",
         [

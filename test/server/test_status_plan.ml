@@ -544,6 +544,69 @@ let test_report_reports_an_escaping_exception () =
         (Bondi_common.String_utils.contains ~needle:"Docker_socket_unreachable"
            msg)
 
+(* An entry the crontab reader could not resolve is dropped today, so a box
+   holding jobs it cannot parse reports the same "no jobs" as a box holding
+   none. The entries that did resolve are still reported; the rest are reported
+   by position and by count. Never by line: a legacy line is the job's payload,
+   credentials and all, and this text goes back over HTTP, is mailed by cron and
+   is shipped off the box with the diagnostics stream. *)
+let test_status_reports_unreadable_cron_entries () =
+  let jobs, cron_error =
+    Status.cron_state_of_listing
+      [
+        Crontab.Job { name = "backup"; image = "ghcr.io/org/backup:v2.1.0" };
+        Crontab.Unreadable { position = 3 };
+        Crontab.Unreadable { position = 5 };
+      ]
+  in
+  check (list string) "the entries that resolved are still reported"
+    [ "backup" ]
+    (List.map (fun (job : Crontab.scheduled_job) -> job.name) jobs);
+  match cron_error with
+  | None ->
+      fail "two unreadable crontab entries were reported as no error at all"
+  | Some msg ->
+      List.iter
+        (fun needle ->
+          check bool
+            (Printf.sprintf "the report carries %S: %s" needle msg)
+            true
+            (Bondi_common.String_utils.contains ~needle msg))
+        [ "2 crontab entries"; "positions 3, 5" ]
+
+(* The gather derives both cron fields from one listing, so the two boxes below
+   differ only in what their crontab held. *)
+let plan_of_listing entries =
+  let scheduled_cron_jobs, cron_error = Status.cron_state_of_listing entries in
+  Status.plan ~service_name:(Some "myapp")
+    { full_context with scheduled_cron_jobs; cron_error }
+
+(* The point of the whole requirement. Both boxes report no cron job, because
+   an entry that cannot be read is not a job. What separates them is the error:
+   a box with nothing scheduled says nothing about cron, and a box whose section
+   cannot be read says so, with somewhere to go and look. *)
+let test_status_no_cron_section_differs_from_an_unreadable_one () =
+  let absent = plan_of_listing [] in
+  let unreadable = plan_of_listing [ Crontab.Unreadable { position = 1 } ] in
+  check component_status_list_testable
+    "a box with no cron section reports no job" [] absent.cron_jobs;
+  check component_status_list_testable
+    "a box whose section is unreadable reports no job either" []
+    unreadable.cron_jobs;
+  check (list string) "a box with no cron section reports nothing about cron" []
+    absent.errors;
+  check bool "a box whose section is unreadable does not report the same" true
+    (absent.errors <> unreadable.errors);
+  check int "the unreadable box reports exactly one cron error" 1
+    (List.length unreadable.errors);
+  List.iter
+    (fun msg ->
+      check bool
+        (Printf.sprintf "the report names the position: %s" msg)
+        true
+        (Bondi_common.String_utils.contains ~needle:"position 1)" msg))
+    unreadable.errors
+
 let () =
   run "Status.plan"
     [
@@ -579,6 +642,10 @@ let () =
             test_status_json_omits_empty_managed;
           test_case "gathers only managed containers" `Quick
             test_status_gathers_only_managed_containers;
+          test_case "unreadable cron entries are reported, not absent" `Quick
+            test_status_reports_unreadable_cron_entries;
+          test_case "no cron section differs from an unreadable one" `Quick
+            test_status_no_cron_section_differs_from_an_unreadable_one;
         ] );
       ( "report",
         [

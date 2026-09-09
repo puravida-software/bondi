@@ -1,10 +1,13 @@
 (** [POST /api/v1/run] — execute one cron job in a container and report how it
     ended.
 
-    The crontab lines Bondi writes call this endpoint. That makes it the place
-    where a scheduled job's failure becomes visible: the response status and
-    body are what reach cron's mail, and the payload's sinks are what reach the
-    operator's alerting.
+    Two things reach it. The [run] subcommand reads a job's run file on standard
+    input and dispatches here, which is how the exec lines Bondi writes now
+    fire; the route below answers the legacy [curl] lines that every crontab in
+    the estate still holds. Either way this is where a scheduled job's failure
+    becomes visible: what the subcommand writes to stderr and what the route
+    returns are what reach cron's mail, and the payload's sinks are what reach
+    the operator's alerting.
 
     Everything below {!route} is exposed for one of three reasons — it is
     {!run}, which is the endpoint's whole decision with no transport named; it
@@ -21,11 +24,14 @@ type run_payload = {
   alert_sinks : Bondi_common.Alert.sinks option;
   exit_code_severities : Strategy.Simple.exit_code_severities option;
 }
-(** The body of a run request, as written into the crontab line by
-    {!Crontab.entry_of_cron_job}. The optional fields are omitted rather than
-    sent as [null], so a job that configures nothing produces the same bytes it
-    did before those fields existed. Unknown fields are rejected: a misspelled
-    key must not read as an unconfigured one. *)
+(** The body of a run request, and the whole content of a job's run file:
+    {!Crontab.run_payload_of_cron_job} encodes it at deploy time into the file
+    {!Crontab.entry_of_cron_job}'s line hands to the [run] subcommand on
+    standard input. A legacy [curl] line sends the same record as an HTTP body
+    instead. The optional fields are omitted rather than sent as [null], so a
+    job that configures nothing produces the same bytes it did before those
+    fields existed. Unknown fields are rejected: a misspelled key must not read
+    as an unconfigured one. *)
 
 type run_response = { exit_code : int; warning : string option }
 (** The body of a successful run. [warning] reports a best-effort cleanup step

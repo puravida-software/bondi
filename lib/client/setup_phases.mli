@@ -2,14 +2,14 @@
     through one of them left undone.
 
     A setup plan is a flat list of actions, but it is built as an ordered
-    sequence of phases: Docker, the shared network, cron's curl, the ACME file,
-    the orchestrator, alloy, and the managed containers. The interpreter applies
-    the list in order and stops at the first action that fails, so every phase
-    after that one is skipped — and the operator is told only about the action
-    that failed. A run that could not start bondi-alloy reports a container name
-    conflict and says nothing about the declared containers it never reached, so
-    a host that is part-way through a setup reads as a host that failed at one
-    small thing.
+    sequence of phases: Docker, the shared network, cron's [docker] on the
+    crontab's own PATH, cron's curl, the ACME file, the orchestrator, alloy, and
+    the managed containers. The interpreter applies the list in order and stops
+    at the first action that fails, so every phase after that one is skipped —
+    and the operator is told only about the action that failed. A run that could
+    not start bondi-alloy reports a container name conflict and says nothing
+    about the declared containers it never reached, so a host that is part-way
+    through a setup reads as a host that failed at one small thing.
 
     This module turns "which action failed" into "which phases did not run". It
     performs no I/O and knows nothing about actions: the caller maps its own
@@ -22,6 +22,7 @@
 type phase =
   | Docker
   | Network
+  | Cron_docker
   | Cron_curl
   | Acme
   | Orchestrator

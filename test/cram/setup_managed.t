@@ -20,6 +20,7 @@ what reaches argv from what reaches stdin.
   > cat >> "$SSH_STDIN_LOG"
   > case "$1" in
   >   'docker --version') echo 'Docker version 27.0.0, build deadbeef' ;;
+  >   *BONDI_CRON_DOCKER_PRESENT*) echo 'BONDI_CRON_DOCKER_PRESENT /usr/bin/docker' ;;
   >   'curl --version') echo 'curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0' ;;
   >   *'label=bondi.type=managed'*)
   >     if [ -n "$MANAGED_PS_FAILS" ]; then exit 7; fi
@@ -76,12 +77,13 @@ Every run now ends on the report of what the host holds, which this file takes
 apart elsewhere; here the run's own lines are the subject, so they are taken
 without it.
 
-  $ bondi-client setup 2>&1 | head -9
+  $ bondi-client setup 2>&1 | head -10
   Setting up the servers...
   Processing server: 127.0.0.1
   Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 127.0.0.1
-  curl on server 127.0.0.1 supports the crontab command: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
+  cron on server 127.0.0.1 resolves docker at /usr/bin/docker
+  curl on server 127.0.0.1 can run the crontab lines an older bondi wrote: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
   bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.1.0
   No alloy is configured for server 127.0.0.1: /etc/bondi/alloy is not on the host
   Wrote secret environment file on server 127.0.0.1: /etc/bondi/gateway/env
@@ -142,12 +144,13 @@ directory — which holds its secrets — deleted.
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
   > EOF
-  $ bondi-client setup 2>&1 | head -10
+  $ bondi-client setup 2>&1 | head -11
   Setting up the servers...
   Processing server: 127.0.0.1
   Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 127.0.0.1
-  curl on server 127.0.0.1 supports the crontab command: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
+  cron on server 127.0.0.1 resolves docker at /usr/bin/docker
+  curl on server 127.0.0.1 can run the crontab lines an older bondi wrote: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
   bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.1.0
   No alloy is configured for server 127.0.0.1: /etc/bondi/alloy is not on the host
   Stopped bondi-gateway container on server 127.0.0.1
@@ -257,12 +260,13 @@ converge, so the lookup does not matter.
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
   > EOF
-  $ bondi-client setup 2>&1 | head -6
+  $ bondi-client setup 2>&1 | head -7
   Setting up the servers...
   Processing server: 127.0.0.1
   Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 127.0.0.1
-  curl on server 127.0.0.1 supports the crontab command: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
+  cron on server 127.0.0.1 resolves docker at /usr/bin/docker
+  curl on server 127.0.0.1 can run the crontab lines an older bondi wrote: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
   bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.1.0
   $ unset MANAGED_PS_FAILS
 
@@ -297,12 +301,13 @@ old one on disk under a container that no longer references it.
   >     env_vars:
   >       TRADING_MODE: paper
   > EOF
-  $ bondi-client setup 2>&1 | head -9
+  $ bondi-client setup 2>&1 | head -10
   Setting up the servers...
   Processing server: 127.0.0.1
   Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 127.0.0.1
-  curl on server 127.0.0.1 supports the crontab command: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
+  cron on server 127.0.0.1 resolves docker at /usr/bin/docker
+  curl on server 127.0.0.1 can run the crontab lines an older bondi wrote: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
   bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.1.0
   No alloy is configured for server 127.0.0.1: /etc/bondi/alloy is not on the host
   Wrote secret environment file on server 127.0.0.1: /etc/bondi/gateway/env
@@ -371,12 +376,13 @@ Second run: same declaration, same hash. Nothing is stopped, removed, written or
 started.
 
   $ : > ssh-argv.log
-  $ bondi-client setup 2>&1 | head -6
+  $ bondi-client setup 2>&1 | head -7
   Setting up the servers...
   Processing server: 127.0.0.1
   Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 127.0.0.1
-  curl on server 127.0.0.1 supports the crontab command: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
+  cron on server 127.0.0.1 resolves docker at /usr/bin/docker
+  curl on server 127.0.0.1 can run the crontab lines an older bondi wrote: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
   bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.1.0
   $ grep -c 'bondi-gateway' ssh-argv.log
   0

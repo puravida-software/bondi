@@ -1,6 +1,7 @@
 type phase =
   | Docker
   | Network
+  | Cron_docker
   | Cron_curl
   | Acme
   | Orchestrator
@@ -12,6 +13,7 @@ type phase =
 let name = function
   | Docker -> "Docker"
   | Network -> "network"
+  | Cron_docker -> "cron docker"
   | Cron_curl -> "cron curl"
   | Acme -> "ACME file"
   | Orchestrator -> "orchestrator"

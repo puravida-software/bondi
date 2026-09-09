@@ -38,8 +38,9 @@ let supports_fail_with_body output =
       Error
         (Printf.sprintf
            "could not read a curl version from the server; curl %s or later is \
-            required, because bondi's crontab command uses --fail-with-body. \
-            The server answered: %s"
+            required, because the crontab lines an older bondi wrote use \
+            --fail-with-body and they still fire on their schedule. The server \
+            answered: %s"
            minimum_string (String.trim output))
   | Some (version, major, minor) ->
       if
@@ -49,8 +50,10 @@ let supports_fail_with_body output =
       else
         Error
           (Printf.sprintf
-             "the server has curl %s, but bondi's crontab command uses \
-              --fail-with-body, which requires curl %s or later. An older curl \
-              rejects it as an unknown option, so every scheduled job would \
-              fail. Upgrade curl on the server, then run bondi setup again."
+             "the server has curl %s, but the crontab lines an older bondi \
+              wrote use --fail-with-body, which requires curl %s or later. An \
+              older curl rejects it as an unknown option, so every job still \
+              running on one of those lines would fail. Upgrade curl on the \
+              server, or re-deploy every cron job on it so no such line is \
+              left, then run bondi setup again."
              version minimum_string)

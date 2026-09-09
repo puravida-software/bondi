@@ -15,6 +15,7 @@ let spec =
 let phase_string = function
   | Setup_phases.Docker -> "Docker"
   | Setup_phases.Network -> "Network"
+  | Setup_phases.Cron_docker -> "Cron_docker"
   | Setup_phases.Cron_curl -> "Cron_curl"
   | Setup_phases.Acme -> "Acme"
   | Setup_phases.Orchestrator -> "Orchestrator"
@@ -37,6 +38,7 @@ let test_phase_of_each_action_is_named () =
     [
       (Setup.EnsureDocker, "Docker");
       (Setup.EnsureNetwork "bondi-network", "Network");
+      (Setup.RequireCronDocker, "Cron_docker");
       (Setup.RequireCronCurl, "Cron_curl");
       (Setup.EnsureAcmeFile, "Acme");
       (Setup.StopOrchestrator, "Orchestrator");

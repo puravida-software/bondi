@@ -84,6 +84,23 @@ val managed_containers_of :
     because the server never reads [bondi.yaml] and so cannot know the declared
     names. *)
 
+val cron_state_of_listing :
+  Crontab.listed_job list -> Crontab.scheduled_job list * string option
+(** Pure: the two cron fields of a {!status_context}, from one crontab listing
+    -- the entries that resolved to a job, and the warning for those that did
+    not.
+
+    An entry the reader could not resolve is reported rather than dropped. A box
+    holding jobs it cannot parse would otherwise answer exactly as a box holding
+    no jobs at all, which is the one failure an operator cannot see. It is not
+    counted as a job either: nothing is known about it beyond its position.
+
+    The warning names how many entries could not be read and where they are. It
+    never names an entry: a legacy line carries the job's payload, credentials
+    included, and this text is returned over HTTP, mailed by cron and shipped
+    off the box with the diagnostics stream. [None] when every entry resolved,
+    including when there were none. *)
+
 val plan : service_name:string option -> status_context -> comprehensive_status
 (** Build the response from gathered state, purely. [service_name] is absent
     when the caller asked about the box rather than about one service, and the
