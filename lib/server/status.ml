@@ -135,6 +135,49 @@ let managed_containers_of (containers : Docker.Client.container list) =
       | Some labels -> List.assoc_opt label_key labels = Some label_value)
     containers
 
+(* An entry the crontab reader could not resolve is not a job, but it is not an
+   absence either. Dropping it -- which is what this did before -- makes a box
+   holding jobs it cannot parse report the same "no jobs" as a box holding none,
+   so the one state an operator must act on is the one that looks quietest.
+
+   The report names how many entries could not be read and where they sit, and
+   never the entries themselves. A legacy line is the job's whole payload,
+   credentials included, and this text is returned over HTTP, mailed by cron and
+   shipped off the box with the diagnostics stream; a position is enough to go
+   and look. *)
+let cron_state_of_listing (entries : Crontab.listed_job list) :
+    Crontab.scheduled_job list * string option =
+  let jobs =
+    List.filter_map
+      (fun (entry : Crontab.listed_job) ->
+        match entry with
+        | Crontab.Job job -> Some job
+        | Crontab.Unreadable _ -> None)
+      entries
+  in
+  let unreadable =
+    List.filter_map
+      (fun (entry : Crontab.listed_job) ->
+        match entry with
+        | Crontab.Job _ -> None
+        | Crontab.Unreadable { position } -> Some position)
+      entries
+  in
+  let cron_error =
+    match unreadable with
+    | [] -> None
+    | [ position ] ->
+        Some
+          (Printf.sprintf "1 crontab entry could not be read (position %d)"
+             position)
+    | positions ->
+        Some
+          (Printf.sprintf "%d crontab entries could not be read (positions %s)"
+             (List.length positions)
+             (String.concat ", " (List.map string_of_int positions)))
+  in
+  (jobs, cron_error)
+
 (** Pure: build a comprehensive status response from gathered context. *)
 let plan ~(service_name : string option) (ctx : status_context) :
     comprehensive_status =
@@ -251,7 +294,7 @@ let gather ~client ~net ~clock ~(service_name : string option) : status_context
   in
   let scheduled_cron_jobs, cron_error =
     match Crontab.list_scheduled_jobs () with
-    | Ok jobs -> (jobs, None)
+    | Ok entries -> cron_state_of_listing entries
     | Error msg -> ([], Some (Printf.sprintf "Failed to read crontab: %s" msg))
   in
   let cron_container_inspections =

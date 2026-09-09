@@ -95,7 +95,7 @@ A cron job can classify each run's exit code into a `success`, `failure`, or `cr
 
 Server images `0.8.2`, `0.9.0`, `0.10.0` and `0.10.1` cannot start. The binary they package links `libzstd.so.1`, which those images do not ship, so the loader aborts before the server runs and the container exits `127`. `latest` pointed at a broken image until the first release after this fix; if you installed it before then, treat it as broken too.
 
-The symptom is a host with nothing listening on port `3030`. Scheduled jobs are the loudest casualty: every crontab line Bondi writes POSTs to the orchestrator, so they all become silent no-ops.
+The symptom is a host with nothing listening on port `3030`. Scheduled jobs are the loudest casualty: every crontab line Bondi writes goes through the orchestrator — the current shape `docker exec`s into it, and the legacy shape still in the estate POSTs to it — so none of them can run.
 
 Check what a server is running:
 

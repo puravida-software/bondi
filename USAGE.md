@@ -36,7 +36,11 @@ Before you start, you need:
 - **A Docker image** for your service, pushed to a registry (Docker Hub, GHCR, etc.)
 - **DNS records** — an `A` (or `AAAA`) record pointing your domain to the server IP
 - **Firewall rules** — inbound ports `80/tcp` and `443/tcp` must be open (Traefik handles TLS)
-- **`curl` 7.76 or later on the server**, if you use [cron jobs](#3-cron-jobs) — the crontab line Bondi writes uses `--fail-with-body`, so that a failed run both exits non-zero and carries the reason into cron's mail. `bondi setup` checks this and stops with the version it found if the server's curl is older. Debian 12 and Ubuntu 22.04 or later are fine; Debian 11 and Ubuntu 20.04 are not.
+- **If you use [cron jobs](#3-cron-jobs)**, four more things about the server:
+  - **`bondi-server` 0.15.0 or later must already be running on it.** The crontab line Bondi writes is a `docker exec` into the orchestrator that runs the server binary's `run` subcommand, and older images do not have that subcommand. `bondi deploy` reads the orchestrator's version off the box and refuses a cron-declaring deploy against an older one, naming both versions. Run `bondi setup` first, with the version you want pinned under `bondi_server:`.
+  - **The server must be reachable over SSH from wherever you run `bondi deploy`.** That version check is a read of the box, and a box that cannot be consulted is refused rather than assumed good — so a cron job's `server:` block needs a working `ssh:` section, not just an `ip_address`.
+  - **`docker` must be on the `PATH` cron runs jobs with** — `/usr/bin:/bin` on Debian and Ubuntu. The line invokes `docker exec` by name, and cron gives a job a minimal environment rather than a login one, so a Docker installed under `/usr/local/bin` answers over SSH and still fails every scheduled run. `bondi setup` asks the server what an empty environment resolves and stops if the answer is nothing. The apt install `get.docker.com` performs — which is what Bondi installs — puts it at `/usr/bin/docker`.
+  - **`curl` 7.76 or later**, only if the server still holds cron lines written by an older Bondi. Those lines are `curl` invocations using `--fail-with-body`, which an older curl rejects as an unknown option; they keep firing on their schedule until each job is deployed again. `bondi setup` checks the version and stops with what it found. Debian 12 and Ubuntu 22.04 or later are fine; Debian 11 and Ubuntu 20.04 are not.
 
 Install the CLI:
 
@@ -442,18 +446,31 @@ cron_jobs:
 
 Bondi reports a failed run through two independent channels.
 
-The first is cron itself. The crontab line Bondi writes exits non-zero when the run cannot be started or the server rejects the request, so the failure lands in cron's own record and in the mail cron sends to the account owning the crontab. The server's explanation is included rather than swallowed:
+The first is cron itself. The crontab line Bondi writes is a `docker exec` into the orchestrator, and `docker exec` exits with the status of the command it ran — so a run the orchestrator cannot start, or a payload it rejects, is a non-zero line. The failure lands in cron's own record and in the mail cron sends to the account owning the crontab, and the server's explanation goes with it rather than being swallowed:
 
 ```
-curl: (22) The requested URL returned error: 400
 Run failed: invalid run payload: Run.run_payload (keys received: job, imag)
 ```
 
-This channel needs no configuration and is the only one that works when the failure happens before the server can know which job it was — a refused connection, or a request the server cannot decode. A rejected body is reported by the keys that arrived, never by their values, so an environment variable or a sink URL carrying a credential is not echoed into your mail spool.
+This channel needs no configuration and is the only one that works when the failure happens before the server can know which job it was — an orchestrator that is not running, or a payload it cannot decode. A rejected body is reported by the keys that arrived, never by their values, so an environment variable or a sink URL carrying a credential is not echoed into your mail spool.
 
 The second channel is alerting, below, which needs sinks configured and fires once the server knows which job ran.
 
-If a cron job you deployed before upgrading Bondi still fails silently, its crontab line predates this behaviour — re-deploy that job once to replace it.
+`bondi deploy` rewrites only the crontab lines of the jobs it names, so a line written by an older Bondi survives untouched until you deploy that job again. If a job still fails silently, its line predates this behaviour — re-deploy that job once to replace it with the current shape.
+
+### Lines in Bondi's crontab section that Bondi did not write
+
+Bondi keeps its cron entries between a `BEGIN`/`END` marker pair in the server's crontab. Everything between those markers is Bondi's, and Bondi does not throw any of it away: a line in there that Bondi did not write is carried through every deploy that rewrites the section, verbatim.
+
+It is also reported, on every `bondi status`. The `Crontab` row counts the entry and locates it — `2 jobs (daily-close, entry 2 could not be read)` — where positions count entries from the first one inside the markers. The line itself is never printed, in the table or in `--output json`: an entry in that section may carry a credential, and status output is returned over HTTP and shipped off the box with the logs.
+
+Nothing clears that report except removing the line. There is no Bondi command that does it, because a line Bondi cannot read is a line Bondi cannot safely decide about — so edit the crontab on the server by hand:
+
+```bash
+ssh YOUR_USER@YOUR_SERVER -- crontab -e
+```
+
+Delete the offending entry from between the markers and save; the next `bondi status` is clean. Cron entries of your own belong **outside** the markers, where Bondi neither rewrites nor counts them.
 
 ### Alerting on job outcomes
 
@@ -521,7 +538,7 @@ Bondi POSTs one generic JSON payload per alert, carrying the job name, severity,
 
 Delivery is best-effort and runs after the run's outcome is recorded: a sink that is down, slow, or erroring never changes that outcome or crashes the orchestrator. Each attempt is bounded by a short timeout, so a slow sink can at most delay the run's HTTP acknowledgement. Every delivery failure — a transport error, a timeout, or a non-2xx response from the sink — is logged (by host only, so a credential-bearing URL is not written to the logs).
 
-Both fields ride in the crontab payload alongside `env_vars`, so run `bondi setup` after adding them (the orchestrator picks up the new config), then deploy the cron job as usual.
+Both fields ride in the job's run payload alongside `env_vars` — the file the crontab line points at, written at deploy time — so run `bondi setup` after adding them (the orchestrator picks up the new config), then deploy the cron job as usual.
 
 ---
 

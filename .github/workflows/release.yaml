@@ -86,6 +86,16 @@ jobs:
         with:
           just-version: "1.46.0"
 
+      # The client refuses to write a cron line against an orchestrator older
+      # than the floor compiled into it, so a tag numbered below that floor
+      # publishes an image every cron deploy in the estate rejects, naming a
+      # version that does not exist. Checked before anything is built, in the
+      # same position it holds in `docker-all`, because the tag is already cut
+      # by the time this workflow runs and failing here is the last chance to
+      # not publish it.
+      - name: Check the tag against the cron version floor
+        run: just check-version-floor "$VERSION"
+
       - name: Build server image
         run: |
           just build-server "$VERSION"

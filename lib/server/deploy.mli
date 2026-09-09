@@ -4,9 +4,9 @@
     This is the endpoint that acts on a [bondi.yaml]. It plans the cron half of
     the request, chooses a deployment strategy, pulls what that strategy needs,
     converges the reverse proxy's restart policy, rolls the workload forward,
-    and then writes the crontab and the cron secret files. A request that names
-    no service is a cron-only deploy: it plans, writes the cron half, and
-    touches no workload.
+    and then writes each job's files and the crontab. A request that names no
+    service is a cron-only deploy: it plans, writes the cron half, and touches
+    no workload.
 
     The order is not incidental. The cron plan is pure and is refused first, so
     a job declaring a network Bondi does not manage is rejected before the
@@ -82,7 +82,12 @@ type deploy_action =
       (** Pull each declared job's image, with that job's own registry
           credentials. *)
   | UpsertCrontab of Strategy.Simple.cron_job list option
-      (** Replace the crontab and the cron secret files with the declared set.
+      (** Replace each job's files and the crontab with the declared set. A job
+          gets a run file, which is the definition its crontab line points at,
+          and an env file holding the secrets that definition deliberately does
+          not carry. Both are written before the crontab, so no line is
+          installed ahead of the files it reads.
+
           Every declared job is written even when it declares no secrets, so
           withdrawing a credential truncates the file rather than leaving the
           last one behind for the next run. *)
@@ -94,13 +99,19 @@ type deploy_action =
 val cron_plan :
   Strategy.Simple.deploy_input -> (deploy_action list, Handler_error.t) result
 (** Plan the cron half of a deploy, purely, from the request alone. A request
-    declaring no jobs plans nothing. A job declaring a network Bondi does not
-    manage is refused, and every offending job is named in one message rather
-    than only the first, so the operator does not rediscover the next bad name
-    on a later deploy. The check compares against the one managed name and
-    cannot see which networks exist on the box, so a network created by hand is
-    invisible to it and every remedy the message offers is one the operator can
-    apply in [bondi.yaml]. *)
+    declaring no jobs plans nothing. Two things are refused here, both by naming
+    every offending job in one message rather than only the first, so the
+    operator does not rediscover the next bad one on a later deploy.
+
+    A job whose name could not be placed in a path is refused, by the same check
+    that guards the write, because the interpreter that writes the job's files
+    and its crontab line interpolates that name into three paths and carries no
+    check of its own. Refusing here means nothing on the box has moved yet.
+
+    A job declaring a network Bondi does not manage is refused too. That check
+    compares against the one managed name and cannot see which networks exist on
+    the box, so a network created by hand is invisible to it and every remedy
+    the message offers is one the operator can apply in [bondi.yaml]. *)
 
 type traefik_policy_context = {
   traefik : Docker.Client.container option;

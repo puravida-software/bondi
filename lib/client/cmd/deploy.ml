@@ -67,10 +67,16 @@ let post_deploy ~client ip_address ~port payload =
    and over plain HTTP to a public address those crossed the internet in the
    clear on every deploy.
 
-   A server declared without [ssh] is dialled directly, which is correct for a
-   box reached over a tunnel the operator opened themselves, and for localhost
-   in development. It is NOT a fallback for a missing key: without [ssh] there
-   is nothing to authenticate with, so there is no tunnel to attempt. *)
+   A server declared without [ssh] is dialled directly, which is still correct
+   for a box reached over a tunnel the operator opened themselves, and for
+   localhost in development -- but only for a deploy that declares no cron
+   jobs. A cron-declaring deploy against such a server never reaches here: the
+   version gate has to read the box's orchestrator over the same connection,
+   and it refuses a box whose image it could not see rather than writing a
+   crontab line that box may not be able to execute.
+
+   Direct dialling is NOT a fallback for a missing key: without [ssh] there is
+   nothing to authenticate with, so there is no tunnel to attempt. *)
 let post_deploy_via_ssh ~client (server : Config_file.server) ~port payload =
   (* A loopback address is the box itself -- bondi running on the machine it is
      deploying to. The orchestrator's published port is already reachable there,
@@ -139,6 +145,60 @@ let cron_jobs_for_server ip_address
       in
       if with_tags = [] then None else Some with_tags
 
+(* [-a] rather than plain [ps]: an orchestrator that died on startup is still on
+   the host and still the image the next [bondi setup] would replace, and a
+   plain [ps] cannot see it. Only the image is asked for -- what the gate needs
+   is the version, and a container's state is [Cmd.Setup]'s question. *)
+let orchestrator_image_command =
+  "ps -a --filter name=^/bondi-orchestrator$ --format '{{.Image}}'"
+
+(* The version that decides the gate is the one running on the box now, not the
+   [bondi_server.version] pin in bondi.yaml: the two have diverged before, and
+   the pin is what the operator meant rather than what is there. *)
+let reported_orchestrator_version (server : Config_file.server) =
+  match
+    Remote_exec.docker_command_output ~command:orchestrator_image_command server
+  with
+  (* A server with no [ssh] block is answered from the configuration, before
+     anything is spawned, so nothing about it failed to be read. Rendering it
+     with the other six sends an operator whose bondi.yaml is missing a block
+     looking at the network instead. The kind is a value precisely so this
+     caller can separate the two. *)
+  | Error (Remote_exec.Not_configured { server = ip_address }) ->
+      Error
+        (Printf.sprintf
+           "a deploy declaring cron jobs reads the orchestrator's version from \
+            the server before it writes a crontab line, and server %s has no \
+            ssh: block in bondi.yaml to read it over. Add one, then deploy \
+            again."
+           ip_address)
+  | Error
+      (( Remote_exec.Ssh_not_found _ | Remote_exec.Local_failure _
+       | Remote_exec.Ssh_failed _ | Remote_exec.Command_failed _
+       | Remote_exec.Signalled _ | Remote_exec.Stopped _ ) as failure) ->
+      Error
+        (Printf.sprintf
+           "the orchestrator's version could not be read, and a deploy \
+            declaring cron jobs will not write a crontab line to a server \
+            whose image it has not seen: %s"
+           (Remote_exec.explain ~subject:"the orchestrator listing" failure))
+  | Ok output ->
+      Ok (Server_version.orchestrator_version_of_image (String.trim output))
+
+(* The gate is asked only when this server has cron jobs to write, so a
+   service-only deploy neither consults the box nor pays for the round trip --
+   which is why the reader is a parameter rather than something called ahead of
+   the decision. *)
+let cron_version_gate ~read_version cron_jobs =
+  match cron_jobs with
+  | None
+  | Some [] ->
+      Ok ()
+  | Some (_ :: _) -> (
+      match read_version () with
+      | Error message -> Error message
+      | Ok version -> Server_version.supports_run_subcommand version)
+
 let validate_deployments (config : Config_file.t) deployments :
     ((string * string) list, string) result =
   let service_names =
@@ -169,7 +229,7 @@ let run force_traefik_redeploy deployments =
           "Error: no deployments specified. Use name:tag (e.g. \
            my-service:v1.2.3)";
         exit 1
-    | _ -> (
+    | _ :: _ -> (
         match
           List.fold_left
             (fun acc s ->
@@ -202,6 +262,31 @@ let run force_traefik_redeploy deployments =
           "Error: no servers configured. Add servers to bondi.yaml under \
            service or each cron job.";
         exit 1);
+      (* Before anything is posted: a refusal that arrives after the crontab has
+         been written is not a refusal. Every server is gated first, so a
+         deploy that would fail on the second one does not write to the
+         first. *)
+      let gate_failures =
+        List.filter_map
+          (fun (server : Config_file.server) ->
+            match
+              cron_version_gate
+                ~read_version:(fun () -> reported_orchestrator_version server)
+                (cron_jobs_for_server server.ip_address config.cron_jobs
+                   deployments)
+            with
+            | Ok () -> None
+            | Error message ->
+                Some
+                  (Printf.sprintf "Error on server %s: %s" server.ip_address
+                     message))
+          servers
+      in
+      (match gate_failures with
+      | [] -> ()
+      | _ :: _ ->
+          List.iter prerr_endline gate_failures;
+          exit 1);
       Eio_main.run @@ fun env ->
       let net = Eio.Stdenv.net env in
       let client = Cohttp_eio.Client.make ~https:None net in
@@ -218,68 +303,75 @@ let run force_traefik_redeploy deployments =
         List.map
           (fun (server : Config_file.server) ->
             let ip_address = server.ip_address in
-            let deploy_service =
+            (* The decision carries the service and its tag rather than a bool:
+               the payload needs both, and a bool would leave the builder
+               re-deriving them from options the decision has already
+               inspected. *)
+            let service_and_tag =
               match config.user_service with
-              | Some service
-                when is_service_server ip_address
-                     && Option.is_some (tag_of_name service.name) ->
-                  true
-              | _ -> false
+              | None -> None
+              | Some service -> (
+                  match tag_of_name service.name with
+                  | None -> None
+                  | Some tag ->
+                      if is_service_server ip_address then Some (service, tag)
+                      else None)
+            in
+            let cron_jobs =
+              cron_jobs_for_server ip_address config.cron_jobs deployments
             in
             let base_payload =
-              if deploy_service then
-                let service = Option.get config.user_service in
-                let tag = Option.get (tag_of_name service.name) in
-                {
-                  service_name = Some service.name;
-                  image = Some (service.image ^ ":" ^ tag);
-                  port = Some service.port;
-                  env_vars = service.env_vars;
-                  traefik_domain_name =
-                    Option.map
-                      (fun (tr : Config_file.traefik) -> tr.domain_name)
-                      config.traefik;
-                  traefik_image =
-                    Option.map
-                      (fun (tr : Config_file.traefik) -> tr.image)
-                      config.traefik;
-                  traefik_acme_email =
-                    Option.map
-                      (fun (tr : Config_file.traefik) -> tr.acme_email)
-                      config.traefik;
-                  registry_user = service.registry_user;
-                  registry_pass = service.registry_pass;
-                  force_traefik_redeploy = Some force_traefik_redeploy;
-                  cron_jobs =
-                    cron_jobs_for_server ip_address config.cron_jobs deployments;
-                  drain_grace_period =
-                    Option.map float_of_int service.drain_grace_period;
-                  deployment_strategy = service.deployment_strategy;
-                  health_timeout =
-                    Option.map float_of_int service.health_timeout;
-                  poll_interval = Option.map float_of_int service.poll_interval;
-                  logs = service.logs;
-                }
-              else
-                {
-                  service_name = None;
-                  image = None;
-                  port = None;
-                  env_vars = [];
-                  traefik_domain_name = None;
-                  traefik_image = None;
-                  traefik_acme_email = None;
-                  registry_user = None;
-                  registry_pass = None;
-                  force_traefik_redeploy = Some force_traefik_redeploy;
-                  cron_jobs =
-                    cron_jobs_for_server ip_address config.cron_jobs deployments;
-                  drain_grace_period = None;
-                  deployment_strategy = None;
-                  health_timeout = None;
-                  poll_interval = None;
-                  logs = None;
-                }
+              match service_and_tag with
+              | Some ((service : Config_file.user_service), tag) ->
+                  {
+                    service_name = Some service.name;
+                    image = Some (service.image ^ ":" ^ tag);
+                    port = Some service.port;
+                    env_vars = service.env_vars;
+                    traefik_domain_name =
+                      Option.map
+                        (fun (tr : Config_file.traefik) -> tr.domain_name)
+                        config.traefik;
+                    traefik_image =
+                      Option.map
+                        (fun (tr : Config_file.traefik) -> tr.image)
+                        config.traefik;
+                    traefik_acme_email =
+                      Option.map
+                        (fun (tr : Config_file.traefik) -> tr.acme_email)
+                        config.traefik;
+                    registry_user = service.registry_user;
+                    registry_pass = service.registry_pass;
+                    force_traefik_redeploy = Some force_traefik_redeploy;
+                    cron_jobs;
+                    drain_grace_period =
+                      Option.map float_of_int service.drain_grace_period;
+                    deployment_strategy = service.deployment_strategy;
+                    health_timeout =
+                      Option.map float_of_int service.health_timeout;
+                    poll_interval =
+                      Option.map float_of_int service.poll_interval;
+                    logs = service.logs;
+                  }
+              | None ->
+                  {
+                    service_name = None;
+                    image = None;
+                    port = None;
+                    env_vars = [];
+                    traefik_domain_name = None;
+                    traefik_image = None;
+                    traefik_acme_email = None;
+                    registry_user = None;
+                    registry_pass = None;
+                    force_traefik_redeploy = Some force_traefik_redeploy;
+                    cron_jobs;
+                    drain_grace_period = None;
+                    deployment_strategy = None;
+                    health_timeout = None;
+                    poll_interval = None;
+                    logs = None;
+                  }
             in
             let port =
               Option.value ~default:Bondi_common.Defaults.server_port
@@ -298,7 +390,8 @@ let run force_traefik_redeploy deployments =
       | Some (Error message) ->
           prerr_endline message;
           exit 1
-      | _ ->
+      | Some (Ok ())
+      | None ->
           List.iter
             (fun (server : Config_file.server) ->
               print_endline

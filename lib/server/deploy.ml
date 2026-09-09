@@ -1,5 +1,7 @@
 module Simple = Strategy.Simple
 
+let ( let* ) = Result.bind
+
 type deploy_response = {
   status : string;
   tag : string;
@@ -59,18 +61,27 @@ let registry_auth (input : Simple.deploy_input) =
       | Error _ -> None)
   | _ -> None
 
-(* Secrets never enter the crontab line -- Crontab.run_payload_of_cron_job does
-   not carry secret_env_vars, deliberately -- so they are placed on the box
-   here, at deploy time, and read back by Run when the job fires.
+(* Both of the job's files are placed on the box here, at deploy time, and read
+   back when the job fires: the run payload the crontab line points at, and the
+   secrets that payload deliberately does not carry --
+   Crontab.run_payload_of_cron_job omits secret_env_vars so that no credential
+   travels with the definition, and Run reads them from the env file instead.
 
    Every declared job is written even when it declares no secrets, so that
    withdrawing a credential truncates the file rather than leaving the last one
-   behind for the next run to pick up. *)
-let write_cron_secrets (cron_jobs : Simple.cron_job list option) :
+   behind for the next run to pick up.
+
+   Neither write is guarded here. The name that makes both paths safe is checked
+   in cron_plan, before anything on the box has moved; a check repeated here
+   would be a second answer to the same question, given after the deploy. *)
+let write_cron_files (cron_jobs : Simple.cron_job list option) :
     (unit, string) result =
   let write (c : Simple.cron_job) =
-    Cron_secrets.write_env_file ~name:c.name
-      (Option.value c.secret_env_vars ~default:[])
+    let* () =
+      Cron_secrets.write_env_file ~name:c.name
+        (Option.value c.secret_env_vars ~default:[])
+    in
+    Cron_secrets.write_run_file ~name:c.name (Crontab.run_payload_of_cron_job c)
   in
   List.fold_left
     (fun acc job ->
@@ -110,8 +121,6 @@ type deploy_action =
       container_id : string;
       restart_policy : Docker.Client.restart_policy;
     }
-
-let ( let* ) = Result.bind
 
 (* ------------------------------------------------------------------------- *)
 (* Phase 1: Plan (pure)                                                      *)
@@ -169,6 +178,40 @@ let cron_network_action (jobs : Simple.cron_job list) :
               (String.concat ", " offenders)
               shared shared))
 
+(* A job's name is interpolated into the path of its run file and its env file,
+   and into the crontab line that reads the first of them, so a name carrying a
+   separator or a leading dot could name its way out of the job's own directory.
+   Cron_secrets.write_run_file refuses such a name, but it refuses it while the
+   deploy is already running; the refusal belongs here, where nothing on the box
+   has moved yet and the caller can still be told the request was wrong.
+
+   Cron_secrets.is_valid_name is the check itself rather than a second copy of
+   its rule, so this cannot drift from the guard that actually protects the
+   path. Every offending job is named in one message, for the reason
+   cron_network_action gives.
+
+   Jobs are refused, never filtered: a plan that dropped the names it did not
+   like would write a section that does not match what was deployed, and say
+   nothing. *)
+let cron_name_check (jobs : Simple.cron_job list) :
+    (unit, Handler_error.t) result =
+  match
+    List.filter
+      (fun (job : Simple.cron_job) -> not (Cron_secrets.is_valid_name job.name))
+      jobs
+  with
+  | [] -> Ok ()
+  | offenders ->
+      Error
+        (Handler_error.Invalid_request
+           (Printf.sprintf
+              "cron job names must be safe to place in a file path (%s). A \
+               name must begin with a letter or a digit and may hold only \
+               letters, digits, '.', '_' and '-': rename these jobs in \
+               bondi.yaml"
+              (String.concat ", "
+                 (List.map (fun (job : Simple.cron_job) -> job.name) offenders))))
+
 let cron_plan (input : Simple.deploy_input) :
     (deploy_action list, Handler_error.t) result =
   match input.cron_jobs with
@@ -176,6 +219,7 @@ let cron_plan (input : Simple.deploy_input) :
   | Some [] ->
       Ok []
   | Some jobs ->
+      let* () = cron_name_check jobs in
       let* network_actions = cron_network_action jobs in
       Ok (network_actions @ [ PullCronImages jobs; UpsertCrontab (Some jobs) ])
 
@@ -259,14 +303,15 @@ let interpret ~clock ~client ~net (actions : deploy_action list) :
         let* () = pull_cron_images jobs in
         run rest
     | UpsertCrontab cron_jobs :: rest -> (
-        (* The secret files are written before the crontab, not after: a line
-           that fires against a missing file runs the job without its
+        (* The job's files are written before the crontab, not after: a line
+           that fires against a missing run file does not run the job at all,
+           and one that fires against a missing env file runs it without its
            credentials, which fails somewhere inside the container and reports
            as the job being broken. Writing first means the only ordering
            failure is a crontab that was not updated, which reports as itself. *)
-        match write_cron_secrets cron_jobs with
+        match write_cron_files cron_jobs with
         | Error msg ->
-            Error ("Deploy succeeded but writing cron secrets failed: " ^ msg)
+            Error ("Deploy succeeded but writing cron job files failed: " ^ msg)
         | Ok () -> (
             match Crontab.upsert cron_jobs with
             | Ok () -> run rest

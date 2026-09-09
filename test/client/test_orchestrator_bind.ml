@@ -88,6 +88,26 @@ let test_cron_jobs_imply_root_and_mount () =
   check bool "still loopback" true
     (contains ~needle:"-p 127.0.0.1:3030:3030" cmd)
 
+(* A cron job's payload and its secrets env file live under /etc/bondi/cron, and
+   the exec line the crontab holds reads the payload from there at every fire.
+   Without a host mount that directory is the container's writable layer, so the
+   stop/remove/run that setup performs on a version bump deletes every declared
+   job's definition and every job on the box stops running until a single deploy
+   names all of them. The path is spelled out rather than taken from
+   Cron_secrets.root because the mount and the writer must name the same path,
+   and through a shared constant this would pass for whatever the constant
+   became. Both sides of the colon are asserted for the same reason. *)
+let test_cron_jobs_mount_the_payload_directory () =
+  let cmd = ok_cmd (cfg ~cron_jobs:[ a_cron_job ] ()) in
+  check bool "mounts the payload directory from the host" true
+    (contains ~needle:"-v /etc/bondi/cron:/etc/bondi/cron" cmd);
+  (* The affirmative arm above passes against a mount added unconditionally.
+     A box with no cron jobs has nothing under that path and must not have the
+     host directory created for it. *)
+  let no_cron = ok_cmd (cfg ()) in
+  check bool "no payload mount without cron jobs" false
+    (contains ~needle:"/etc/bondi/cron" no_cron)
+
 (* setup must check what it got, not assume the run command took. *)
 let test_binding_assertion () =
   check bool "match" true
@@ -220,6 +240,8 @@ let () =
             test_no_token_env_when_unset;
           test_case "cron implies root + mount" `Quick
             test_cron_jobs_imply_root_and_mount;
+          test_case "cron mounts the payload directory" `Quick
+            test_cron_jobs_mount_the_payload_directory;
           test_case "run command declares restart policy" `Quick
             test_run_command_declares_restart_policy;
         ] );

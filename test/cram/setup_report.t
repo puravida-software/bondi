@@ -20,6 +20,7 @@ inspection says has a healthcheck to answer for. This host's checks pass.
   > case "$1" in
   >   *BONDI_ACME_PRESENT*) echo BONDI_ACME_PRESENT ;;
   >   'docker --version') echo 'Docker version 27.0.0, build deadbeef' ;;
+  >   *BONDI_CRON_DOCKER_PRESENT*) echo 'BONDI_CRON_DOCKER_PRESENT /usr/bin/docker' ;;
   >   'curl --version') echo 'curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0' ;;
   >   *BONDI_ORCHESTRATOR_SERVING*) echo BONDI_ORCHESTRATOR_SERVING ;;
   >   *"'--name' 'bondi-gateway'"*) echo 'a1b2c3d4e5f6' ;;
@@ -100,7 +101,8 @@ lines the run printed on its way there are unchanged.
   Processing server: 127.0.0.1
   Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 127.0.0.1
-  curl on server 127.0.0.1 supports the crontab command: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
+  cron on server 127.0.0.1 resolves docker at /usr/bin/docker
+  curl on server 127.0.0.1 can run the crontab lines an older bondi wrote: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
   ACME file permissions updated on server 127.0.0.1: /etc/traefik/acme/acme.json
   bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.10.3
   No alloy is configured for server 127.0.0.1: /etc/bondi/alloy is not on the host

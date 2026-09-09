@@ -12,6 +12,7 @@ let action_string = function
   | Setup.EnsureDocker -> "EnsureDocker"
   | Setup.EnsureAcmeFile -> "EnsureAcmeFile"
   | Setup.EnsureNetwork name -> "EnsureNetwork " ^ name
+  | Setup.RequireCronDocker -> "RequireCronDocker"
   | Setup.RequireCronCurl -> "RequireCronCurl"
   | Setup.StopOrchestrator -> "StopOrchestrator"
   | Setup.RemoveOrchestrator -> "RemoveOrchestrator"
@@ -36,6 +37,7 @@ let is_ensure_network = function
   | Setup.EnsureNetwork _ -> true
   | Setup.EnsureDocker
   | Setup.EnsureAcmeFile
+  | Setup.RequireCronDocker
   | Setup.RequireCronCurl
   | Setup.StopOrchestrator
   | Setup.RemoveOrchestrator
@@ -63,6 +65,7 @@ let joins_network = function
   | Setup.EnsureDocker
   | Setup.EnsureAcmeFile
   | Setup.EnsureNetwork _
+  | Setup.RequireCronDocker
   | Setup.RequireCronCurl
   | Setup.StopOrchestrator
   | Setup.RemoveOrchestrator
@@ -89,6 +92,7 @@ let is_managed = function
   | Setup.EnsureDocker
   | Setup.EnsureAcmeFile
   | Setup.EnsureNetwork _
+  | Setup.RequireCronDocker
   | Setup.RequireCronCurl
   | Setup.StopOrchestrator
   | Setup.RemoveOrchestrator
@@ -529,8 +533,9 @@ let test_ensure_docker_verdict_is_satisfied_when_installed () =
 (* Cron curl verdict                                                          *)
 (* ------------------------------------------------------------------------- *)
 
-(* The crontab line uses --fail-with-body, so setup checks the host's curl
-   before the orchestrator starts. That check reads a version string, and a
+(* The lines an older bondi wrote use --fail-with-body and keep firing until
+   each job is deployed again, so setup checks the host's curl before the
+   orchestrator starts. That check reads a version string, and a
    probe that never ran has no version string in it. Folding the transport's own
    error into curl's output told the operator that the host had reported
    "command failed (255): Connection closed by …" but 7.76.0 is required — a
@@ -602,6 +607,79 @@ let test_cron_curl_transport_failure_that_says_not_found_is_undetermined () =
   | Setup.Cron_curl_reported output ->
       failf "a probe that never ran is not curl's answer: %s" output
   | Setup.Cron_curl_undetermined _ -> ()
+
+(* ------------------------------------------------------------------------- *)
+(* Cron docker probe                                                          *)
+(* ------------------------------------------------------------------------- *)
+
+(* The generated crontab line invokes [docker exec] by bare name, and cron runs
+   a job with a minimal PATH rather than the login one every other probe here is
+   answered under. The probe asks the question cron would ask, under [env -i],
+   and it always exits 0 and says which -- so a connection that never opened is
+   not the host's report that cron cannot find docker. Read as one, setup would
+   refuse a perfectly good box, or -- with the arms the other way round -- pass
+   a box whose jobs all fail at their next fire. *)
+let test_cron_docker_probe_error_is_not_an_absent_docker () =
+  match Setup.cron_docker_state_of_probe (Error "the read failed") with
+  | Setup.Cron_docker_on_path path ->
+      failf "a probe that never ran did not resolve docker: %s" path
+  | Setup.Cron_docker_off_path ->
+      fail "a probe that never ran is not the host saying cron has no docker"
+  | Setup.Cron_docker_undetermined message ->
+      check bool "carries the read's own text" true
+        (Bondi_common.String_utils.contains ~needle:"the read failed" message)
+
+(* Both host answers, on the one builder. A verdict that is never [on_path]
+   would satisfy the absent assertion below, and one that is never [off_path]
+   would satisfy the present one. The present arm carries the path cron would
+   run, which is the fact an operator acts on when the two Docker installs
+   disagree. *)
+let test_cron_docker_probe_reports_what_the_host_resolved () =
+  (match
+     Setup.cron_docker_state_of_probe
+       (Ok "BONDI_CRON_DOCKER_PRESENT /usr/bin/docker\n")
+   with
+  | Setup.Cron_docker_on_path path ->
+      check string "the path cron's own PATH resolves" "/usr/bin/docker" path
+  | Setup.Cron_docker_off_path ->
+      fail "a host that resolved docker has not said cron cannot find it"
+  | Setup.Cron_docker_undetermined message ->
+      failf "a host that resolved docker has answered: %s" message);
+  match Setup.cron_docker_state_of_probe (Ok "BONDI_CRON_DOCKER_ABSENT\n") with
+  | Setup.Cron_docker_on_path path ->
+      failf "a host that resolved nothing has no path: %s" path
+  | Setup.Cron_docker_off_path -> ()
+  | Setup.Cron_docker_undetermined message ->
+      failf "a host saying cron cannot find docker has answered: %s" message
+
+(* An answer carrying neither marker is neither. The probe is the only thing
+   that can produce them, so output without one came from something else --
+   a banner, a shell profile, a wrapper -- and reading it as an answer decides
+   the host's cron against words nothing here wrote. *)
+let test_cron_docker_probe_without_a_marker_is_undetermined () =
+  match
+    Setup.cron_docker_state_of_probe (Ok "Welcome to Ubuntu 22.04 LTS\n")
+  with
+  | Setup.Cron_docker_on_path path -> failf "no marker, yet a path: %s" path
+  | Setup.Cron_docker_off_path -> fail "no marker is not an absence"
+  | Setup.Cron_docker_undetermined message ->
+      check bool "quotes what the host said" true
+        (Bondi_common.String_utils.contains ~needle:"Welcome to Ubuntu" message)
+
+(* The command asks the question cron would ask, not the one ssh would. Without
+   [env -i] the shell resolves the name against the login PATH, which is the
+   reading the Docker probe already has and the one this check exists to
+   distinguish from. *)
+let test_cron_docker_probe_command_clears_the_environment () =
+  let command = Setup.cron_docker_probe_command in
+  let says needle = Bondi_common.String_utils.contains ~needle command in
+  check bool "runs under an empty environment" true (says "env -i");
+  check bool "asks the shell to resolve the name" true
+    (says "command -v docker");
+  check bool "offers the present marker" true
+    (says Setup.cron_docker_present_marker);
+  check bool "offers the absent marker" true
+    (says Setup.cron_docker_absent_marker)
 
 (* ------------------------------------------------------------------------- *)
 (* ACME file probe                                                            *)
@@ -888,16 +966,17 @@ let test_plan_cron_only_no_acme () =
       [
         "EnsureDocker";
         "EnsureNetwork bondi-network";
+        "RequireCronDocker";
         "RequireCronCurl";
         "RunServer";
         "CleanAlloyConfig";
       ]
     actions
 
-(* The crontab command the orchestrator writes uses --fail-with-body, which an
-   older curl rejects as an unknown option. Verifying the host's curl at setup
-   turns that into one loud failure here rather than every scheduled job
-   failing at its next tick. The check precedes RunServer, so an unusable host
+(* The crontab lines an older bondi wrote use --fail-with-body, which an older
+   curl rejects as an unknown option, and they go on firing until each job is
+   deployed again. Verifying the host's curl at setup turns that into one loud
+   failure here rather than every surviving legacy job failing at its next tick. The check precedes RunServer, so an unusable host
    never gets an orchestrator that would write lines it cannot run. *)
 let test_plan_requires_curl_when_cron_jobs_declared () =
   let cron_job =
@@ -949,6 +1028,68 @@ let test_plan_omits_curl_check_without_cron_jobs () =
   in
   check bool "no curl requirement without cron jobs"
     (List.mem Setup.RequireCronCurl (plan config context))
+    false
+
+(* The crontab line invokes [docker exec] by bare name, and cron gives a job a
+   minimal PATH. A box whose docker sits outside it answers every probe setup
+   runs over ssh and still fails every scheduled job at its next fire, which is
+   the class of failure the setup-time gates exist to move forward. The check
+   precedes RunServer for the same reason the curl one does: a host that cannot
+   run the line never gets an orchestrator that would write it. *)
+let test_plan_requires_cron_docker_when_cron_jobs_declared () =
+  let cron_job =
+    {
+      Config_file.name = "backup";
+      Config_file.image = "backup:v1";
+      Config_file.schedule = "0 0 * * *";
+      Config_file.network = None;
+      Config_file.env_vars = None;
+      Config_file.secret_env_vars = None;
+      Config_file.registry_user = None;
+      Config_file.registry_pass = None;
+      Config_file.alert_sinks = None;
+      Config_file.exit_code_severities = None;
+      Config_file.server = minimal_server;
+    }
+  in
+  let config =
+    make_config ~user_service:None ~cron_jobs:(Some [ cron_job ])
+      ~version:"1.0.0" ()
+  in
+  let context =
+    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_probe:docker_present ()
+  in
+  let actions = plan config context in
+  let index_of target =
+    let rec find i = function
+      | [] -> None
+      | action :: rest -> if action = target then Some i else find (i + 1) rest
+    in
+    find 0 actions
+  in
+  match (index_of Setup.RequireCronDocker, index_of Setup.RunServer) with
+  | None, _ ->
+      fail
+        "a config declaring cron jobs must verify docker is on the PATH cron \
+         runs a job with"
+  | _, None -> fail "the plan must still run the server"
+  | Some cron_docker, Some server ->
+      check bool "the cron docker check precedes RunServer" true
+        (cron_docker < server)
+
+(* The affirmative arm above with the cron jobs removed: a host that runs no
+   cron jobs never sees a bondi crontab line, so what cron's PATH resolves is
+   not a prerequisite it owes. *)
+let test_plan_omits_cron_docker_check_without_cron_jobs () =
+  let config =
+    make_config ~user_service:(Some minimal_user_service) ~cron_jobs:None
+      ~version:"1.0.0" ()
+  in
+  let context =
+    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_probe:docker_present ()
+  in
+  check bool "no cron docker requirement without cron jobs"
+    (List.mem Setup.RequireCronDocker (plan config context))
     false
 
 let test_setup_plans_ensure_network () =
@@ -1828,6 +1969,21 @@ let () =
             test_plan_for_config_proceeds_when_probes_succeed;
         ] );
       ("order", [ test_case "action order" `Quick test_plan_action_order ]);
+      ( "cron docker",
+        [
+          test_case "required when cron jobs are declared" `Quick
+            test_plan_requires_cron_docker_when_cron_jobs_declared;
+          test_case "omitted without cron jobs" `Quick
+            test_plan_omits_cron_docker_check_without_cron_jobs;
+          test_case "a failed probe is not an absent docker" `Quick
+            test_cron_docker_probe_error_is_not_an_absent_docker;
+          test_case "resolved and unresolved are told apart" `Quick
+            test_cron_docker_probe_reports_what_the_host_resolved;
+          test_case "an answer with no marker is undetermined" `Quick
+            test_cron_docker_probe_without_a_marker_is_undetermined;
+          test_case "the command asks cron's question" `Quick
+            test_cron_docker_probe_command_clears_the_environment;
+        ] );
       ( "cron curl",
         [
           test_case "required when cron jobs are declared" `Quick

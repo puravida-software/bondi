@@ -18,7 +18,62 @@ default: build test fmt lint build-server-ci
 # Verification sits before the push for the same reason it does in the release
 # workflow: nothing reaches the registry that has not been shown to run.
 # Assumes bondi.yaml has a service named "bondi"
-docker-all TAG: (build-server TAG) (tag-server TAG) (verify-server-image TAG) (verify-server-image-negative TAG) (check-server-image TAG) (push-server TAG) (update-bondi-version TAG)
+docker-all TAG: (check-version-floor TAG) (build-server TAG) (tag-server TAG) (verify-server-image TAG) (verify-server-image-negative TAG) (check-server-image TAG) (push-server TAG) (update-bondi-version TAG)
+
+# A client refuses to write a cron line for a box whose orchestrator predates
+# the [run] subcommand that line invokes, and it decides that against a floor
+# compiled into the client. Publishing a tag below that floor is therefore not a
+# release with a small mistake in it: it is a release the client rejects on
+# every cron deploy in the estate, with a message telling the operator to pin a
+# version that does not exist. So the tag is checked against the floor before
+# anything is built, and again wherever bondi.yaml is rewritten.
+#
+# The floor is read out of the OCaml source that enforces it. A second copy of
+# the number here would be free to drift from the one that decides, which is the
+# whole failure this recipe exists to prevent. Only major and minor are compared,
+# matching what Server_version reads, so a suffixed tag such as 0.15.0-rc1 is
+# judged on its ordering rather than refused for its shape.
+check-version-floor TAG:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source_file=lib/client/server_version.ml
+    floor_major=$(sed -n 's/^let minimum_major = \([0-9][0-9]*\)$/\1/p' "$source_file")
+    floor_minor=$(sed -n 's/^let minimum_minor = \([0-9][0-9]*\)$/\1/p' "$source_file")
+    case "$floor_major:$floor_minor" in
+        *[!0-9:]*|:*|*:|*:*:*)
+            echo "error: could not read exactly one minimum_major and one minimum_minor" >&2
+            echo "       from $source_file. A release cannot be checked against a floor" >&2
+            echo "       that was not read, and a check that cannot justify its answer" >&2
+            echo "       fails rather than reporting one." >&2
+            exit 1
+            ;;
+    esac
+    tag={{ TAG }}
+    tag=${tag#v}
+    tag_major=${tag%%.*}
+    rest=${tag#*.}
+    if [ "$rest" = "$tag" ]; then
+        echo "error: cannot read a major.minor ordering from tag '{{ TAG }}'" >&2
+        exit 1
+    fi
+    tag_minor=${rest%%.*}
+    tag_minor=${tag_minor%%[!0-9]*}
+    case "$tag_major$tag_minor" in
+        ''|*[!0-9]*)
+            echo "error: cannot read a major.minor ordering from tag '{{ TAG }}'" >&2
+            exit 1
+            ;;
+    esac
+    if [ "$tag_major" -gt "$floor_major" ] \
+       || { [ "$tag_major" -eq "$floor_major" ] && [ "$tag_minor" -ge "$floor_minor" ]; }; then
+        exit 0
+    fi
+    echo "error: tag {{ TAG }} orders below $floor_major.$floor_minor.0, the floor" >&2
+    echo "       $source_file enforces before it will write a cron line." >&2
+    echo "       Publishing it makes every cron deploy fail against this release." >&2
+    echo "       Either number the release $floor_major.$floor_minor.0 or later, or" >&2
+    echo "       lower minimum_major/minimum_minor and re-run the tests." >&2
+    exit 1
 
 build-server TAG:
     docker build --load --build-arg VERSION={{ TAG }} -t {{ IMAGE_NAME }} .
@@ -112,7 +167,7 @@ test:
 fmt:
     opam exec -- dune fmt
 
-update-bondi-version TAG:
+update-bondi-version TAG: (check-version-floor TAG)
     sed -i "s/version: .*/version: {{ TAG }}/g" bondi.yaml
 
 server:

@@ -49,6 +49,27 @@ let planned_actions ~context input =
         (context ^ ": cron_plan failed: " ^ Handler_error.message err)
   | Ok actions -> List.map action_string actions
 
+(* The names UpsertCrontab carries, which is what the interpreter writes both
+   files from. action_string reports only how many there are, and a plan that
+   dropped one job and kept another of the same count would read as correct. *)
+let upsert_job_names ~context input =
+  match Deploy.cron_plan input with
+  | Error err ->
+      Alcotest.fail
+        (context ^ ": cron_plan failed: " ^ Handler_error.message err)
+  | Ok actions ->
+      List.concat_map
+        (fun action ->
+          match action with
+          | Deploy.UpsertCrontab (Some jobs) ->
+              List.map (fun (job : Simple.cron_job) -> job.name) jobs
+          | Deploy.UpsertCrontab None
+          | Deploy.EnsureCronNetwork
+          | Deploy.PullCronImages _
+          | Deploy.UpdateRestartPolicy _ ->
+              [])
+        actions
+
 let plan_error ~context input =
   match Deploy.cron_plan input with
   | Ok actions ->
@@ -270,6 +291,65 @@ let test_cron_plan_without_network_unchanged () =
     [ "PullCronImages"; "UpsertCrontab(1)" ]
     (planned_actions ~context:"job declaring no network" input)
 
+(* The job's name is interpolated into the path of the run file the crontab line
+   reads and into the path Cron_secrets writes beside it, so a name carrying a
+   separator or a leading dot could name its way out of its own directory. The
+   refusal belongs in the plan: deploy.mli says the cron plan is the one step
+   that may answer Invalid_request, and the interpreter that writes those files
+   carries no check of its own.
+
+   The accepted job in the same request is the affirmative arm — a message that
+   named every job would pass a "names the offender" check while telling the
+   operator nothing about which one to fix. *)
+let test_cron_plan_refuses_an_unsafe_job_name () =
+  let input =
+    {
+      minimal_input with
+      cron_jobs =
+        Some
+          [
+            cron_job_on_network ~name:"../etc/backup" ~network:None;
+            cron_job_on_network ~name:"report" ~network:None;
+          ];
+    }
+  in
+  let err = plan_error ~context:"a job named out of its directory" input in
+  Alcotest.check Alcotest.int "an unsafe job name answers 400" 400
+    (Dream.status_to_int (Handler_error.http_status err));
+  let msg = Handler_error.message err in
+  Alcotest.check Alcotest.bool
+    ("error names the offending job: " ^ msg)
+    true
+    (Bondi_common.String_utils.contains ~needle:"../etc/backup" msg);
+  Alcotest.check Alcotest.bool
+    ("error does not name the job it accepts: " ^ msg)
+    false
+    (Bondi_common.String_utils.contains ~needle:"report" msg)
+
+(* Every declared job reaches the action that writes the crontab and the run
+   files, in the order it was declared. The check added above is a refusal, not
+   a filter: a plan that dropped the jobs it did not like would leave the box
+   firing a section that does not match what was deployed, and it would do so
+   silently. The names here sit on the boundary of what Cron_secrets.is_valid_name
+   accepts — a dot, a hyphen, a digit — so a check that is stricter than the one
+   guarding the path fails this rather than passing unnoticed. *)
+let test_cron_plan_upsert_carries_every_declared_job () =
+  let declared = [ "db.backup-2"; "report"; "cleanup9" ] in
+  let input =
+    {
+      minimal_input with
+      cron_jobs =
+        Some
+          (List.map
+             (fun name -> cron_job_on_network ~name ~network:None)
+             declared);
+    }
+  in
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "every declared job reaches UpsertCrontab, in order" declared
+    (upsert_job_names ~context:"three declared jobs" input)
+
 (* The client emits this shape from its own deploy_cron_job type; the two are
    structural duplicates, so the wire key is pinned on both sides. *)
 let test_cron_job_decodes_network_from_wire () =
@@ -360,19 +440,22 @@ let test_deploy_input_decodes_alert_config () =
   check_alert_config ~context:"decoded deploy payload"
     ~alert_sinks:job.alert_sinks ~exit_code_severities:job.exit_code_severities
 
-(* The end of the path the defect broke: the sink URLs must reach the line the
-   orchestrator writes to the crontab, not merely the decoded record. *)
-let test_crontab_line_carries_alert_config_from_deploy_json () =
-  let line =
-    Crontab.entry_of_cron_job
-      (cron_job_from_deploy_json alerting_deploy_payload_json)
+(* The end of the path the defect broke: the sink URLs must reach the run
+   payload the orchestrator writes beside the crontab line, not merely the
+   decoded record. The crontab line itself no longer carries them -- that is
+   the point of the file -- so the payload is where this arm now looks. *)
+let test_run_payload_carries_alert_config_from_deploy_json () =
+  let payload =
+    Yojson.Safe.to_string
+      (Crontab.run_payload_of_cron_job
+         (cron_job_from_deploy_json alerting_deploy_payload_json))
   in
-  Alcotest.check Alcotest.bool "critical sink URL reaches the crontab line" true
+  Alcotest.check Alcotest.bool "critical sink URL reaches the run payload" true
     (Bondi_common.String_utils.contains ~needle:"https://pager.example.com/hook"
-       line);
-  Alcotest.check Alcotest.bool "failure sink URL reaches the crontab line" true
+       payload);
+  Alcotest.check Alcotest.bool "failure sink URL reaches the run payload" true
     (Bondi_common.String_utils.contains ~needle:"https://dash.example.com/hook"
-       line)
+       payload)
 
 let alerting_config_cron_job () : Client_config.cron_job =
   let sink url =
@@ -414,8 +497,11 @@ let alerting_config_cron_job () : Client_config.cron_job =
    literal and no field name written down in between, so a rename or a dropped
    field on either side fails this by construction. The two tests above cannot
    have that property — they start from bytes the client has already produced,
-   which is where the original defect was invisible. *)
-let test_config_to_crontab_payload_carries_alert_config () =
+   which is where the original defect was invisible.
+
+   No failure below prints the payload. It is the job, and a test failure is
+   read in CI logs and in a terminal that scrolls into a scrollback file. *)
+let test_config_to_run_payload_carries_alert_config () =
   let wire =
     Client_deploy.cron_job_to_deploy
       (alerting_config_cron_job ())
@@ -423,25 +509,16 @@ let test_config_to_crontab_payload_carries_alert_config () =
   in
   let encoded = Client_deploy.deploy_cron_job_to_yojson wire in
   match Simple.cron_job_of_yojson encoded with
-  | Error msg ->
-      Alcotest.fail
-        (Printf.sprintf
-           "server rejected the client's cron job: %s; the client emitted: %s"
-           msg
-           (Yojson.Safe.to_string encoded))
+  | Error _ -> Alcotest.fail "the server rejected the client's cron job"
   | Ok (job : Simple.cron_job) -> (
-      let line = Crontab.entry_of_cron_job job in
-      match Crontab.json_from_cron_line line with
-      | None -> Alcotest.fail "no JSON payload in the emitted crontab line"
-      | Some json -> (
-          match Run.run_payload_of_yojson json with
-          | Error msg ->
-              Alcotest.fail ("run payload rejected the cron line: " ^ msg)
-          | Ok (payload : Run.run_payload) ->
-              check_alert_config
-                ~context:"config through the wire to the crontab payload"
-                ~alert_sinks:payload.alert_sinks
-                ~exit_code_severities:payload.exit_code_severities))
+      match Run.run_payload_of_yojson (Crontab.run_payload_of_cron_job job) with
+      | Error _ ->
+          Alcotest.fail "the run decoder rejected the generated run payload"
+      | Ok (payload : Run.run_payload) ->
+          check_alert_config
+            ~context:"config through the wire to the run payload"
+            ~alert_sinks:payload.alert_sinks
+            ~exit_code_severities:payload.exit_code_severities)
 
 let test_cron_plan_no_cron_jobs () =
   Alcotest.check
@@ -706,6 +783,10 @@ let () =
             test_cron_plan_rejects_every_unknown_network;
           Alcotest.test_case "no network declared is unchanged" `Quick
             test_cron_plan_without_network_unchanged;
+          Alcotest.test_case "refuses an unsafe job name" `Quick
+            test_cron_plan_refuses_an_unsafe_job_name;
+          Alcotest.test_case "upsert carries every declared job" `Quick
+            test_cron_plan_upsert_carries_every_declared_job;
         ] );
       ( "failure status",
         [
@@ -722,10 +803,10 @@ let () =
             test_cron_job_decodes_absent_network;
           Alcotest.test_case "decodes alert config" `Quick
             test_deploy_input_decodes_alert_config;
-          Alcotest.test_case "crontab line carries alert config" `Quick
-            test_crontab_line_carries_alert_config_from_deploy_json;
-          Alcotest.test_case "config through wire to crontab payload" `Quick
-            test_config_to_crontab_payload_carries_alert_config;
+          Alcotest.test_case "run payload carries alert config" `Quick
+            test_run_payload_carries_alert_config_from_deploy_json;
+          Alcotest.test_case "config through wire to run payload" `Quick
+            test_config_to_run_payload_carries_alert_config;
         ] );
       ( "response",
         [

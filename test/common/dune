@@ -5,6 +5,7 @@
   test_defaults
   test_alloy_river
   test_managed_container
+  test_cron_exec_line
   test_alert
   test_test_helpers)
  (libraries alcotest bondi.common test_helpers unix))

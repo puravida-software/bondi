@@ -34,7 +34,7 @@ let test_rejects_the_release_below_the_minimum () =
 
 (* Debian 11 and Ubuntu 20.04 are the hosts this guard exists for: both ship a
    curl that would reject --fail-with-body as an unknown option, breaking every
-   cron job at once rather than at setup. *)
+   job still running on a legacy line at once rather than at setup. *)
 let test_rejects_the_versions_this_guard_exists_for () =
   ignore (rejection "curl 7.74.0 (x86_64-pc-linux-gnu) libcurl/7.74.0");
   ignore (rejection "curl 7.68.0 (x86_64-pc-linux-gnu) libcurl/7.68.0")

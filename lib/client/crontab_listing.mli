@@ -6,11 +6,26 @@
     never written at all looks identical to one whose jobs all succeeded.
 
     Everything this module returns is a count, a job's name, or a position.
-    Never a command line and never any part of one. The spool file holds every
-    scheduled job's API secret in plaintext, inside the payload each line hands
-    to curl, so a value quoting a line it read would put those secrets into
-    standard output, into the operator's scrollback, and into every log and
+    Never a command line and never any part of one.
+
+    The section holds two line shapes and the rule covers both. The shape the
+    orchestrator writes now is a [docker exec] carrying a schedule, a command
+    and the path of the job's run file, and it holds no secret at all: the job's
+    values live in that file, beside the line rather than in it. The legacy
+    shape carries the whole job as a single-quoted JSON argument to [curl],
+    including its API secrets in plaintext, and every crontab in the estate
+    still holds those. So the rule is not that a line is dangerous. It is that
+    this module cannot tell which shape it is holding until it has read the
+    line, which means the only guarantee it can offer is one that does not
+    depend on knowing. A value quoting a line it read would put those secrets
+    into standard output, into the operator's scrollback, and into every log and
     transcript of the run.
+
+    A job's name is the one thing that leaves, and for a new-shape line the name
+    is in the path or it is nowhere. It is taken from that path and then the
+    path is rebuilt from it, and the line is named only when the two are the
+    same string — so what is reported is a name some valid job produces, and
+    never a fragment of whatever path a hand-edited line happened to carry.
 
     {!Section}, {!No_section} and {!Malformed} cannot carry a line by
     construction. {!Unreadable} is the one that could: the string it is given is

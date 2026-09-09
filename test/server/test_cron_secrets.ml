@@ -70,6 +70,36 @@ let test_write_refuses_unsafe_name () =
       check bool "explains itself" true
         (Bondi_common.String_utils.contains ~needle:"unsafe" msg)
 
+(* The run payload's file is the job definition the crontab line points at. *)
+let test_run_file_path_shape () =
+  check string "run file" "/etc/bondi/cron/sotm/run.json"
+    (Cron_secrets.run_file_of "sotm")
+
+(* The two files are the job's whole on-disk definition and are written by the
+   same deploy step. A run file that landed anywhere but beside the env file
+   would be written in one place and looked for in another when cron fired. *)
+let test_run_file_is_env_sibling () =
+  let env = Cron_secrets.env_file_of "levtra-paper" in
+  let run = Cron_secrets.run_file_of "levtra-paper" in
+  check string "same directory" (Filename.dirname env) (Filename.dirname run);
+  check bool "and not the same file" true (env <> run)
+
+(* The name check runs before any I/O, which is why the rejection arm needs no
+   filesystem. The second assertion is the one that matters for a secret: the
+   error names a path and never the payload, because this text is returned over
+   HTTP and mailed by cron, and the payload is what the file exists to hide. *)
+let test_write_run_file_refuses_unsafe_name () =
+  match
+    Cron_secrets.write_run_file ~name:"../../etc/cron.d/evil"
+      (`Assoc [ ("image", `String "ghcr.io/acme/job:sha-deadbeef") ])
+  with
+  | Ok () -> fail "a traversing name must be refused before any write"
+  | Error msg ->
+      check bool "explains itself" true
+        (Bondi_common.String_utils.contains ~needle:"unsafe" msg);
+      check bool "carries no payload" false
+        (Bondi_common.String_utils.contains ~needle:"deadbeef" msg)
+
 let test_read_absent_is_empty () =
   check pairs "an absent file is not an error" []
     (Cron_secrets.read_env_file "definitely-not-a-real-job-xyz")
@@ -95,6 +125,12 @@ let () =
           test_case "path shape" `Quick test_path_shape;
           test_case "write refuses unsafe name" `Quick
             test_write_refuses_unsafe_name;
+          test_case "run file sits in the job's directory" `Quick
+            test_run_file_path_shape;
+          test_case "run file and env file are siblings" `Quick
+            test_run_file_is_env_sibling;
+          test_case "write refuses an unsafe name for the run file" `Quick
+            test_write_run_file_refuses_unsafe_name;
           test_case "read absent" `Quick test_read_absent_is_empty;
         ] );
     ]

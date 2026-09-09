@@ -123,7 +123,7 @@ let job_name_of_payload payload =
       None
   | exception Yojson.Json_error _ -> None
 
-let job_name_of_line line =
+let job_name_of_legacy_line line =
   match Bondi_common.String_utils.index_of ~needle:payload_prefix line with
   | None -> None
   | Some from -> (
@@ -131,10 +131,34 @@ let job_name_of_line line =
       | None -> None
       | Some argument -> job_name_of_payload (unescape_shell_quotes argument))
 
+(* The shape the orchestrator writes now: a schedule, a docker exec into it, and
+   the path of the job's run file. The line carries nothing else, so the name is
+   in the path or it is nowhere.
+
+   The reader is Bondi_common.Cron_exec_line's rather than a second copy of it.
+   The client may not depend on bondi_server — which is why the legacy shape's
+   "-d '" is written out above — but both libraries depend on bondi_common, so
+   the marker the server writes and the marker this looks for are one string and
+   the two cannot drift.
+
+   That reader re-derives the path from the name taken out of it and accepts the
+   line only when the two are the same string. A hand-edited line reading
+   ../../passwd/run.json therefore names nothing rather than reporting a job
+   called "passwd": what leaves this module is a name some valid job produces,
+   never a fragment of whatever path the line happened to carry. *)
+let job_name_of_exec_line = Bondi_common.Cron_exec_line.job_name_of
+
+(* Both shapes are tried, and the one this reads before the other is the one
+   nothing on a box will hold much longer. A line is only ever of one shape:
+   the exec line carries no -d argument and the legacy line carries no exec
+   marker. *)
 let entry_of_line ~position line =
-  match job_name_of_line line with
+  match job_name_of_exec_line line with
   | Some name -> Named name
-  | None -> Unnamed { position }
+  | None -> (
+      match job_name_of_legacy_line line with
+      | Some name -> Named name
+      | None -> Unnamed { position })
 
 let rec scan lines ~inside ~seen_section ~position ~entries =
   match lines with

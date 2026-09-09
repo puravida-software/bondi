@@ -316,6 +316,86 @@ let test_deploy_payload_includes_logs_flag () =
   in
   check (option bool) "logs survives JSON round-trip" (Some false) decoded.logs
 
+(* cron_version_gate *)
+
+(* The gate protects the exec-shaped crontab line: a box whose orchestrator
+   predates the [run] subcommand would take the line happily and fail at its
+   next fire, at whatever hour that is. The refusal has to arrive before the
+   deploy is posted, so the decision is made from the box's reported version
+   rather than from anything the server answers. *)
+let test_cron_deploy_against_an_under_version_box_is_refused () =
+  let jobs =
+    Deploy.cron_jobs_for_server "1.2.3.4"
+      (Some [ mk_cron_job "backup" "1.2.3.4" ])
+      [ ("backup", "v1") ]
+  in
+  let read_version () = Ok "0.12.0" in
+  match Deploy.cron_version_gate ~read_version jobs with
+  | Ok () -> Alcotest.fail "expected a cron-declaring deploy to be refused"
+  | Error msg ->
+      check bool
+        ("the refusal names what the box reported: " ^ msg)
+        true
+        (Bondi_common.String_utils.contains ~needle:"0.12.0" msg)
+
+(* A deploy with no cron jobs on this server writes no crontab line, so there is
+   nothing for the version to gate -- and consulting the box anyway would make
+   every service-only deploy pay for a question nobody asked. The reader here
+   fails if it is called at all. *)
+let test_deploy_without_cron_jobs_is_not_gated () =
+  let read_version () = Error "the box was consulted" in
+  match Deploy.cron_version_gate ~read_version None with
+  | Ok () -> ()
+  | Error msg -> Alcotest.fail ("expected no gate, got: " ^ msg)
+
+(* [Some []] is not a shape [cron_jobs_for_server] produces, but it is a shape
+   the gate accepts, and it writes no crontab line either -- so the reader must
+   stay unasked for it too. *)
+let test_deploy_with_an_empty_cron_list_is_not_gated () =
+  let read_version () = Error "the box was consulted" in
+  match Deploy.cron_version_gate ~read_version (Some []) with
+  | Ok () -> ()
+  | Error msg -> Alcotest.fail ("expected no gate, got: " ^ msg)
+
+(* The arm the gate exists to let through: cron jobs declared *and* a box
+   carrying the [run] subcommand, so the deploy proceeds. Refusing an
+   under-version box and skipping a service-only deploy are both satisfied by an
+   implementation that reads the version and then refuses whatever it read, so
+   without this case nothing establishes that anyone can deploy a cron job at
+   all. *)
+let test_cron_deploy_against_a_supported_box_proceeds () =
+  let jobs =
+    Deploy.cron_jobs_for_server "1.2.3.4"
+      (Some [ mk_cron_job "backup" "1.2.3.4" ])
+      [ ("backup", "v1") ]
+  in
+  let read_version () = Ok Bondi_client.Server_version.minimum_for_exec_lines in
+  match Deploy.cron_version_gate ~read_version jobs with
+  | Ok () -> ()
+  | Error msg ->
+      Alcotest.fail ("expected a supported box to be deployed to: " ^ msg)
+
+(* [reported_orchestrator_version] is the reader the gate is handed in
+   production, and for a server with no [ssh] block nothing is ever spawned: the
+   refusal comes from the configuration rather than from a host. The refusal
+   itself stands -- an unreadable box is deliberately not deployed to -- but it
+   has to send the operator to bondi.yaml rather than to the network. *)
+let test_a_server_without_an_ssh_block_is_told_so () =
+  let server : Config_file.server =
+    { ip_address = "1.2.3.4"; ssh = None; port = None }
+  in
+  match Deploy.reported_orchestrator_version server with
+  | Ok version -> Alcotest.fail ("expected a refusal, got: " ^ version)
+  | Error msg ->
+      check bool
+        ("the refusal names the missing ssh: block: " ^ msg)
+        true
+        (Bondi_common.String_utils.contains ~needle:"ssh:" msg);
+      check bool
+        ("the refusal is not worded as a failed read: " ^ msg)
+        false
+        (Bondi_common.String_utils.contains ~needle:"could not be read" msg)
+
 let () =
   run "Deploy_helpers"
     [
@@ -356,6 +436,21 @@ let () =
             test_deploy_wire_keys_for_alert_config;
           test_case "omits alert fields when unconfigured" `Quick
             test_deploy_wire_omits_alert_fields_when_unconfigured;
+        ] );
+      ( "cron_version_gate",
+        [
+          test_case
+            "a cron-declaring deploy against an under-version box is refused"
+            `Quick test_cron_deploy_against_an_under_version_box_is_refused;
+          test_case "a deploy declaring no cron jobs is not gated" `Quick
+            test_deploy_without_cron_jobs_is_not_gated;
+          test_case "a deploy with an empty cron list is not gated" `Quick
+            test_deploy_with_an_empty_cron_list_is_not_gated;
+          test_case "a cron-declaring deploy against a supported box proceeds"
+            `Quick test_cron_deploy_against_a_supported_box_proceeds;
+          test_case
+            "a server with no ssh block is told that, not that a read failed"
+            `Quick test_a_server_without_an_ssh_block_is_told_so;
         ] );
       ( "deploy_payload",
         [

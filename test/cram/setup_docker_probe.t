@@ -5,9 +5,9 @@ on the second used to be read as "Docker is not installed" and answered by
 piping get.docker.com into root's shell, which restarts the daemon and every
 container with it — on a host whose Docker was already current.
 
-Every probe the first three arms cover is the same shape: a command that could
+Every probe the first four arms cover is the same shape: a command that could
 not be run at all is not the host's answer to what it was asked. They are the
-three places setup asks something of a host and can be told nothing. The fourth
+four places setup asks something of a host and can be told nothing. The fifth
 arm is the opposite case — the host ran the probe and failed — and it is here
 because the two arrive on the same channel and are reported by the same
 sentence.
@@ -50,6 +50,9 @@ only have stopped on the probe that arm broke.
   >     [ -n "$ACME_DROPS" ] && drop
   >     [ -n "$ACME_HALF_ANSWERS" ] && half_answered
   >     echo BONDI_ACME_PRESENT ;;
+  >   *BONDI_CRON_DOCKER_PRESENT*)
+  >     [ -n "$CRON_DOCKER_DROPS" ] && drop
+  >     echo 'BONDI_CRON_DOCKER_PRESENT /usr/bin/docker' ;;
   >   'curl --version')
   >     [ -n "$CURL_DROPS" ] && drop
   >     echo 'curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0' ;;
@@ -134,8 +137,64 @@ stopped earlier.
   0
   [1]
 
-The curl probe is the same shape. The crontab line uses --fail-with-body and an
-older curl rejects it as unknown, so setup reads the version before the
+The cron docker probe is the same shape. The crontab line runs `docker exec` by
+bare name and cron resolves it against its own PATH, so setup asks the host what
+that PATH resolves — under `env -i`, which is a different question from the
+Docker probe above and can be answered by a different host. A read that never
+happened resolves nothing, and reading it as nothing would refuse a box whose
+cron is perfectly able to run the line.
+
+  $ : > "$SSH_ARGV_LOG"
+  $ echo 0 > "$DOCKER_PROBES"
+  $ unset DOCKER_DROPS_SECOND
+  $ export CRON_DOCKER_DROPS=1
+  $ cat > bondi.yaml <<'EOF'
+  > service:
+  >   name: my-service
+  >   image: acme/app
+  >   port: 8080
+  >   env_vars: {}
+  >   servers:
+  >     - ip_address: 127.0.0.1
+  >       port: 9
+  >       ssh:
+  >         user: deploy
+  >         private_key_contents: "not-a-real-key"
+  >         private_key_pass: ""
+  > bondi_server:
+  >   version: "0.10.1"
+  > cron_jobs:
+  >   - name: daily-close
+  >     image: example.com/daily-close
+  >     schedule: "0 6 * * *"
+  >     server:
+  >       ip_address: 127.0.0.1
+  >       port: 9
+  >       ssh:
+  >         user: deploy
+  >         private_key_contents: "not-a-real-key"
+  >         private_key_pass: ""
+  > EOF
+  $ bondi-client setup > out.log 2>&1
+  [1]
+  $ grep -A1 '^Error:' out.log
+  Error: could not read whether cron can find docker on the server, so setup will not act on whether it can run the crontab line: command failed (255): Connection closed by 10.0.0.1 port 22
+  setup stopped part-way through the cron docker phase on server 127.0.0.1, so these phases did not run: cron curl, ACME file, orchestrator, alloy.
+
+The affirmative arm is the probe count again: the host was asked what cron
+resolves, so the refusal below is setup declining to act on an answer it never
+got rather than a run that stopped before reaching the question.
+
+  $ grep -c 'command -v docker' ssh-argv.log
+  1
+  $ grep -c 'name bondi-orchestrator' ssh-argv.log
+  0
+  [1]
+  $ unset CRON_DOCKER_DROPS
+
+The curl probe is the same shape. The lines an older bondi wrote use
+--fail-with-body and an older curl rejects it as unknown, so setup reads the
+version before the
 orchestrator starts — and a read that never happened has no version in it. Its
 text used to be handed to the version comparison as though curl had printed it,
 so the operator was told the host reported "command failed (255): Connection
