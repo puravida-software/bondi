@@ -28,10 +28,13 @@ type row = {
 
 type component = { name : string; observation : observation }
 
-(* The names the setup phase gives the components it installs. The orchestrator
-   is here unconditionally: every configuration has one, and a row for it that
-   depended on anything would be missing on the run that needs it most. *)
-let orchestrator_container_name = "bondi-orchestrator"
+(* The names the setup phase gives the components it installs. The orchestrator's
+   is not spelled here: it is the name the crontab line execs into as well, so it
+   comes from the module both libraries read it from, where a rename cannot reach
+   one caller and leave this one naming a container no host has. It is listed
+   below unconditionally: every configuration has an orchestrator, and a row for
+   it that depended on anything would be missing on the run that needs it most.
+*)
 let traefik_container_name = "bondi-traefik"
 let alloy_container_name = "bondi-alloy"
 
@@ -71,7 +74,7 @@ let managed_components (config : Config_file.t) =
 let declared_components config =
   service_components config
   @ cron_job_components config
-  @ [ (orchestrator_container_name, Infrastructure) ]
+  @ [ (Bondi_common.Cron_exec_line.orchestrator_container, Infrastructure) ]
   @ traefik_components config
   @ alloy_components config
   @ managed_components config
@@ -270,6 +273,7 @@ type server_report = {
   address : string;
   rows : row list;
   crontab : Crontab_listing.t;
+  payloads : Cron_payload.listing;
   warnings : string list;
 }
 
@@ -465,12 +469,13 @@ let section title rows =
       ([ title; table_header ] @ List.concat_map row_lines rows) @ [ "" ]
 
 let entry_cell = function
-  | Crontab_listing.Named { job; shape = _ } -> job
+  | Crontab_listing.Named job -> job
   | Crontab_listing.Unnamed { position } ->
       Printf.sprintf "entry %d could not be read" position
 
-(* Counts, job names and positions. Never a line and never part of one: the
-   spool file holds every job's API secret in plaintext. *)
+(* Counts, job names and positions. An entry the reader could not name is
+   located rather than rendered: the position is what sends an operator to the
+   line, and the line itself is not what a cell of this table is for. *)
 let crontab_cell = function
   | Crontab_listing.Section { entries = [] } -> "0 jobs"
   | Crontab_listing.Section { entries } ->
@@ -486,13 +491,40 @@ let crontab_cell = function
   | Crontab_listing.Unreadable message ->
       "not read: " ^ Bondi_common.String_utils.single_line message
 
-let crontab_section listing =
-  [
-    "Crontab";
-    Printf.sprintf "  %-22s %-7s %s" "bondi section" host_side.label
-      (crontab_cell listing);
-    "";
-  ]
+(* What the crontab section says about the payload directory, and what the
+   directory says back. The two are compared here rather than each being
+   reported on its own because neither one alone is a fact about the host's cron
+   state: a line with no files fires and fails, and files with no line never
+   fire at all, and only the pair says which of those happened.
+
+   The lines sit beneath the section's own cell rather than under a heading of
+   their own -- a reader who has just been told the section holds one job is the
+   reader who needs to know its files are gone -- and their wording is
+   [Cron_payload]'s. A second wording for the same fact is the duplication one
+   report exists to remove, and the same sentences are what [setup] prints when
+   it preserves the directory.
+
+   The whole section outcome is handed over and not a list of names. A section
+   nobody read yields no comparison in either direction, and collapsing it to
+   "no jobs" would report every job in the directory as having no line firing
+   it, on the strength of a read that never happened. A section read whole and
+   one holding an entry nobody could name are a second such pair, and the cell
+   printed directly above these lines already tells them apart -- so the
+   sentences beneath it are worded from the same outcome the cell was, rather
+   than from a projection that has dropped what the cell just said. *)
+let crontab_findings ~server ~crontab ~payloads =
+  Cron_payload.report ~server ~crontab payloads
+
+let crontab_section ~server ~crontab ~payloads =
+  ([
+     "Crontab";
+     Printf.sprintf "  %-22s %-7s %s" "bondi section" host_side.label
+       (crontab_cell crontab);
+   ]
+  @ List.map
+      (fun finding -> "  " ^ finding)
+      (crontab_findings ~server ~crontab ~payloads))
+  @ [ "" ]
 
 let warnings_section warnings =
   match warnings with
@@ -505,7 +537,8 @@ let server_lines report =
   @ section "Service" (of_kind Service report.rows)
   @ section "Cron Jobs" (of_kind Cron_job report.rows)
   @ section "Infrastructure" (of_kind Infrastructure report.rows)
-  @ crontab_section report.crontab
+  @ crontab_section ~server:report.address ~crontab:report.crontab
+      ~payloads:report.payloads
   @ warnings_section report.warnings
 
 let render_table reports =
@@ -561,11 +594,21 @@ let row_json (row : row) =
       ("orchestrator", source_json row.orchestrator);
     ]
 
-let crontab_json listing =
+(* The same findings the table prints, in the same order and the same words. A
+   consumer of this form must not be told the host is healthy while the table
+   says otherwise, and an empty list is what says the two sources agreed and
+   both were read -- which is why the field is always present rather than
+   appearing only when there is something to say. *)
+let crontab_json ~server ~crontab ~payloads =
   `Assoc
     [
-      ("summary", `String (crontab_cell listing));
-      ("job_count", optional_int (Crontab_listing.job_count listing));
+      ("summary", `String (crontab_cell crontab));
+      ("job_count", optional_int (Crontab_listing.job_count crontab));
+      ( "findings",
+        `List
+          (List.map
+             (fun finding -> `String finding)
+             (crontab_findings ~server ~crontab ~payloads)) );
     ]
 
 let server_json report =
@@ -576,7 +619,9 @@ let server_json report =
         ("cron_jobs", `List (List.map row_json (of_kind Cron_job report.rows)));
         ( "infrastructure",
           `List (List.map row_json (of_kind Infrastructure report.rows)) );
-        ("crontab", crontab_json report.crontab);
+        ( "crontab",
+          crontab_json ~server:report.address ~crontab:report.crontab
+            ~payloads:report.payloads );
         ( "errors",
           `List (List.map (fun warning -> `String warning) report.warnings) );
       ] )

@@ -15,12 +15,18 @@
     reported about a job both come from what the deploy wrote.
 
     The shape it no longer writes is a legacy [curl] line, which carries the
-    whole job as a single-quoted JSON argument. Every crontab in the estate
-    still holds these and they still fire, so they must still read.
-    {!json_from_cron_line} and the two extractors above it answer them by
-    recovering that JSON from the line rather than by splitting on whitespace.
-    They are readers only; nothing generates this shape any more, and their
-    deletion is a later change than this one.
+    whole job as a single-quoted JSON argument. Such a line is live and must
+    still read: {!merge_bondi_section} replaces a job's entry whichever shape
+    held it, so a host sits in that state between a deploy and the rewrite that
+    migrates it. What is bounded is how many remain, not whether one can be met
+    — [observed] 2026-09-09, a read of all three boxes in the estate found zero
+    legacy lines, which is one day's reading of three hosts and not a claim that
+    the shape is gone.
+
+    {!json_from_cron_line} and the two extractors above it answer such a line by
+    recovering that JSON from it rather than by splitting on whitespace. They
+    are readers only; nothing generates this shape any more, and their deletion
+    is a later change than this one.
 
     A line neither reader can resolve is {!Unreadable}, which carries its
     position in the section and never the line. That distinction is the module's
@@ -91,12 +97,20 @@ val generate_bondi_entries : Strategy.Simple.cron_job list -> string list
 
 val json_from_cron_line : string -> Yojson.Safe.t option
 (** Recover the JSON payload embedded in a legacy [curl] line — the shape Bondi
-    wrote before the payload moved to a file, still present in every crontab in
-    the estate. [None] when the line carries no payload or the payload does not
-    parse, which is what a line from {!entry_of_cron_job} returns.
+    wrote before the payload moved to a file. [None] when the line carries no
+    payload or the payload does not parse, which is what a line from
+    {!entry_of_cron_job} returns.
 
-    The grammar is {!Bondi_common.Cron_legacy_line}'s, so this and the client's
-    reader of the same lines answer alike; this adds the parse. *)
+    Such a line is live, and this reader is part of why: {!merge_bondi_section}
+    replaces a job's entry whichever shape held it, which it could not do
+    without reading the legacy shape first, so a host sits in that state between
+    a deploy and the rewrite that migrates it. What is bounded is how many
+    remain, not whether one can be met — [observed] 2026-09-09, a read of all
+    three boxes in the estate found zero legacy lines, which is one day's
+    reading of three hosts and not a claim that the shape is gone.
+
+    The grammar is {!Bondi_common.Cron_legacy_line}'s, which is where it is
+    spelled once for every reader of it; this adds the parse. *)
 
 val job_name_from_cron_line : string -> string option
 (** The job name from a crontab line's embedded payload, or [None] when the line

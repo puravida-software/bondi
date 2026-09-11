@@ -39,12 +39,20 @@ inspection says has a healthcheck to answer for. This host's checks pass.
   >     echo BONDI_CRONTAB_CONTENTS
   >     echo '# BEGIN BONDI CRON'
   >     echo "0 6 * * * curl -s -X POST -d '{\"job\":\"daily-close\",\"secret\":\"s3cr3t\"}' http://127.0.0.1:3030/api/v1/run"
-  >     echo '# END BONDI CRON' ;;
+  >     echo '# END BONDI CRON'
+  >     echo BONDI_CRONTAB_END ;;
   >   *'PortBindings'*) echo '127.0.0.1' ;;
   >   # The host's applied restart policy. Without this arm the command falls
   >   # through to *) and answers nothing, which setup reads as a refusal to
   >   # report rather than as agreement.
   >   *'RestartPolicy'*) echo unless-stopped ;;
+  >   # The payload directory the crontab section is compared against. Without
+  >   # this arm the command falls through to *) and answers nothing, which is a
+  >   # listing that never happened rather than a directory that is empty -- and
+  >   # the report says so, correctly, in a fixture that is about something else.
+  >   *BONDI_CRON_PAYLOAD_LISTED*)
+  >     echo BONDI_CRON_PAYLOAD_LISTED
+  >     echo BONDI_CRON_PAYLOAD_END ;;
   >   *) : ;;
   > esac
   > STUB
@@ -131,7 +139,7 @@ lines the run printed on its way there are unchanged.
                            orch    not reachable: <detail>
   
   Crontab
-    bondi section          docker  1 jobs (daily-close)
+    bondi section          docker  1 jobs (entry 1 could not be read)
 
 
 A converged run still exits zero. The report is additive: it does not change what
@@ -163,8 +171,10 @@ source's own account of why it has nothing.
 
 Nothing the report printed carries a line of the crontab, or any part of one. The
 fixture's payload holds a secret precisely so this assertion has something to
-catch, and the table above naming the job it belongs to is what proves the
-section was read at all.
+catch. The line is one nothing writes any more and the reader no longer
+understands, so the table above counts it and gives its position instead of a
+name -- and that count is what proves the section was read at all rather than
+silently skipped.
 
   $ grep -c 's3cr3t' out.log
   0

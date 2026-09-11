@@ -16,10 +16,10 @@ let action_string = function
   | Setup.EnsureNetwork name -> "EnsureNetwork " ^ name
   | Setup.RequireCronDocker -> "RequireCronDocker"
   | Setup.RequireCronCurl -> "RequireCronCurl"
-  | Setup.PreserveCronPayloads { jobs } ->
-      "PreserveCronPayloads "
-      ^ String.concat ","
-          (List.map (fun (named : Crontab_listing.named_job) -> named.job) jobs)
+  | Setup.PreserveCronPayloads { crontab } -> (
+      match Crontab_listing.jobs_read crontab with
+      | None -> "PreserveCronPayloads (no section read)"
+      | Some jobs -> "PreserveCronPayloads " ^ String.concat "," jobs)
   | Setup.StopOrchestrator -> "StopOrchestrator"
   | Setup.RemoveOrchestrator -> "RemoveOrchestrator"
   | Setup.RunServer -> "RunServer"
@@ -845,8 +845,7 @@ let section_with_one_named_job =
     {
       entries =
         [
-          Crontab_listing.Named
-            { job = "nightly-report"; shape = Crontab_listing.Exec_line };
+          Crontab_listing.Named "nightly-report";
           Crontab_listing.Unnamed { position = 2 };
         ];
     }
@@ -913,8 +912,10 @@ let test_plan_preserve_precedes_a_stopped_orchestrator_recreate () =
 (* A section whose markers do not balance, and a spool file that was never read,
    are the two hosts whose crontab Bondi understands least -- and both are
    copied out of all the same. Neither reading can name a job, so the copy
-   carries an empty job list and the run reports nothing about the box; the
-   directory it costs is a directory on a host nothing is about to rewrite,
+   carries no section at all -- not an empty one, which would have the report
+   name every job in the directory as having no line firing it -- and the run
+   reports nothing about the box; the directory it costs is a directory on a
+   host nothing is about to rewrite,
    while skipping it is how the recreate deletes the files of lines that go on
    firing. A read that failed is not the host saying there is nothing here.
 
@@ -937,7 +938,7 @@ let test_plan_preserve_for_a_crontab_that_could_not_be_understood () =
   List.iter
     (fun (label, crontab) ->
       check (list string) label
-        ("PreserveCronPayloads " :: recreate)
+        ("PreserveCronPayloads (no section read)" :: recreate)
         (phase_for crontab))
     [
       ( "markers that do not balance",

@@ -3,6 +3,8 @@ module Report = Bondi_client.Status_report
 module Inventory = Bondi_client.Host_inventory
 module Health = Bondi_client.Container_health
 module Crontab = Bondi_client.Crontab_listing
+module Payload = Bondi_client.Cron_payload
+module Cron_exec_line = Bondi_common.Cron_exec_line
 module Config_file = Bondi_client.Config_file
 module Remote_exec = Bondi_client.Remote_exec
 
@@ -355,13 +357,38 @@ let test_report_source_absent_is_not_source_unavailable () =
 
 (* The crontab reading has no absent case: every report is built from a read
    that was taken, so the fixture's default is the outcome of the host having no
-   Bondi section rather than of the report having been given nothing. *)
-let one_server ?(crontab = Crontab.No_section) ?(warnings = []) rows :
-    Report.server_report =
-  { address = "1.2.3.4"; rows; crontab; warnings }
+   Bondi section rather than of the report having been given nothing.
 
-let rendered ?crontab ?warnings rows =
-  Report.render_table [ one_server ?crontab ?warnings rows ]
+   The payload listing defaults the same way and for the same reason: a host
+   that answered and holds nothing, not a read that never happened. Defaulting
+   it to a failed read would put a line into every case below that is about
+   something else, and would do it by asserting a source nobody looked at. *)
+let one_server ?(crontab = Crontab.No_section)
+    ?(payloads = Payload.Payloads { files = [] }) ?(warnings = []) rows :
+    Report.server_report =
+  { address = "1.2.3.4"; rows; crontab; payloads; warnings }
+
+let rendered ?crontab ?payloads ?warnings rows =
+  Report.render_table [ one_server ?crontab ?payloads ?warnings rows ]
+
+(* The lines the Crontab section holds, its header and the blank line that ends
+   it excluded. Asserting that an agreeing host "adds no line" is only an
+   assertion if the block itself is read: searching the whole table for the
+   absence of a phrase passes just as well when the section was never rendered
+   at all. *)
+let crontab_block output =
+  let rec after_header = function
+    | [] -> []
+    | line :: rest ->
+        if String.equal line "Crontab" then rest else after_header rest
+  in
+  let rec until_blank = function
+    | [] -> []
+    | line :: rest ->
+        if String.equal (String.trim line) "" then []
+        else line :: until_blank rest
+  in
+  until_blank (after_header (String.split_on_char '\n' output))
 
 (* A row's first rendered line is the one carrying its name; the lines under it
    carry the other source and leave the name column blank. *)
@@ -605,11 +632,7 @@ let test_render_crontab_row_shows_counts_and_names () =
         (Crontab.Section
            {
              entries =
-               [
-                 Crontab.Named
-                   { job = "daily-close"; shape = Crontab.Exec_line };
-                 Crontab.Unnamed { position = 2 };
-               ];
+               [ Crontab.Named "daily-close"; Crontab.Unnamed { position = 2 } ];
            })
       (report ())
   in
@@ -619,6 +642,116 @@ let test_render_crontab_row_shows_counts_and_names () =
     (contains row ~needle:"daily-close");
   check bool "the entry it could not read is located" true
     (contains row ~needle:"entry 2 could not be read")
+
+(* 19a. The section names a job and the directory does not hold what it fires.
+        The report says so under the section rather than leaving the count to
+        stand for the job being intact -- a count is what the two sources
+        disagree about, not what either of them said. *)
+let test_render_crontab_reports_a_job_whose_files_are_gone () =
+  let block =
+    crontab_block
+      (rendered
+         ~crontab:
+           (Crontab.Section { entries = [ Crontab.Named "daily-close" ] })
+         ~payloads:(Payload.Payloads { files = [] })
+         (report ()))
+  in
+  check int "the section's cell and the one divergence beneath it" 2
+    (List.length block);
+  check bool "the job is named" true
+    (contains (String.concat "\n" block) ~needle:"daily-close");
+  check bool "and what it costs is said" true
+    (contains (String.concat "\n" block)
+       ~needle:"it fails at its next fire until it is deployed again")
+
+(* 19b. The directory holds a job's files and no line fires them. This is the
+        direction nothing checked before: no deploy repairs it, because the
+        configuration stopped declaring the job. *)
+let test_render_crontab_reports_files_with_no_line () =
+  let block =
+    crontab_block
+      (rendered
+         ~crontab:(Crontab.Section { entries = [] })
+         ~payloads:
+           (Payload.Payloads
+              {
+                files =
+                  [
+                    Cron_exec_line.run_file_of "daily-close";
+                    Cron_exec_line.env_file_of "daily-close";
+                  ];
+              })
+         (report ()))
+  in
+  check int "the section's cell and the one divergence beneath it" 2
+    (List.length block);
+  check bool "the job the directory holds is named" true
+    (contains (String.concat "\n" block) ~needle:"daily-close");
+  check bool "and that nothing fires it is said" true
+    (contains (String.concat "\n" block) ~needle:"no crontab line fires them")
+
+(* 19c. The quiet case, which is what makes the two above legible. Silence is
+        the requirement's own signal, so a host whose two sources agree adds
+        nothing at all under the section. *)
+let test_render_crontab_adds_no_line_when_the_sources_agree () =
+  let block =
+    crontab_block
+      (rendered
+         ~crontab:
+           (Crontab.Section { entries = [ Crontab.Named "daily-close" ] })
+         ~payloads:
+           (Payload.Payloads
+              {
+                files =
+                  [
+                    Cron_exec_line.run_file_of "daily-close";
+                    Cron_exec_line.env_file_of "daily-close";
+                  ];
+              })
+         (report ()))
+  in
+  check int "the section's cell, and nothing beneath it" 1 (List.length block);
+  check bool "the section is still counted" true
+    (contains (String.concat "\n" block) ~needle:"1 jobs (daily-close)")
+
+(* 19d. The machine-readable form carries the divergences too. A consumer of it
+        must not be told the host is healthy while the table says otherwise, and
+        the empty list is what says the two sources agreed. *)
+let test_render_json_carries_the_divergences () =
+  let loud =
+    Report.render_json
+      [
+        one_server
+          ~crontab:
+            (Crontab.Section { entries = [ Crontab.Named "daily-close" ] })
+          ~payloads:(Payload.Payloads { files = [] })
+          (report ());
+      ]
+  in
+  let quiet =
+    Report.render_json
+      [
+        one_server
+          ~crontab:
+            (Crontab.Section { entries = [ Crontab.Named "daily-close" ] })
+          ~payloads:
+            (Payload.Payloads
+               {
+                 files =
+                   [
+                     Cron_exec_line.run_file_of "daily-close";
+                     Cron_exec_line.env_file_of "daily-close";
+                   ];
+               })
+          (report ());
+      ]
+  in
+  check bool "the divergence the table prints is in the JSON too" true
+    (contains loud
+       ~needle:"it fails at its next fire until it is deployed again");
+  check bool "and it names the job" true (contains loud ~needle:"daily-close");
+  check bool "an agreeing host carries an empty list rather than no field" true
+    (contains quiet ~needle:{|"findings": []|})
 
 (* 20. The machine-readable form carries the same two accounts, so a consumer
        reading it is no more able to pick a winner than a reader of the table. *)
@@ -998,6 +1131,14 @@ let () =
             test_render_keeps_a_source_message_on_one_line;
           test_case "the crontab section is counted and named" `Quick
             test_render_crontab_row_shows_counts_and_names;
+          test_case "a job whose files are gone is reported by name" `Quick
+            test_render_crontab_reports_a_job_whose_files_are_gone;
+          test_case "files no line fires are reported by name" `Quick
+            test_render_crontab_reports_files_with_no_line;
+          test_case "a host whose sources agree adds no line" `Quick
+            test_render_crontab_adds_no_line_when_the_sources_agree;
+          test_case "the machine-readable form carries the divergences too"
+            `Quick test_render_json_carries_the_divergences;
           test_case "json carries both accounts" `Quick
             test_render_json_carries_provenance;
         ] );

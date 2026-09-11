@@ -8,7 +8,13 @@
    marker on an exit-0 answer is the one signal read. *)
 let serving_marker = "BONDI_ORCHESTRATOR_SERVING"
 let unreachable_marker = "BONDI_ORCHESTRATOR_UNREACHABLE"
-let container_name = "bondi-orchestrator"
+
+(* The name the rest of setup creates, inspects and removes the container
+   under, taken from the module that also writes the crontab line execing
+   into it. A probe that spelled the name itself could go on waiting for a
+   container nothing creates any more, and would report the host unreachable
+   rather than say so. *)
+let container_name = Bondi_common.Cron_exec_line.orchestrator_container
 let health_path = "/api/v1/health"
 let readiness_attempts = 30
 
@@ -61,7 +67,7 @@ let verdict probe =
 
 let failure_message ~ip_address ~image ~reason ~diagnostics =
   Printf.sprintf
-    "bondi-orchestrator did not come up on server %s.\n\
+    "%s did not come up on server %s.\n\
      Image: %s\n\
      %s\n\
      Container state and logs from the server:\n\
@@ -69,4 +75,4 @@ let failure_message ~ip_address ~image ~reason ~diagnostics =
      The container was left in place so it can be inspected: run `docker logs \
      %s` on %s. To restore service, set bondi_server.version in bondi.yaml \
      back to a version known to run on this host and run `bondi setup` again."
-    ip_address image reason diagnostics container_name ip_address
+    container_name ip_address image reason diagnostics container_name ip_address

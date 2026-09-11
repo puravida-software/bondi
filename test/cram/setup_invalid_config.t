@@ -17,6 +17,15 @@ The stub records every SSH call so the absence of one can be asserted.
   > case "$1" in
   >   'docker --version') echo 'Docker version 29.2.1, build deadbeef' ;;
   >   *'/var/spool/cron/crontabs/root'*) echo BONDI_CRONTAB_ABSENT ;;
+  >   # The payload directory the crontab section is compared against. Nothing
+  >   # in this fixture reaches it -- the configuration is rejected before any
+  >   # host is contacted, which is what the case below asserts -- and it is here
+  >   # for the reason the crontab arm above it is: every setup_* stub answers
+  >   # the same vocabulary, so a case added here later cannot fall through to
+  >   # *) and be reported as a listing that never happened.
+  >   *BONDI_CRON_PAYLOAD_LISTED*)
+  >     echo BONDI_CRON_PAYLOAD_LISTED
+  >     echo BONDI_CRON_PAYLOAD_END ;;
   >   *'PortBindings'*) echo '127.0.0.1' ;;
   >   *) : ;;
   > esac

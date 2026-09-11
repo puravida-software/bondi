@@ -68,6 +68,13 @@ only have stopped on the probe that arm broke.
   >   *'RestartPolicy'*) echo unless-stopped ;;
   >   *'/var/spool/cron/crontabs/root'*) echo BONDI_CRONTAB_ABSENT ;;
   >   *'PortBindings'*) echo '127.0.0.1' ;;
+  >   # The payload directory the crontab section is compared against. Without
+  >   # this arm the command falls through to *) and answers nothing, which is a
+  >   # listing that never happened rather than a directory that is empty -- and
+  >   # the report says so, correctly, in a fixture that is about something else.
+  >   *BONDI_CRON_PAYLOAD_LISTED*)
+  >     echo BONDI_CRON_PAYLOAD_LISTED
+  >     echo BONDI_CRON_PAYLOAD_END ;;
   >   *) : ;;
   > esac
   > STUB

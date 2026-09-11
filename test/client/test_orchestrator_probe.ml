@@ -1,6 +1,7 @@
 open Alcotest
 module Probe = Bondi_client.Orchestrator_probe
 module Remote_exec = Bondi_client.Remote_exec
+module Cron_exec_line = Bondi_common.Cron_exec_line
 
 let contains = Test_helpers.contains
 
@@ -106,6 +107,23 @@ let test_failure_message_carries_the_diagnostics () =
   check bool "carries the loader error" true
     (contains ~needle:"libzstd.so.1" message)
 
+(* Every string this module sends to a host, and the one it shows an operator,
+   name the container the shared module names. The name is pinned as a literal
+   in the shared module's own suite; what is asserted here is the link, because
+   a second spelling here would be found by nothing -- the probe would go on
+   looking for a container the rest of setup had stopped creating. *)
+let test_the_probe_names_the_container_the_common_module_names () =
+  let container = Cron_exec_line.orchestrator_container in
+  check bool "the readiness probe names it" true
+    (contains ~needle:container (Probe.probe_command ~port:3030 ~attempts:30));
+  check bool "the diagnostics command names it" true
+    (contains ~needle:container Probe.diagnostics_command);
+  check bool "the failure message names it" true
+    (contains ~needle:container
+       (Probe.failure_message ~ip_address:"46.225.53.162"
+          ~image:"mlopez1506/bondi-server:0.10.1" ~reason:"no answer"
+          ~diagnostics:"exited exit=127"))
+
 let () =
   run "Orchestrator_probe"
     [
@@ -121,6 +139,11 @@ let () =
             test_verdict_rejects_failed_probe;
           test_case "an unreachable host and a failed check are not one verdict"
             `Quick test_ssh_failure_and_command_failure_reach_different_verdicts;
+        ] );
+      ( "container name",
+        [
+          test_case "the probe names the container the common module names"
+            `Quick test_the_probe_names_the_container_the_common_module_names;
         ] );
       ( "probe_command",
         [

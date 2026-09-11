@@ -1,3 +1,4 @@
+let orchestrator_container = "bondi-orchestrator"
 let cron_root = "/etc/bondi/cron"
 let cron_root_mode = 0o700
 let dir_of name = Filename.concat cron_root name

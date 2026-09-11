@@ -5,6 +5,8 @@ module Inventory = Bondi_client.Host_inventory
 module Crontab = Bondi_client.Crontab_listing
 module Remote_exec = Bondi_client.Remote_exec
 module Config_file = Bondi_client.Config_file
+module Cron_payload = Bondi_client.Cron_payload
+module Cron_exec_line = Bondi_common.Cron_exec_line
 
 (* Both constructors named, so a third is a compile error here rather than a
    silently unrendered failure. *)
@@ -33,7 +35,8 @@ let inspection_output =
 
 (* What the read command prints when it managed to read the file: the marker
    that says the contents follow, and then the contents. *)
-let read_output_of contents = "BONDI_CRONTAB_CONTENTS\n" ^ contents
+let read_output_of contents =
+  "BONDI_CRONTAB_CONTENTS\n" ^ contents ^ "BONDI_CRONTAB_END\n"
 
 let spool_output =
   read_output_of
@@ -44,6 +47,25 @@ let spool_output =
 
 let spool_without_a_section =
   read_output_of "0 3 * * * /usr/local/bin/backup.sh\n"
+
+(* The job the section above fires, so the two reads in this module are about
+   the same host rather than about two unrelated fixtures. *)
+let payload_job = "daily-close"
+
+(* The markers are the listing command's own words. A fixture of bare paths
+   carries no marker, which the reader answers as "unknown" -- so a case built
+   that way would assert nothing about a listing that was taken, and one that
+   left off the closing marker would be a listing that stopped part-way through.
+   The paths come from the writer's own module rather than being spelled here,
+   so a fixture cannot go on passing after the two have drifted apart. *)
+let payload_listing_output =
+  String.concat "\n"
+    [
+      "BONDI_CRON_PAYLOAD_LISTED";
+      Cron_exec_line.run_file_of payload_job;
+      Cron_exec_line.env_file_of payload_job;
+      "BONDI_CRON_PAYLOAD_END";
+    ]
 
 let orchestrator_reading : Gather.orchestrator_reading =
   {
@@ -92,8 +114,9 @@ let config : Config_file.t =
   }
 
 let reading ?(listing = Ok listing_output) ?(inspection = Ok inspection_output)
-    ?(crontab = Ok spool_output) ?(orchestrator = Ok orchestrator_reading) () =
-  Gather.reading_of_reads ~listing ~inspection ~crontab ~orchestrator
+    ?(crontab = Ok spool_output) ?(payloads = Ok payload_listing_output)
+    ?(orchestrator = Ok orchestrator_reading) () =
+  Gather.reading_of_reads ~listing ~inspection ~crontab ~payloads ~orchestrator
 
 (* Taking a reading and waiting on health are separate calls, and these cases
    are about the first: nothing here waited, which is also what the command that
@@ -128,6 +151,14 @@ let crontab_name (listing : Crontab.t) =
       "malformed: begin without end"
   | Crontab.Malformed Crontab.Nested_begin -> "malformed: nested begin"
   | Crontab.Unreadable message -> "unreadable: " ^ message
+
+(* All three constructors named, so a fourth outcome of the payload read is a
+   compile error here rather than a listing the reading quietly drops. *)
+let payloads_name (listing : Cron_payload.listing) =
+  match listing with
+  | Cron_payload.Payloads { files } -> String.concat " " files
+  | Cron_payload.Root_absent -> "root absent"
+  | Cron_payload.Unlisted message -> "unlisted: " ^ message
 
 let row_named = Client_fixtures.row_named
 
@@ -324,6 +355,52 @@ let test_a_failed_listing_reaches_the_report_as_the_state_it_was () =
           (Remote_exec.Command_failed
              { code = 1; output = "Cannot connect to the Docker daemon" })))
 
+(* 8. The payload directory is the fifth read, and the reading has to carry what
+      it answered. The fixture lists two real paths rather than none: an empty
+      directory reads the same against an implementation that plumbed the
+      argument through and one that never did. *)
+let test_gather_reading_carries_the_payload_listing () =
+  check string "the paths the directory answered with"
+    (Cron_exec_line.run_file_of payload_job
+    ^ " "
+    ^ Cron_exec_line.env_file_of payload_job)
+    (payloads_name (reading ()).payloads)
+
+(* 9. The other half of the same requirement, and the affirmative arm for it is
+      case 8 on the same fixture with only this read varied. A payload read that
+      failed is a value in the reading -- it does not abort the other four and
+      it does not become a report nobody receives. *)
+let test_gather_payload_read_that_failed_is_a_value () =
+  let reading =
+    reading
+      ~payloads:
+        (Error
+           (Remote_exec.Ssh_failed
+              { code = 255; output = "Connection closed by 10.0.0.1 port 22" }))
+      ()
+  in
+  check string "the failure is carried in the transport's own words"
+    "unlisted: command failed (255): Connection closed by 10.0.0.1 port 22"
+    (payloads_name reading.payloads);
+  check (list string) "and the host's containers were not abandoned for it"
+    [ "my-service"; "bondi-orchestrator" ]
+    (List.map
+       (fun (container : Inventory.container) -> container.name)
+       (containers_of reading));
+  check string "nor was the crontab" "section of 1"
+    (crontab_name reading.crontab)
+
+(* 10. The link case 8 stops one short of. A reading that carries the listing
+       and a report that drops it is the whole of the defect this closes, and it
+       is invisible from either end alone: the reading is right and the table
+       says the host's directory was never read. *)
+let test_report_carries_the_payload_listing () =
+  check string "the report carries what the directory answered"
+    (Cron_exec_line.run_file_of payload_job
+    ^ " "
+    ^ Cron_exec_line.env_file_of payload_job)
+    (payloads_name (report_of (reading ())).payloads)
+
 let () =
   run "status gather"
     [
@@ -340,5 +417,11 @@ let () =
             test_gather_warnings_come_from_the_orchestrator;
           test_case "a failed listing keeps its state to the report" `Quick
             test_a_failed_listing_reaches_the_report_as_the_state_it_was;
+          test_case "the payload directory's answer" `Quick
+            test_gather_reading_carries_the_payload_listing;
+          test_case "a payload read that failed is a value" `Quick
+            test_gather_payload_read_that_failed_is_a_value;
+          test_case "the report carries the payload listing" `Quick
+            test_report_carries_the_payload_listing;
         ] );
     ]

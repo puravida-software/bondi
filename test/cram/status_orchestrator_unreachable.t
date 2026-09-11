@@ -5,7 +5,7 @@ and it answers on exactly that failure.
 
   $ ROOT="$PWD"
 
-The stub answers the three reads the report takes off the host, dispatching on
+The stub answers the reads the report takes off the host, dispatching on
 the remote command string the client sends. $SSH_BROKEN makes every read fail
 before the command runs, and $SSH_DAEMON_DOWN makes every read run and fail, so
 the one fixture covers a source that answered, a source that could not be
@@ -38,8 +38,18 @@ consulted, and a source whose answer could not be read.
   >     echo BONDI_CRONTAB_CONTENTS
   >     echo '# BEGIN BONDI CRON'
   >     echo "0 6 * * * curl -s -X POST -d '{\"job\":\"daily-close\",\"secret\":\"s3cr3t\"}' http://127.0.0.1:3030/api/v1/run"
-  >     echo '# END BONDI CRON' ;;
+  >     echo '# END BONDI CRON'
+  >     echo BONDI_CRONTAB_END ;;
   >   *'PortBindings'*) echo '127.0.0.1' ;;
+  >   # The payload directory, holding daily-close's two files. The section above
+  >   # names no job -- its one entry is a shape the reader no longer understands
+  >   # -- so this is a job whose files are on the box with no line firing them,
+  >   # which is the direction nothing checked before this fixture answered here.
+  >   *BONDI_CRON_PAYLOAD_LISTED*)
+  >     echo BONDI_CRON_PAYLOAD_LISTED
+  >     echo /etc/bondi/cron/daily-close/run.json
+  >     echo /etc/bondi/cron/daily-close/env
+  >     echo BONDI_CRON_PAYLOAD_END ;;
   >   *) : ;;
   > esac
   > STUB
@@ -71,10 +81,26 @@ not how the kernel words a refusal.
 With the orchestrator unreachable the table is populated from the host alone.
 Every declared component has a row, the orchestrator's own row says it could not
 be reached rather than going missing, the container nothing declares is present
-and flagged, and the crontab section is counted and named without any line of it
-being rendered. A container that declares a healthcheck the host has recorded no
-verdict for says exactly that: this command reports a health state and never
-waits for one, so it is the only one that can still show that reading.
+and flagged, and the crontab section is counted without any line of it being
+rendered. Beneath that section the two on-box cron sources are compared against
+each other: the directory holds daily-close's two files, and the one line the
+section holds is a shape this reader cannot name. So the report says what is
+known -- that no line it could read fires the job -- and sends the operator to
+the entry by its position, because a line nobody could read may be the very line
+that fires it. Here it is exactly that: the fixture's line is the shape an older
+bondi wrote, and it fires daily-close on its schedule, so a report calling those
+files orphaned would tell this host that a job which runs never runs. Nor is
+that host hypothetical -- the orchestrator migrates the old shape when it next
+rewrites the section, so a partially migrated box sits in this state between
+deploys. This direction is the one nothing checked before, and the job is named
+without any part of the line being rendered. The entry is counted and located by
+its position rather than dropped -- the next setup rewrites the section and
+removes exactly that line, so a report that stayed silent about it would agree
+with the rewrite instead of warning about it.
+
+A container that declares a healthcheck the host has recorded no verdict for
+says exactly that: this command reports a health state and never waits for one,
+so it is the only one that can still show that reading.
 
   $ bondi-client status 2>&1 | sed 's/not reachable: .*/not reachable: <detail>/'
   Server: 127.0.0.1
@@ -94,7 +120,8 @@ waits for one, so it is the only one that can still show that reading.
                            orch    not reachable: <detail>
   
   Crontab
-    bondi section          docker  1 jobs (daily-close)
+    bondi section          docker  1 jobs (entry 1 could not be read)
+    cron job daily-close on server 127.0.0.1 keeps its files on the box and no crontab line that could be read fires them: entry 1 of the section could not be read, and an entry nobody could read may be the line that fires it
 
 
 Nothing the report printed carries a line of the crontab, or any part of one. The
@@ -132,7 +159,18 @@ line, never a silence.
   
   Crontab
     bondi section          docker  not read: <detail>
+    which cron jobs on server 127.0.0.1 are scheduled to run could not be read, and neither could which of them still hold their files: command failed (255): Permission denied (publickey).
 
+
+A host that answered neither cron read says so once under that section, in one
+sentence naming both sources. The two reads fail for the one reason on this
+host, and the cell above them already carries the transport's account of it --
+so three lines would be the same fact three times, with that account twice. The
+sources are still named separately when only one of them fails.
+
+It reports no divergence at all. Two reads that never happened cannot disagree,
+and silence there would read as the two agreeing -- which on this host is the
+one thing that is certainly not known.
 
 The other way a source has nothing to give. The host was reached, it ran the
 command, and the command failed: a different sentence, and a different place to
@@ -162,6 +200,7 @@ difference between these two blocks.
   
   Crontab
     bondi section          docker  not read: the read ran on the host and failed: command failed (1): Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?
+    which cron jobs on server 127.0.0.1 are scheduled to run could not be read, and neither could which of them still hold their files: the listing ran on the host and failed: command failed (1): Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?
 
 The exit code is still zero, and the machine-readable form keeps the two apart
 in a field rather than in a sentence: on the same run, the two host readings say
@@ -244,10 +283,14 @@ sources and does not quietly collapse them.
   "name": "legacy-worker",
   "source": "reported",
 
-The crontab is counted in JSON too, and no line of it is rendered there either.
+The crontab is counted in JSON too, no line of it is rendered there either, and
+the divergence the table prints is carried in the same words. A consumer of this
+form is never told the host is healthy while the table says otherwise. The
+newlines are folded away first because the object is pretty-printed and a
+line-oriented grep would otherwise match nothing and still pass.
 
-  $ bondi-client status --output json 2>&1 | grep -o '"crontab": {[^}]*}'
-  "crontab": { "summary": "1 jobs (daily-close)", "job_count": 1 }
+  $ bondi-client status --output json 2>&1 | tr '\n' ' ' | tr -s ' ' | grep -o '"crontab": { [^}]*}'
+  "crontab": { "summary": "1 jobs (entry 1 could not be read)", "job_count": 1, "findings": [ "cron job daily-close on server 127.0.0.1 keeps its files on the box and no crontab line that could be read fires them: entry 1 of the section could not be read, and an entry nobody could read may be the line that fires it" ] }
   $ bondi-client status --output json 2>&1 | grep -c 's3cr3t'
   0
   [1]
