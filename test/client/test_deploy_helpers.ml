@@ -13,7 +13,9 @@ let result_testable ok_t =
       match (a, b) with
       | Ok a, Ok b -> equal ok_t a b
       | Error a, Error b -> String.equal a b
-      | _ -> false)
+      | Ok _, Error _
+      | Error _, Ok _ ->
+          false)
 
 (* parse_name_tag *)
 
@@ -118,7 +120,10 @@ let test_cron_jobs_for_server_matching () =
   | Some [ j ] ->
       check string "job name" "backup" j.name;
       check string "image has tag" "img:v1" j.image
-  | _ -> Alcotest.fail "expected one matching job"
+  | Some []
+  | Some (_ :: _ :: _)
+  | None ->
+      Alcotest.fail "expected one matching job"
 
 let test_cron_jobs_for_server_non_matching () =
   let jobs = [ mk_cron_job "backup" "1.2.3.4" ] in
@@ -241,7 +246,14 @@ let test_deploy_wire_keys_for_alert_config () =
         | Some _
         | None ->
             None)
-  | _ -> Alcotest.fail "expected a JSON object"
+  | `String _
+  | `Int _
+  | `Float _
+  | `Bool _
+  | `Null
+  | `List _
+  | `Intlit _ ->
+      Alcotest.fail "expected a JSON object"
 
 (* A job with no alert config must emit no key at all, not a null: the payload
    bytes stay identical to what a pre-alerting server already accepts. *)
@@ -258,7 +270,14 @@ let test_deploy_wire_omits_alert_fields_when_unconfigured () =
         (List.mem_assoc "alert_sinks" fields);
       check bool "omits the \"exit_code_severities\" key" false
         (List.mem_assoc "exit_code_severities" fields)
-  | _ -> Alcotest.fail "expected a JSON object"
+  | `String _
+  | `Int _
+  | `Float _
+  | `Bool _
+  | `Null
+  | `List _
+  | `Intlit _ ->
+      Alcotest.fail "expected a JSON object"
 
 (* The server decodes this into its own structurally-duplicate cron_job, so the
    emitted key is pinned here and the matching decode in test/server. *)
@@ -277,7 +296,14 @@ let test_cron_job_wire_key_is_network () =
         | Some _
         | None ->
             None)
-  | _ -> Alcotest.fail "expected a JSON object"
+  | `String _
+  | `Int _
+  | `Float _
+  | `Bool _
+  | `Null
+  | `List _
+  | `Intlit _ ->
+      Alcotest.fail "expected a JSON object"
 
 (* deploy_payload logs flag *)
 
@@ -285,7 +311,11 @@ let test_deploy_payload_includes_logs_flag () =
   let config =
     mk_config ~user_service:{ (mk_service "web") with logs = Some false } ()
   in
-  let service = Option.get config.user_service in
+  let service =
+    match config.user_service with
+    | Some service -> service
+    | None -> Alcotest.fail "the fixture declares a service"
+  in
   let payload : Deploy.deploy_payload =
     {
       service_name = Some service.name;
@@ -396,6 +426,182 @@ let test_a_server_without_an_ssh_block_is_told_so () =
         false
         (Bondi_common.String_utils.contains ~needle:"could not be read" msg)
 
+(* cron_divergence_report *)
+
+(* The markers below have no exported constant, so they are spelled here as
+   [test_crontab_listing] and [test_cron_payload] already spell them. What keeps
+   that honest is those files' own cases pinning the command strings that print
+   them: a renamed marker turns these fixtures into answers carrying no marker at
+   all, which both readers call "never read", and the cases below then fail
+   loudly rather than quietly agreeing. *)
+let crontab_naming job =
+  Ok
+    (String.concat "\n"
+       [
+         "BONDI_CRONTAB_CONTENTS";
+         "# BEGIN BONDI CRON";
+         Printf.sprintf "0 3 * * * docker exec %s sh -c '%s%s'"
+           Bondi_common.Cron_exec_line.orchestrator_container
+           Bondi_common.Cron_exec_line.exec_marker
+           (Bondi_common.Cron_exec_line.run_file_of job);
+         "# END BONDI CRON";
+         "BONDI_CRONTAB_END";
+       ])
+
+(* A directory the host listed and found empty: the opening marker, no path, and
+   the marker that says the listing reached its end. Without the closing one
+   this is a listing that stopped part-way through, which is a different outcome
+   carrying a different report. *)
+let empty_payload_directory =
+  Ok "BONDI_CRON_PAYLOAD_LISTED\nBONDI_CRON_PAYLOAD_END\n"
+
+(* The payload directory as a host that listed it answers, holding both files
+   of every job named. The paths come from the writer's own module rather than
+   being spelled here, so a fixture cannot go on passing after the writer and
+   the reader of a path have drifted apart. *)
+let payload_directory_holding jobs =
+  Ok
+    (String.concat "\n"
+       ("BONDI_CRON_PAYLOAD_LISTED"
+        :: List.concat_map
+             (fun job ->
+               [
+                 Bondi_common.Cron_exec_line.run_file_of job;
+                 Bondi_common.Cron_exec_line.env_file_of job;
+               ])
+             jobs
+       @ [ "BONDI_CRON_PAYLOAD_END" ]))
+
+let nightly_report_on ip =
+  Deploy.cron_jobs_for_server ip
+    (Some [ mk_cron_job "nightly-report" ip ])
+    [ ("nightly-report", "v1") ]
+
+(* The direction a deploy is best placed to catch: the section still fires a job
+   whose files the box no longer holds, so the job fails at its next fire, and
+   the deploy an operator is running right now is the thing that repairs it. The
+   two sources are read off the same box and neither is asked what the other
+   said, which is the whole of what makes them a comparison. *)
+let test_cron_deploy_reports_what_the_two_sources_disagree_on () =
+  match
+    Deploy.cron_divergence_report ~server:"1.2.3.4"
+      ~read_crontab:(fun () -> crontab_naming "nightly-report")
+      ~read_payloads:(fun () -> empty_payload_directory)
+      (nightly_report_on "1.2.3.4")
+  with
+  | [ line ] ->
+      check bool
+        ("the report names the job: " ^ line)
+        true
+        (Bondi_common.String_utils.contains ~needle:"nightly-report" line);
+      check bool
+        ("the report names the server: " ^ line)
+        true
+        (Bondi_common.String_utils.contains ~needle:"1.2.3.4" line);
+      check bool
+        ("the report says what the divergence costs: " ^ line)
+        true
+        (Bondi_common.String_utils.contains ~needle:"fails at its next fire"
+           line)
+  | lines ->
+      Alcotest.fail
+        (Printf.sprintf "expected one line, got %d: %s" (List.length lines)
+           (String.concat " | " lines))
+
+(* Report, never refuse. Nothing the comparison finds reaches the run's exit:
+   the report is lines and not a verdict, and the one value the run does consult
+   before it posts -- the version gate's -- answers Ok for the same server on the
+   same box. Refusing would block the command that repairs the divergence, and
+   would do so on the strength of a remote read that can itself fail. *)
+let test_a_deploy_that_finds_a_divergence_still_proceeds () =
+  let jobs = nightly_report_on "1.2.3.4" in
+  let read_version () = Ok Bondi_client.Server_version.minimum_for_exec_lines in
+  check int "the two sources disagree on exactly one job" 1
+    (List.length
+       (Deploy.cron_divergence_report ~server:"1.2.3.4"
+          ~read_crontab:(fun () -> crontab_naming "nightly-report")
+          ~read_payloads:(fun () -> empty_payload_directory)
+          jobs));
+  match Deploy.cron_version_gate ~read_version jobs with
+  | Ok () -> ()
+  | Error msg -> Alcotest.fail ("a divergence became a refusal: " ^ msg)
+
+(* A deploy writing no crontab line to this server has nothing to compare, and
+   consulting the box anyway would make every service-only deploy pay for two
+   questions nobody asked. Both readers fail if they are called at all. *)
+let test_deploy_without_cron_jobs_reads_neither_source () =
+  let refuse source () =
+    Alcotest.fail (source ^ " was read for a deploy declaring no cron jobs")
+  in
+  check (list string) "nothing is read and nothing is said" []
+    (Deploy.cron_divergence_report ~server:"1.2.3.4"
+       ~read_crontab:(refuse "the crontab section")
+       ~read_payloads:(refuse "the payload directory")
+       None)
+
+(* [Some []] is not [None], and the two are not one arm. [None] is a server
+   with no cron jobs declared against it at all; [Some []] is a server that has
+   them and none of them named by this invocation. Neither writes a crontab
+   line, so neither has anything to compare -- and collapsing them into
+   [Some _] would make the second pay two round trips per server for a report
+   about jobs it is not touching. Both readers fail if they are called at
+   all. *)
+let test_deploy_with_an_empty_cron_list_reads_neither_source () =
+  let refuse source () =
+    Alcotest.fail (source ^ " was read for a deploy writing no crontab line")
+  in
+  check (list string) "nothing is read and nothing is said" []
+    (Deploy.cron_divergence_report ~server:"1.2.3.4"
+       ~read_crontab:(refuse "the crontab section")
+       ~read_payloads:(refuse "the payload directory")
+       (Some []))
+
+(* The other direction, reached the way a deploy actually reaches it. Withdraw a
+   cron job from bondi.yaml and its files stay on the box under no line; what a
+   deploy can see of that is bounded by whether this server still has some
+   other cron job to write, and only the run where the withdrawn job was the
+   last one goes past the orphan in silence. Two jobs are declared on this
+   server and one of them is named by the invocation, which is the ordinary
+   partial deploy: the list is not empty, both sources are read, and the job
+   that left is named.
+
+   It is the direction a report built out of what the deploy is about to write
+   could not produce, because the job it names is one the invocation never
+   mentions and bondi.yaml no longer declares -- so the line can only have come
+   from the box. *)
+let test_a_partial_cron_deploy_sees_the_orphan_a_withdrawal_left () =
+  let jobs =
+    Deploy.cron_jobs_for_server "1.2.3.4"
+      (Some
+         [
+           mk_cron_job "nightly-report" "1.2.3.4";
+           mk_cron_job "price-alert" "1.2.3.4";
+         ])
+      [ ("nightly-report", "v1") ]
+  in
+  match
+    Deploy.cron_divergence_report ~server:"1.2.3.4"
+      ~read_crontab:(fun () -> crontab_naming "nightly-report")
+      ~read_payloads:(fun () ->
+        payload_directory_holding [ "nightly-report"; "stale-digest" ])
+      jobs
+  with
+  | [ line ] ->
+      check bool
+        ("the report names the job the section no longer fires: " ^ line)
+        true
+        (Bondi_common.String_utils.contains ~needle:"stale-digest" line);
+      check bool
+        ("and says what the box will do with it: " ^ line)
+        true
+        (Bondi_common.String_utils.contains ~needle:"no crontab line fires them"
+           line)
+  | lines ->
+      Alcotest.fail
+        (Printf.sprintf "expected the orphan alone, got %d line(s): %s"
+           (List.length lines)
+           (String.concat " | " lines))
+
 let () =
   run "Deploy_helpers"
     [
@@ -451,6 +657,20 @@ let () =
           test_case
             "a server with no ssh block is told that, not that a read failed"
             `Quick test_a_server_without_an_ssh_block_is_told_so;
+        ] );
+      ( "cron_divergence_report",
+        [
+          test_case
+            "a cron-declaring deploy reports what the two sources disagree on"
+            `Quick test_cron_deploy_reports_what_the_two_sources_disagree_on;
+          test_case "a deploy that finds a divergence still proceeds" `Quick
+            test_a_deploy_that_finds_a_divergence_still_proceeds;
+          test_case "a deploy declaring no cron jobs reads neither source"
+            `Quick test_deploy_without_cron_jobs_reads_neither_source;
+          test_case "a deploy with an empty cron list reads neither source"
+            `Quick test_deploy_with_an_empty_cron_list_reads_neither_source;
+          test_case "a partial cron deploy sees the orphan a withdrawal left"
+            `Quick test_a_partial_cron_deploy_sees_the_orphan_a_withdrawal_left;
         ] );
       ( "deploy_payload",
         [

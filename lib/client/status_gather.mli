@@ -6,7 +6,7 @@
     that a section was never written — because every one of those decisions is a
     claim about the box and belongs where it can be tested against plain data.
 
-    The four reads are independent on purpose. Each carries its own outcome, so
+    The five reads are independent on purpose. Each carries its own outcome, so
     a host that answered about its containers and refused its crontab reports
     both of those facts rather than one summary that is true of neither. *)
 
@@ -21,6 +21,9 @@ type orchestrator_reading = {
 type reading = {
   docker : Host_inventory.t;  (** the host's own containers, over SSH *)
   crontab : Crontab_listing.t;  (** the Bondi section of the host's crontab *)
+  payloads : Cron_payload.listing;
+      (** what the host's payload directory holds, or why that is not known —
+          which is the half of a host's cron state no crontab read can see *)
   orchestrator : (orchestrator_reading, Status_report.unavailability) result;
       (** the orchestrator's account, or why there is none — which distinguishes
           a source that was never reached from one that answered unreadably *)
@@ -31,6 +34,7 @@ val reading_of_reads :
   listing:(string, Remote_exec.failure) result ->
   inspection:(string, Remote_exec.failure) result ->
   crontab:(string, Remote_exec.failure) result ->
+  payloads:(string, Remote_exec.failure) result ->
   orchestrator:(orchestrator_reading, Status_report.unavailability) result ->
   reading
 (** Assemble a reading from the outcome of each read.
@@ -38,11 +42,11 @@ val reading_of_reads :
     Every argument is the call's own outcome rather than a sentence about it, so
     a read that never happened stays distinguishable from one that answered and
     found nothing, and a host that answered badly stays distinguishable from one
-    that was never reached. Each of the three is handed to the module that owns
+    that was never reached. Each of the four is handed to the module that owns
     that reading, and each of those decides for itself what a
     {!Remote_exec.failure} means for the thing it reports. This is the single
-    place those four outcomes are turned into the report's own vocabulary, which
-    is why it is a function rather than four lines inside {!gather}: it can be
+    place those five outcomes are turned into the report's own vocabulary, which
+    is why it is a function rather than five lines inside {!gather}: it can be
     checked without a host. *)
 
 val gather :

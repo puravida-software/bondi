@@ -45,7 +45,9 @@ leaves a running one.
   >   *'/var/spool/cron/crontabs/root'*)
   >     if [ -n "$CRONTAB_SPOOL" ]; then cat "$CRONTAB_SPOOL"; else echo BONDI_CRONTAB_ABSENT; fi ;;
   >   *'docker cp'*) : ;;
-  >   *BONDI_CRON_PAYLOAD_LISTED*) echo BONDI_CRON_PAYLOAD_LISTED ;;
+  >   *BONDI_CRON_PAYLOAD_LISTED*)
+  >     echo BONDI_CRON_PAYLOAD_LISTED
+  >     echo BONDI_CRON_PAYLOAD_END ;;
   >   *'PortBindings'*) echo "${PUBLISHED_ON-127.0.0.1}" ;;
   >   'docker update'*)
   >     if [ -n "$RESTART_UPDATE_STICKS" ]; then printf 'unless-stopped\n' > "$RESTART_POLICY"; fi
@@ -317,7 +319,7 @@ to the stub's last arm answers with nothing, which this client reads as "the
 directory could not be listed" rather than as an empty one, so an unanswered arm
 would make the assertions below pass while proving nothing reached the host.
 
-  $ printf 'BONDI_CRONTAB_CONTENTS\n# BEGIN BONDI CRON\n0 3 * * * docker exec bondi-orchestrator sh -c '"'"'bondi-server run < /etc/bondi/cron/nightly-report/run.json'"'"'\n# END BONDI CRON\n' > crontab-spool.txt
+  $ printf 'BONDI_CRONTAB_CONTENTS\n# BEGIN BONDI CRON\n0 3 * * * docker exec bondi-orchestrator sh -c '"'"'bondi-server run < /etc/bondi/cron/nightly-report/run.json'"'"'\n# END BONDI CRON\nBONDI_CRONTAB_END\n' > crontab-spool.txt
   $ export CRONTAB_SPOOL="$PWD/crontab-spool.txt"
   $ printf 'running\tmlopez1506/bondi-server:0.9.0\n' > "$ORCHESTRATOR_PS"
   $ printf 'unless-stopped\n' > "$RESTART_POLICY"
@@ -329,8 +331,16 @@ would make the assertions below pass while proving nothing reached the host.
 The listing comes back empty, so the job the section names holds neither file --
 which is the loss this phase exists to report rather than to hide.
 
-  $ grep 'cron job nightly-report' out.log
+The run says it twice, and the two are not a duplicate: the first is the listing
+taken with the copy, before anything stopped the container, and the second is the
+report taken after the whole run, which is the state the operator is left with.
+A run that repaired the job between them would print the first and not the
+second, and that difference is the only thing that could tell them apart.
+
+  $ grep 'cron job nightly-report' out.log | sed 's/^ *//' | sort -u
   cron job nightly-report on server 127.0.0.1 has neither its run file nor its secret environment file on the box, so it fails at its next fire until it is deployed again
+  $ grep -c 'cron job nightly-report' out.log
+  2
 
 The line above is worth nothing on its own: it is the only assertion in this
 block that a degraded read silences, and it is silenced by absence. A crontab

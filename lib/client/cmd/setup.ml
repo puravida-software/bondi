@@ -5,6 +5,7 @@ let ( let* ) = Result.bind
 (* ------------------------------------------------------------------------- *)
 
 module Managed_container = Bondi_common.Managed_container
+module Cron_exec_line = Bondi_common.Cron_exec_line
 
 (* The listing that produces this state is a remote command that can fail to run
    at all, so "no container" and "no answer" are separate constructors. Reading
@@ -85,7 +86,7 @@ type action =
   | EnsureNetwork of string
   | RequireCronDocker
   | RequireCronCurl
-  | PreserveCronPayloads of { jobs : Crontab_listing.named_job list }
+  | PreserveCronPayloads of { crontab : Crontab_listing.t }
   | StopOrchestrator
   | RemoveOrchestrator
   | RunServer
@@ -139,7 +140,8 @@ let phase_of_action : action -> Setup_phases.phase = function
    --rm, a container that died on startup is still on the host, and a plain [ps]
    cannot see it. *)
 let orchestrator_ps_command =
-  "ps -a --filter name=^/bondi-orchestrator$ --format '{{.State}}\t{{.Image}}'"
+  Printf.sprintf "ps -a --filter name=^/%s$ --format '{{.State}}\t{{.Image}}'"
+    Cron_exec_line.orchestrator_container
 
 (* ------------------------------------------------------------------------- *)
 (* Orchestrator run command (pure, testable)                                  *)
@@ -211,18 +213,21 @@ let orchestrator_run_command ~cron_payload_needed (config : Config_file.t) :
        readiness check. *)
     Ok
       (Printf.sprintf
-         "docker run -d --name bondi-orchestrator --restart %s -p %s:3030:3030 \
-          -v /var/run/docker.sock:/var/run/docker.sock%s%s%s --group-add \
-          $(stat -c %%g /var/run/docker.sock) --label bondi.managed=true \
-          --label bondi.type=infrastructure --label bondi.logs=true %s"
+         "docker run -d --name %s --restart %s -p %s:3030:3030 -v \
+          /var/run/docker.sock:/var/run/docker.sock%s%s%s --group-add $(stat \
+          -c %%g /var/run/docker.sock) --label bondi.managed=true --label \
+          bondi.type=infrastructure --label bondi.logs=true %s"
+         Cron_exec_line.orchestrator_container
          Bondi_common.Defaults.bondi_restart_policy bind volume_mounts user_flag
          token_env image)
 
 (* What the host reports its published binding as, so setup can check that what
    it asked for is what it got rather than assuming the run command took. *)
 let orchestrator_port_command =
-  "docker inspect bondi-orchestrator -f '{{range $p, $c := \
-   .HostConfig.PortBindings}}{{range $c}}{{.HostIp}}{{end}}{{end}}'"
+  Printf.sprintf
+    "docker inspect %s -f '{{range $p, $c := .HostConfig.PortBindings}}{{range \
+     $c}}{{.HostIp}}{{end}}{{end}}'"
+    Cron_exec_line.orchestrator_container
 
 let published_binding_matches ~expected output =
   let got = String.trim output in
@@ -238,7 +243,8 @@ let published_binding_matches ~expected output =
    initiative were found at `no` on a live box with a pending kernel reboot.
    Creation is therefore not the only moment the policy can be checked. *)
 let orchestrator_restart_command =
-  "docker inspect bondi-orchestrator -f '{{.HostConfig.RestartPolicy.Name}}'"
+  Printf.sprintf "docker inspect %s -f '{{.HostConfig.RestartPolicy.Name}}'"
+    Cron_exec_line.orchestrator_container
 
 (* docker update writes HostConfig.RestartPolicy.Name on the running container:
    same pid, same StartedAt, no signal -- measured 2026-09-02 against Docker
@@ -247,7 +253,8 @@ let orchestrator_restart_command =
    other reason; recreating it would drop TLS for every site on the box to
    change a flag. *)
 let orchestrator_restart_update_command ~policy =
-  Printf.sprintf "docker update --restart=%s bondi-orchestrator" policy
+  Printf.sprintf "docker update --restart=%s %s" policy
+    Cron_exec_line.orchestrator_container
 
 let declared_restart_matches ~expected output =
   let got = String.trim output in
@@ -836,14 +843,18 @@ let cron_payload_needed (config : Config_file.t) (ctx : setup_context) : bool =
    the crontab line that reads them stays in the spool file and goes on firing.
    The directory is copied out onto the host first.
 
-   Only the names leave here. A line, and every part of one, stays on the box. *)
+   The section's own outcome travels, not a list of names taken out of it: what
+   may be said about the files on the box differs by outcome, and the payload
+   reporting is where that is decided. A line, and every part of one, stays on
+   the box all the same. Three of that outcome's four shapes carry nothing but
+   names and positions by construction; the fourth carries the transport's own
+   account of a read that failed, which its own reader cuts at the marker
+   printed ahead of the file's first byte, and which the report this phase
+   prints does not say. *)
 let cron_payload_preserve (config : Config_file.t) (ctx : setup_context) :
     action list =
   if cron_payload_needed config ctx then
-    [
-      PreserveCronPayloads
-        { jobs = Crontab_listing.named_jobs_with_shape ctx.crontab };
-    ]
+    [ PreserveCronPayloads { crontab = ctx.crontab } ]
   else []
 
 (* Converge on "the declared version is serving". Every state that is not that
@@ -1022,9 +1033,9 @@ let plan_for_config (config : Config_file.t) (ctx : setup_context) =
     | Orchestrator_undetermined message ->
         Error
           (Printf.sprintf
-             "could not list the bondi-orchestrator container on the server, \
-              so setup will not act on whether it is running: %s"
-             message)
+             "could not list the %s container on the server, so setup will not \
+              act on whether it is running: %s"
+             Cron_exec_line.orchestrator_container message)
     | Orchestrator_absent
     | Orchestrator_not_running
     | Orchestrator_running _ ->
@@ -1067,7 +1078,9 @@ let plan_for_config (config : Config_file.t) (ctx : setup_context) =
 let excluded_containers_from_config (config : Config_file.t) =
   match config.user_service with
   | Some svc when svc.logs = Some false -> [ svc.name ]
-  | _ -> []
+  | Some _
+  | None ->
+      []
 
 let alloy_river_config (config : Config_file.t) (alloy : Config_file.alloy) :
     Bondi_common.Alloy_river.config =
@@ -1211,14 +1224,13 @@ let interpret ~cron_payload_needed (server : Config_file.server)
               Error
                 (Printf.sprintf
                    "cron cannot find docker on server %s. The crontab line \
-                    bondi writes runs `docker exec bondi-orchestrator`, and \
-                    cron gives a job a minimal PATH rather than the login one \
-                    this setup run uses, so a docker outside it answers over \
-                    ssh and still fails every scheduled job at its next fire. \
-                    Install Docker from the distribution's packages, or place \
-                    it on the PATH cron runs jobs with, then run bondi setup \
-                    again."
-                   ip_address)
+                    bondi writes runs `docker exec %s`, and cron gives a job a \
+                    minimal PATH rather than the login one this setup run \
+                    uses, so a docker outside it answers over ssh and still \
+                    fails every scheduled job at its next fire. Install Docker \
+                    from the distribution's packages, or place it on the PATH \
+                    cron runs jobs with, then run bondi setup again."
+                   ip_address Cron_exec_line.orchestrator_container)
           | Cron_docker_undetermined message ->
               Error
                 (Printf.sprintf
@@ -1259,7 +1271,7 @@ let interpret ~cron_payload_needed (server : Config_file.server)
                 | [] -> output
                 | line :: _ -> line)));
         Ok ()
-    | PreserveCronPayloads { jobs } ->
+    | PreserveCronPayloads { crontab } ->
         (* The copy runs on the box and the files never come here. What is
            preserved is a run payload and a credential file, and a client that
            read them in and wrote them back would put both through the
@@ -1279,25 +1291,27 @@ let interpret ~cron_payload_needed (server : Config_file.server)
         (* What survived is read back rather than assumed: the copy tolerates a
            container that never held the directory, which is precisely the host
            whose jobs have already lost their files. Which of them did is
-           decided in [Cron_payload.shortfalls] and said in
-           [Cron_payload.report]; this arm only obtains the listing and prints
-           what comes back. *)
+           decided in [Cron_payload.divergences] and said in
+           [Cron_payload.report], along with the jobs the section no longer
+           fires; this arm only obtains the listing and prints what comes back. *)
         let listing =
           Cron_payload.of_listing_output
             (Remote_exec.command_output ~command:Cron_payload.listing_command
                server)
         in
         List.iter print_endline
-          (Cron_payload.report ~server:ip_address ~jobs listing);
+          (Cron_payload.report ~server:ip_address ~crontab listing);
         Ok ()
     | StopOrchestrator ->
         let* _ =
           Remote_exec.docker_command_output_text
-            ~command:"stop bondi-orchestrator" server
+            ~command:
+              (Printf.sprintf "stop %s" Cron_exec_line.orchestrator_container)
+            server
         in
         print_endline
-          (Printf.sprintf "Stopped bondi-orchestrator container on server %s"
-             ip_address);
+          (Printf.sprintf "Stopped %s container on server %s"
+             Cron_exec_line.orchestrator_container ip_address);
         Ok ()
     | RemoveOrchestrator ->
         (* Asserts the outcome rather than the command's exit status: an
@@ -1306,15 +1320,18 @@ let interpret ~cron_payload_needed (server : Config_file.server)
            container" on a host that is in exactly the state wanted. What
            matters is that no container holds the name afterwards. *)
         let cmd =
-          "docker rm --force bondi-orchestrator > /dev/null 2>&1; docker ps -a \
-           --filter name=^/bondi-orchestrator$ --format '{{.Names}}' | grep -q \
-           . && { echo 'bondi-orchestrator could not be removed' >&2; exit 1; \
-           } || true"
+          Printf.sprintf
+            "docker rm --force %s > /dev/null 2>&1; docker ps -a --filter \
+             name=^/%s$ --format '{{.Names}}' | grep -q . && { echo '%s could \
+             not be removed' >&2; exit 1; } || true"
+            Cron_exec_line.orchestrator_container
+            Cron_exec_line.orchestrator_container
+            Cron_exec_line.orchestrator_container
         in
         let* _ = Remote_exec.command_output_text ~command:cmd server in
         print_endline
-          (Printf.sprintf "Removed bondi-orchestrator container on server %s"
-             ip_address);
+          (Printf.sprintf "Removed %s container on server %s"
+             Cron_exec_line.orchestrator_container ip_address);
         Ok ()
     | RunServer ->
         let image = "mlopez1506/bondi-server:" ^ config.bondi_server.version in
@@ -1369,8 +1386,8 @@ let interpret ~cron_payload_needed (server : Config_file.server)
                 ~diagnostics)
         in
         print_endline
-          (Printf.sprintf "bondi-orchestrator is serving on server %s: %s"
-             ip_address image);
+          (Printf.sprintf "%s is serving on server %s: %s"
+             Cron_exec_line.orchestrator_container ip_address image);
         Ok ()
     | EnsureAlloyConfig -> (
         match config.alloy with
@@ -1644,11 +1661,12 @@ let converge_orchestrator_restart_policy (server : Config_file.server) =
   | Restart_policy_unreadable ->
       Error
         (Printf.sprintf
-           "bondi-orchestrator restart policy on server %s could not be read \
-            -- `%s` reported nothing, which is what a removed or unreadable \
-            container looks like, so its restart policy was left alone rather \
-            than corrected blind"
-           ip_address orchestrator_restart_command)
+           "%s restart policy on server %s could not be read -- `%s` reported \
+            nothing, which is what a removed or unreadable container looks \
+            like, so its restart policy was left alone rather than corrected \
+            blind"
+           Cron_exec_line.orchestrator_container ip_address
+           orchestrator_restart_command)
   | Restart_policy_needs_update { observed; command } ->
       let* _ = Remote_exec.command_output_text ~command server in
       let* applied =
@@ -1659,19 +1677,18 @@ let converge_orchestrator_restart_policy (server : Config_file.server) =
         declared_restart_matches ~expected applied
         |> Result.map_error (fun got ->
             Printf.sprintf
-              "bondi-orchestrator restart policy on server %s is still %s \
-               after asking for %s -- refusing to report success on a posture \
-               that was not applied"
-              ip_address got expected)
+              "%s restart policy on server %s is still %s after asking for %s \
+               -- refusing to report success on a posture that was not applied"
+              Cron_exec_line.orchestrator_container ip_address got expected)
       in
       (* Operator-visible on purpose: a box that needed correcting is a box
          whose containers would not have come back, and naming both policies is
          what makes the line a reading rather than a reassurance. *)
       print_endline
         (Printf.sprintf
-           "bondi-orchestrator restart policy on server %s was %s, corrected \
-            to %s without restarting it"
-           ip_address observed expected);
+           "%s restart policy on server %s was %s, corrected to %s without \
+            restarting it"
+           Cron_exec_line.orchestrator_container ip_address observed expected);
       Ok ()
 
 (* ------------------------------------------------------------------------- *)
@@ -1712,16 +1729,14 @@ let setup_server config server =
       | Orchestrator_not_running ->
           print_endline
             (Printf.sprintf
-               "bondi-orchestrator on server %s exists but is not running, \
-                replacing it..."
-               ip_address)
+               "%s on server %s exists but is not running, replacing it..."
+               Cron_exec_line.orchestrator_container ip_address)
       | Orchestrator_running { version = running } ->
           if not (List.mem RunServer actions) then
             print_endline
               (Printf.sprintf
-                 "bondi-orchestrator container is already running on server \
-                  %s: %s, skipping..."
-                 ip_address running)
+                 "%s container is already running on server %s: %s, skipping..."
+                 Cron_exec_line.orchestrator_container ip_address running)
           else
             let reason =
               if running <> config.bondi_server.version then
@@ -1730,9 +1745,8 @@ let setup_server config server =
               else "adding cron job support"
             in
             print_endline
-              (Printf.sprintf
-                 "bondi-orchestrator on server %s: %s, stopping to restart..."
-                 ip_address reason));
+              (Printf.sprintf "%s on server %s: %s, stopping to restart..."
+                 Cron_exec_line.orchestrator_container ip_address reason));
       let* () =
         interpret
           ~cron_payload_needed:(cron_payload_needed config context)

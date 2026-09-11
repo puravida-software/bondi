@@ -17,13 +17,12 @@
     mode and ownership the writer gave them.
 
     Everything this module returns is a job's name, a fact about a file's
-    presence, or a path under the payload directory. Never a file's contents and
-    never a crontab line: nothing here opens a file, and {!listing_command}
-    prints paths and nothing else, so no output of it can carry a secret to cut
-    out of. That is why this has no counterpart to the redaction
-    {!Crontab_listing} performs, whose reads return a spool file in which every
-    line may be a credential — the difference is in what the two commands can
-    print, not in how carefully their results are filtered.
+    presence, or a path under the payload directory. Never a file's contents:
+    nothing here opens a file, and {!listing_command} prints paths and nothing
+    else. The two files are where a job's command, its environment and its
+    credentials live, so this is the guarantee that matters — they are written
+    on the box, copied on the box and read on the box, and a client that never
+    opens one cannot disclose it.
 
     The one value that carries text the host wrote is {!Unlisted}, and what it
     carries is the transport's own account of a call that failed, which on a
@@ -31,6 +30,14 @@
     holds a job's name and the fixed names of its two files, and the job's name
     is what this module exists to report, so there is nothing in one that is not
     already on its way to the operator.
+
+    A job's name reaches this module twice over and by two routes, and neither
+    of them opens anything. The crontab section hands over the names its lines
+    read, and the listing's own paths carry the rest: a path under the payload
+    directory is a job's name and one of two fixed file names, so the name is
+    recovered from the path and the path is then rebuilt from the name, exactly
+    as the line's reader does. A path that is neither of a job's two files
+    answers for no job rather than becoming one.
 
     It performs no I/O. The caller runs {!preserve_command} and
     {!listing_command} on the server and brings the output here, in the same
@@ -48,22 +55,26 @@ type listing =
   | Root_absent  (** the host answered that the directory is not there *)
   | Unlisted of string  (** the directory was never listed *)
 
-(** What a job named by the section is missing from the payload directory — or,
-    for a job that keeps nothing there, why it is missing nothing.
+(** What a job named by the section is missing from the payload directory.
 
     A job holding both files is not one of these: it is absent from the report
     entirely, so nothing has to be said about the ordinary case. Each of the
-    four is a different sentence to an operator — a job with no run file fails
+    three is a different sentence to an operator — a job with no run file fails
     at its next fire, a job with no environment file runs on with an empty one,
-    and a job whose payload is on its crontab line goes on working exactly as it
-    did. *)
+    and a job with neither does both. *)
 type shortfall =
   | Env_file_missing  (** the secret environment file survives nowhere *)
   | Run_file_missing  (** the run payload file survives nowhere *)
   | Both_files_missing  (** neither survives *)
-  | Payload_on_the_line
-      (** the job is named by a legacy line carrying its own payload: it keeps
-          no files here, never did, and has lost nothing *)
+
+(** A disagreement between the two sources, in whichever direction it runs. *)
+type divergence =
+  | Job_missing_files of { job : string; shortfall : shortfall }
+      (** the section names it; the directory does not hold what it fires *)
+  | Files_without_a_line of { job : string; unnamed_entries : int list }
+      (** the directory holds a job's files and no line the section reader could
+          name fires them; [unnamed_entries] are the positions of the entries no
+          reader could name, empty when the section was read whole *)
 
 val preserve_command : string
 (** The shell command that copies the payload directory out of the existing
@@ -87,16 +98,16 @@ val preserve_command : string
     every later run would skip the copy on the strength of the residue.
 
     A host whose section's markers do not balance is copied out of all the same,
-    and nothing is reported about it: {!Crontab_listing} names no job in a
-    section it could not make sense of, so {!shortfalls} has no job to answer
-    for and the report is empty. That is the safe pair. The copy costs a
-    directory on a host nothing is about to rewrite, while skipping it on the
-    one host whose crontab Bondi understands least is how the recreate deletes
-    the files of lines that go on firing.
+    and nothing is reported about it: {!Crontab_listing.jobs_read} answers that
+    there was no section to name jobs from, so {!divergences} has nothing to
+    compare in either direction and the report says only that. That is the safe
+    pair. The copy costs a directory on a host nothing is about to rewrite,
+    while skipping it on the one host whose crontab Bondi understands least is
+    how the recreate deletes the files of lines that go on firing.
 
     It always exits 0. A container that holds no such directory is not a
     failure: the files were lost before this run, which is a fact for
-    {!shortfalls} to report rather than a reason to refuse. Nor is a host that
+    {!divergences} to report rather than a reason to refuse. Nor is a host that
     refuses [sudo -n] — which is the very host whose crontab could not be read,
     and so the very host a preserve is planned for, so a non-zero exit here
     would abort setup on it every time. Every host-side failure is therefore
@@ -120,6 +131,17 @@ val listing_command : string
     plainly there — and that false absence would be reported as every job on the
     host having lost its files. It never waits on a password prompt.
 
+    It says where the paths end as well as where they begin, and the listing's
+    own success is what says it. The guard asks only whether the directory can
+    be opened, so a listing that then fails — refused by the same rule that
+    permitted the guard, killed part-way through, or stopped on something it
+    could not descend — would otherwise hand back part of the directory with
+    nothing to say it was a part. The closing marker is joined to the listing's
+    exit rather than printed after it, which is the protocol
+    {!Crontab_listing.read_command} uses and not a second one: the two are read
+    into one comparison, and a guard on one side only makes a reported
+    disagreement real in one direction.
+
     Only the file paths are printed. Nothing reads a file, so no output of this
     command can carry what one holds. *)
 
@@ -132,47 +154,101 @@ val of_listing_output : (string, Remote_exec.failure) result -> listing
     was listed and holds nothing. Output carrying none of the command's markers
     is {!Unlisted} rather than an empty directory: a stub, a truncated stream
     and a shell that never ran the command all answer with nothing, and reading
-    that as "the directory is empty" names every job on the host. *)
+    that as "the directory is empty" names every job on the host.
 
-val shortfalls :
-  jobs:Crontab_listing.named_job list -> listing -> (string * shortfall) list
-(** What each of [jobs] does not hold in the payload directory, in the order the
-    jobs were given, omitting the jobs that hold everything they should.
+    A stream cut after the opening marker is {!Unlisted} too, and that is the
+    closing marker's whole purpose. Such output is paths announced and not
+    delivered, or delivered in part, and neither is a directory: the first read
+    as an empty one names every job the section fires as having lost both its
+    files, and the second names every job below the cut as having lost them.
+    Both are a disagreement invented out of a listing that never finished. The
+    marker is matched as its own line, newline and all, so a path whose own name
+    ends in the word cannot close a listing the host never closed. A directory
+    the host listed and found empty prints the two markers with nothing between
+    and is an answer, not a truncation. *)
 
-    A job named by an exec line is expected to hold the two files
-    {!Bondi_common.Cron_exec_line.run_file_of} and
-    {!Bondi_common.Cron_exec_line.env_file_of} name, which are the paths the
-    orchestrator writes and the paths its crontab lines read. They are compared
-    whole rather than by their last segment, so a file the host reports from
-    somewhere else under the directory answers for no job.
+val divergences : crontab:Crontab_listing.t -> listing -> divergence list
+(** Where the crontab section and the payload directory disagree, in both
+    directions: first the jobs the section names whose files the directory does
+    not hold, in the order the section's entries appear, then the jobs whose
+    files it holds that the section does not name, in name order. That is the
+    order within the disagreements; {!report} keeps it and prints a line for a
+    source that was never read ahead of the whole of it, so the order an
+    operator sees is stated there and not composed from two places here.
 
-    A job named by a legacy line is answered from its shape alone and never from
-    the directory. Its payload is on the line, so it holds neither file on any
-    host and on no host has it lost one: judging it by the same absence would
-    tell the operator that every unmigrated job on the box fails at its next
-    fire, which on the boxes this phase was written for is most of them. It is
-    still reported, as {!Payload_on_the_line}, because a legacy line still on
-    the box is the one thing about that job worth saying — and it is reported
-    whatever the listing did, since what makes it legacy was read from the
-    crontab rather than from the directory.
+    A job holding both its files under a line that names it is neither, so it is
+    absent entirely and the ordinary host answers with nothing.
 
-    For an exec-line job, a listing that was never taken yields nothing at all
-    rather than every job: a read that failed is not the host's answer, and a
-    report naming every job on a host whose directory was never read is a claim
-    about files nobody looked at. A directory the host says is not there is the
-    host's answer, and every such job is named. *)
+    [crontab] is the section's own outcome and not a list of names, because what
+    is knowable here differs by outcome and a projection to names loses the
+    difference. A section nobody read — a spool that never arrived, or markers
+    that do not balance — yields nothing at all. The first direction has no name
+    to ask about; the second would report every job in the directory as having
+    no line firing it, on the strength of a section that was never delivered.
+    That is the same claim about a source nobody looked at that a listing which
+    was never taken is refused below, and the host it would be made about is the
+    one that refuses [sudo -n], which is precisely the host a preserve is
+    planned for. A section the host answered that holds no Bondi line at all is
+    the opposite case: that host fires none of Bondi's jobs, and files on it are
+    a divergence worth naming.
+
+    A listing that was never taken yields nothing either, for the same reason
+    and in both directions. A directory the host says is not there is the host's
+    answer: every job the section names has lost both files and is named, and
+    nothing is reported the other way, because a directory that is not there
+    holds no file whose line could be missing.
+
+    A section read whole and a section holding an entry no reader could name are
+    also different, and the second direction carries which it was.
+    {!Crontab_listing.jobs_read} does not name such an entry — the line fires
+    all the same, and it may be the very line firing a job whose files are here
+    — so every {!Files_without_a_line} carries the positions of the entries
+    nobody could name, empty where the section was read whole. What is claimed
+    about the host is then a claim about lines that were actually read, which is
+    the same rule the outcomes above are kept apart for. The positions are where
+    an operator opens the file, and they are what points at the reconciliation.
+*)
 
 val report :
-  server:string -> jobs:Crontab_listing.named_job list -> listing -> string list
+  server:string -> crontab:Crontab_listing.t -> listing -> string list
 (** What the preserve found on [server], as the lines to print, in the order to
     print them.
 
-    Empty for the ordinary host: every job holds both its files and there is
-    nothing an operator has to be told. A listing that was never taken is said
-    first and out loud, because silence there would read as every job holding
-    its files; a directory the host says is not there adds no such line, because
-    that is the host answering rather than failing to. Each job {!shortfalls}
-    names then gets the one sentence its own shortfall earns.
+    Empty for the ordinary host: the two sources agree and there is nothing an
+    operator has to be told. Silence is therefore meaningful, which is what
+    makes the loud cases legible.
+
+    A source that was never read is said out loud and first — the section, then
+    the directory — because silence there would read as the two agreeing. Both
+    of them going unread is one sentence naming both, and not two: a host that
+    refuses a privileged read refuses both reads for the one reason, and the
+    caller has already printed that reason above these lines. Either source
+    failing on its own keeps a sentence of its own — a section read against a
+    directory that was not, and the reverse, are different facts and send an
+    operator to different places. A directory the host says is not there adds no
+    such line, and neither does a section the host answered holds nothing: those
+    are the host answering rather than failing to. Each divergence
+    {!divergences} finds then gets the one sentence its own outcome earns, in
+    that function's order — the jobs the section names whose files are missing
+    before the jobs whose files have no line. At most one unread line is
+    possible, so the whole order is that line, if there is one, and then those
+    two groups.
+
+    The sentence for a job whose files no line fires is the one that has to be
+    chosen with care, because it is the only one making a claim about lines
+    rather than about files. Where the section was read whole it says the job
+    never runs, which is then true: every line was read and none of them names
+    it. Where the section held an entry nobody could name it says instead that
+    no line {i that could be read} fires the job, and names the positions to go
+    and look at — that entry fires on its schedule, and on a host part-way
+    through the migration off the shape an older bondi wrote it is the line
+    firing this very job.
+
+    The section's half carries no account of why. That read is not this
+    module's, and the caller's own crontab reporting is where what went wrong is
+    said; this line says what is consequently not known here. So where the two
+    are said together, the account carried is the listing's, and it is attached
+    to the clause naming the listing.
 
     The wording lives here rather than in the caller's interpreter for the
     reason {!Setup_phases.failure_message}'s does: these sentences are the whole

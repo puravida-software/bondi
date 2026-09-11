@@ -3,6 +3,7 @@ module Status = Bondi_client.Orchestrator_status
 module Report = Bondi_client.Status_report
 module Inventory = Bondi_client.Host_inventory
 module Crontab = Bondi_client.Crontab_listing
+module Payload = Bondi_client.Cron_payload
 module Config_file = Bondi_client.Config_file
 
 (* --- Test helpers ---
@@ -30,6 +31,7 @@ let render ~(config : Config_file.t) results =
                ~orchestrator:(Ok (Status.components_of status))
                ~waits:[];
            crontab = Crontab.No_section;
+           payloads = Payload.Payloads { files = [] };
            warnings = status.errors;
          })
        results)
@@ -45,6 +47,7 @@ let render_json ~(config : Config_file.t) results =
                ~orchestrator:(Ok (Status.components_of status))
                ~waits:[];
            crontab = Crontab.No_section;
+           payloads = Payload.Payloads { files = [] };
            warnings = status.errors;
          })
        results)
@@ -304,8 +307,23 @@ let test_format_json () =
           check bool "has infrastructure key" true
             (List.mem "infrastructure" keys);
           check bool "has errors key" true (List.mem "errors" keys)
-      | _ -> fail "expected server status to be an object")
-  | _ -> fail "expected top-level object with single server key"
+      | `String _
+      | `Int _
+      | `Float _
+      | `Bool _
+      | `Null
+      | `List _
+      | `Intlit _ ->
+          fail "expected server status to be an object")
+  | `Assoc _
+  | `String _
+  | `Int _
+  | `Float _
+  | `Bool _
+  | `Null
+  | `List _
+  | `Intlit _ ->
+      fail "expected top-level object with single server key"
 
 (* 8. test_format_table_with_alloy — alloy present in infrastructure → alloy row shown *)
 let test_format_table_with_alloy () =

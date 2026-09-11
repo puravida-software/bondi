@@ -42,6 +42,13 @@ the declared version, so the run reduces to the alloy phase.
   >   *'cat > '*'/etc/bondi/alloy/env'*) : ;;
   >   *'--name bondi-alloy'*) echo 'd671990dc2318f4b' ;;
   >   *'/var/spool/cron/crontabs/root'*) echo BONDI_CRONTAB_ABSENT ;;
+  >   # The payload directory the crontab section is compared against. Without
+  >   # this arm the command falls through to *) and answers nothing, which is a
+  >   # listing that never happened rather than a directory that is empty -- and
+  >   # the report says so, correctly, in a fixture that is about something else.
+  >   *BONDI_CRON_PAYLOAD_LISTED*)
+  >     echo BONDI_CRON_PAYLOAD_LISTED
+  >     echo BONDI_CRON_PAYLOAD_END ;;
   >   *'PortBindings'*) echo '127.0.0.1' ;;
   >   # The host's applied restart policy. Without this arm the command falls
   >   # through to *) and answers nothing, which setup reads as a refusal to

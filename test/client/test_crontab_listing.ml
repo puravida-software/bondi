@@ -6,11 +6,15 @@ let contains = Test_helpers.contains
 
 (* --- Fixtures ---
 
-   Every fixture below is a spool file as the orchestrator writes it: a marked
-   section of curl invocations, each carrying its job description inside the
-   payload of a -d argument. The payload is where the secrets live, so the
-   fixtures carry a realistic one rather than a sanitised placeholder — a
-   sanitised entry cannot catch a parser that hands the payload back.
+   Every fixture below is a spool file, and two kinds of line appear in them.
+   The shape the orchestrator writes, and the only one this reader understands,
+   is built by [exec_entry] further down. The shape it wrote before that one is
+   built by [entry] just below: a curl invocation carrying its whole job
+   description inside the payload of a -d argument. Nothing writes that shape
+   any more and this reader cannot name it, but a crontab is a file anything may
+   write and the payload is where the secrets live — so the fixtures carry a
+   realistic one rather than a sanitised placeholder, because a sanitised entry
+   cannot catch a parser that hands the payload back.
 
    The one builder every test reads through takes the spool's lines, because
    that is the only input a listing has: two arms differing in their outcome
@@ -40,42 +44,29 @@ let entry ~schedule ~job ~secret =
 let secret = "sk-live-9f3c1d77b0e24a8e"
 let daily_close = entry ~schedule:"5 21 * * 1-5" ~job:"daily-close" ~secret
 let rebalance = entry ~schedule:"0 6 * * *" ~job:"rebalance" ~secret
-
-(* The same entry as [rebalance], cut where a partial write or a hand-edit would
-   leave it: the payload is still on the line, and still carries the secret, but
-   its quoting no longer closes. Its twin above is what makes the pair
-   meaningful — the two differ only in the three characters that end it. *)
-let rebalance_truncated = String.sub rebalance 0 (String.length rebalance - 3)
-
-(* A line an operator added by hand, outside anything Bondi wrote. It carries
-   the same secret shape, so a parser that reads the whole file rather than the
-   marked section leaks it just as surely as one that quotes a Bondi entry. *)
-let hand_added = entry ~schedule:"*/5 * * * *" ~job:"operator-cleanup" ~secret
 let begin_marker = "# BEGIN BONDI CRON"
 let end_marker = "# END BONDI CRON"
 
 (* What the read command prints, as it prints it. The contents marker comes
    first and the file follows it, which is the property the redaction below
-   rests on: nothing the file holds can appear ahead of the marker. *)
+   rests on: nothing the file holds can appear ahead of the marker.
+
+   The end marker is printed after the last byte of the file, and it is what
+   makes a complete read a thing the reader is told rather than a thing it
+   infers. Every fixture built through [spool_of] is a read that finished, so a
+   case about a read that did not finish has to say so by leaving it off. *)
 let contents_marker = "BONDI_CRONTAB_CONTENTS"
+let end_of_contents_marker = "BONDI_CRONTAB_END"
 let absent_marker = "BONDI_CRONTAB_ABSENT"
 let unreadable_marker = "BONDI_CRONTAB_UNREADABLE"
 
 let spool_of lines =
-  Listing.of_read_output (Ok (String.concat "\n" (contents_marker :: lines)))
-
-let well_formed = [ begin_marker; daily_close; rebalance; end_marker; "" ]
-
-let with_truncated_entry =
-  [ begin_marker; daily_close; rebalance_truncated; end_marker; "" ]
+  Listing.of_read_output
+    (Ok
+       (String.concat "\n"
+          ((contents_marker :: lines) @ [ end_of_contents_marker ])))
 
 let empty_section = [ begin_marker; end_marker; "" ]
-let no_markers = [ hand_added; "" ]
-let end_without_begin = [ daily_close; end_marker; "" ]
-let never_ends = [ begin_marker; daily_close; "" ]
-
-let nested =
-  [ begin_marker; daily_close; begin_marker; rebalance; end_marker; "" ]
 
 (* The shape the orchestrator writes now: a schedule, a [docker exec] into the
    orchestrator, and the path of the job's run file. There is no payload on the
@@ -96,6 +87,19 @@ let exec_entry ~schedule ~job =
 let daily_close_exec = exec_entry ~schedule:"5 21 * * 1-5" ~job:"daily-close"
 let rebalance_exec = exec_entry ~schedule:"0 6 * * *" ~job:"rebalance"
 
+(* A line an operator added by hand, outside anything Bondi wrote. It is a line
+   the reader can name, which is what makes the pair it appears in about the
+   markers: the same line names its job inside them and nothing outside them, so
+   an outcome that differed could only have come from where it sat. *)
+let hand_added = exec_entry ~schedule:"*/5 * * * *" ~job:"operator-cleanup"
+
+(* The same line as [rebalance_exec], cut where a partial write or a hand-edit
+   would leave it: the path is still there and its quoting no longer closes. Its
+   twin above is what makes the pair meaningful — the two differ only in the
+   three characters that end it. *)
+let rebalance_exec_truncated =
+  String.sub rebalance_exec 0 (String.length rebalance_exec - 3)
+
 (* A line carrying the exec command and a path no writer could have written.
    The name a reader would lift straight out of it is a fragment of somebody
    else's path, so this is a line of neither shape and has to go unnamed. The
@@ -104,23 +108,40 @@ let rebalance_exec = exec_entry ~schedule:"0 6 * * *" ~job:"rebalance"
 let escaping_exec =
   exec_line ~schedule:"0 3 * * *" ~path:"/etc/bondi/cron/../../passwd/run.json"
 
-let legacy_only_section = [ begin_marker; daily_close; end_marker; "" ]
+let well_formed =
+  [ begin_marker; daily_close_exec; rebalance_exec; end_marker; "" ]
+
+let with_truncated_entry =
+  [ begin_marker; daily_close_exec; rebalance_exec_truncated; end_marker; "" ]
+
+let no_markers = [ hand_added; "" ]
+let end_without_begin = [ daily_close_exec; end_marker; "" ]
+let never_ends = [ begin_marker; daily_close_exec; "" ]
+
+let nested =
+  [
+    begin_marker; daily_close_exec; begin_marker; rebalance_exec; end_marker; "";
+  ]
+
+(* A section of nothing but the shape that is no longer written. Every line in
+   it carries a secret and none of them can be named, which is the pair this
+   fixture exists for: the entries are counted and located, and nothing they
+   hold leaves. *)
+let legacy_only_section =
+  [ begin_marker; daily_close; rebalance; end_marker; "" ]
+
 let exec_only_section = [ begin_marker; daily_close_exec; end_marker; "" ]
 let mixed_shapes = [ begin_marker; daily_close; rebalance_exec; end_marker; "" ]
 
 let mixed_with_unresolvable =
-  [ begin_marker; daily_close; escaping_exec; rebalance_exec; end_marker; "" ]
-
-(* A legacy payload whose [job] field is text no job could have been deployed
-   under. The name on a legacy line comes out of JSON the host wrote and nothing
-   else on the line constrains it -- unlike the exec shape, where the path is
-   rebuilt from the name and the line is named only when the two agree. So this
-   is the one shape by which host-controlled text can reach standard output, and
-   the path a later reader builds from a reported name. *)
-let hostile_legacy = entry ~schedule:"0 4 * * *" ~job:"../../etc/passwd" ~secret
-
-let hostile_legacy_section =
-  [ begin_marker; daily_close; hostile_legacy; end_marker; "" ]
+  [
+    begin_marker;
+    daily_close_exec;
+    escaping_exec;
+    rebalance_exec;
+    end_marker;
+    "";
+  ]
 
 (* Two separately balanced sections, which is a state boxes are actually in: an
    earlier reader matched its markers untrimmed, read a section carrying a
@@ -130,7 +151,7 @@ let hostile_legacy_section =
 let two_sections =
   [
     begin_marker;
-    daily_close;
+    daily_close_exec;
     end_marker;
     hand_added;
     begin_marker;
@@ -139,16 +160,6 @@ let two_sections =
     "";
   ]
 
-(* An expected entry states which shape named it as well as what it named. The
-   two are different facts about a job -- an exec-line name has a run file
-   beside it and a legacy name has none and never had one -- so a case that
-   pinned the name alone would go on passing while a reader that had lost the
-   distinction reported every unmigrated job as about to fail. *)
-let named_by_exec_line job = Listing.Named { job; shape = Listing.Exec_line }
-
-let named_by_legacy_line job =
-  Listing.Named { job; shape = Listing.Legacy_line }
-
 (* Entries are compared as a list rather than one at a time, so a case states
    the whole of what the section reads as: the entries around the one it is
    about are asserted by the same call that asserts it, and a case about an
@@ -156,11 +167,7 @@ let named_by_legacy_line job =
 let entry_testable =
   of_pp (fun formatter entry ->
       match entry with
-      | Listing.Named { job; shape } ->
-          Format.fprintf formatter "Named %S from %s" job
-            (match shape with
-            | Listing.Exec_line -> "an exec line"
-            | Listing.Legacy_line -> "a legacy line")
+      | Listing.Named job -> Format.fprintf formatter "Named %S" job
       | Listing.Unnamed { position } ->
           Format.fprintf formatter "Unnamed %d" position)
 
@@ -175,23 +182,33 @@ let check_entries label expected listing =
         label
 
 (* The names alone, read out of the one reader that reports them. Every case
-   below is about which jobs are named and in what order; the shape each name
-   came from is the subject of its own case. *)
-let check_named_jobs label expected listing =
-  check (list string) label expected
-    (List.map
-       (fun (named : Listing.named_job) -> named.job)
-       (Listing.named_jobs_with_shape listing))
+   below is about which jobs are named, in what order, and whether there was a
+   section read to name them at all. *)
+let check_jobs_read label expected listing =
+  check (option (list string)) label expected (Listing.jobs_read listing)
 
-let rendered_named_job (named : Listing.named_job) =
-  Printf.sprintf "%s from %s" named.job
-    (match named.shape with
-    | Listing.Exec_line -> "an exec line"
-    | Listing.Legacy_line -> "a legacy line")
-
-let check_named_jobs_with_shape label expected listing =
-  check (list string) label expected
-    (List.map rendered_named_job (Listing.named_jobs_with_shape listing))
+(* Every string a listing can hand back, gathered in one place so a rule about
+   what may leave the module is asserted against the whole of its surface rather
+   than against the one constructor a case happened to think of. The match is
+   exhaustive on purpose: a constructor added later that carries a string cannot
+   be added without deciding, here, whether it is one of these. *)
+let strings_returned listing =
+  match listing with
+  | Listing.Section { entries } ->
+      List.concat_map
+        (fun entry ->
+          match entry with
+          | Listing.Named job -> [ job ]
+          | Listing.Unnamed { position = _ } -> [])
+        entries
+  | Listing.No_section -> []
+  | Listing.Malformed defect -> (
+      match defect with
+      | Listing.End_without_begin
+      | Listing.Begin_without_end
+      | Listing.Nested_begin ->
+          [])
+  | Listing.Unreadable message -> [ message ]
 
 (* --- Tests --- *)
 
@@ -202,7 +219,7 @@ let test_crontab_section_counts_jobs () =
 
 let test_crontab_section_returns_job_names () =
   check_entries "names the jobs in the order the file lists them"
-    [ named_by_legacy_line "daily-close"; named_by_legacy_line "rebalance" ]
+    [ Listing.Named "daily-close"; Listing.Named "rebalance" ]
     (spool_of well_formed)
 
 (* The affirmative arm the absence test below is measured against: a section
@@ -231,25 +248,37 @@ let test_crontab_empty_section_is_zero_jobs () =
    every box, and the exact inverse of the failure the unnamed arm exists for. *)
 let test_crontab_exec_line_is_named_from_its_path () =
   check_entries "takes the job's name from the run file's directory"
-    [ named_by_exec_line "daily-close" ]
+    [ Listing.Named "daily-close" ]
     (spool_of exec_only_section)
 
-(* Every crontab in the estate still holds legacy lines and they still fire, so
-   teaching the reader the new shape may not cost it the old one. This is the
-   case that goes red if the new reader replaces the old rather than standing
-   in front of it. *)
-let test_crontab_legacy_line_is_still_named_from_its_payload () =
-  check_entries "takes the job's name from the payload the line carries"
-    [ named_by_legacy_line "daily-close" ]
-    (spool_of legacy_only_section)
+(* The shape nothing writes any more still sits in crontabs written before it
+   went, and it still fires. This reader cannot name it: the job is inside the
+   payload rather than in a path, and reading it back out would be the one route
+   by which a line's own text reaches an operator. So each such line is an entry
+   at its position, counted and never rendered -- and never dropped, because the
+   next setup rewrites the section and removes exactly these lines, so a section
+   reported as empty would agree with the rewrite instead of warning about it.
 
-(* A box mid-migration holds both shapes at once, because a job's line is
-   rewritten by the deploy that names it and by no other. So a section holds the
-   new shape for the jobs deployed since and the legacy shape for the rest, and
-   a reader that names only one of the two describes a box that does not exist. *)
-let test_crontab_mixed_section_names_every_job () =
-  check_entries "names both shapes, in the order the file lists them"
-    [ named_by_legacy_line "daily-close"; named_by_exec_line "rebalance" ]
+   The affirmative arm is [exec_only_section]: a reader that named nothing at
+   all would satisfy the absence on its own. *)
+let test_crontab_line_of_the_old_shape_is_counted_and_unnamed () =
+  let listing = spool_of legacy_only_section in
+  check (option int) "every line of the section is still an entry" (Some 2)
+    (Listing.job_count listing);
+  check_entries "and each one is located rather than named"
+    [ Listing.Unnamed { position = 1 }; Listing.Unnamed { position = 2 } ]
+    listing;
+  check_entries "while a line of the shape it reads is named"
+    [ Listing.Named "daily-close" ]
+    (spool_of exec_only_section)
+
+(* A box holds whatever its crontab was last written with, so a section can
+   carry a line this reads beside one it cannot. Both are entries and only one
+   is a name, and asserting the pair in a single call is what stops a reader
+   that dropped the unnameable line from passing on the strength of the other. *)
+let test_crontab_mixed_section_names_only_what_it_reads () =
+  check_entries "names what it can and locates what it cannot"
+    [ Listing.Unnamed { position = 1 }; Listing.Named "rebalance" ]
     (spool_of mixed_shapes)
 
 (* A line of neither shape keeps its place and reports its position, and the
@@ -260,9 +289,9 @@ let test_crontab_mixed_section_names_every_job () =
 let test_crontab_line_of_neither_shape_is_unnamed_with_its_position () =
   check_entries "leaves the line of neither shape unnamed, at its position"
     [
-      named_by_legacy_line "daily-close";
+      Listing.Named "daily-close";
       Listing.Unnamed { position = 2 };
-      named_by_exec_line "rebalance";
+      Listing.Named "rebalance";
     ]
     (spool_of mixed_with_unresolvable)
 
@@ -330,7 +359,7 @@ let test_crontab_nested_markers_are_malformed () =
 let test_crontab_entries_outside_markers_are_not_counted () =
   match
     spool_of
-      [ hand_added; begin_marker; daily_close; end_marker; hand_added; "" ]
+      [ hand_added; begin_marker; daily_close_exec; end_marker; hand_added; "" ]
   with
   | Listing.Section { entries } ->
       check int "reads only what lies between the markers" 1
@@ -345,8 +374,8 @@ let test_crontab_entries_outside_markers_are_not_counted () =
    section and deletes that third line — so the one report that could have
    warned about the writer would instead have agreed with it.
 
-   Both arms are the same fixture: [rebalance] and [rebalance_truncated] are the
-   same line, one of them cut short. Without the affirmative arm, an
+   Both arms are the same fixture: [rebalance_exec] and
+   [rebalance_exec_truncated] are the same line, one of them cut short. Without the affirmative arm, an
    implementation that reported every entry as unreadable would pass. *)
 let test_crontab_unreadable_entry_is_counted_and_located () =
   (match spool_of with_truncated_entry with
@@ -355,15 +384,11 @@ let test_crontab_unreadable_entry_is_counted_and_located () =
         (Some 2)
         (Listing.job_count (spool_of with_truncated_entry));
       match entries with
-      | [
-       Listing.Named { job = "daily-close"; shape = _ };
-       Listing.Unnamed { position };
-      ] ->
+      | [ Listing.Named "daily-close"; Listing.Unnamed { position } ] ->
           check int "says which entry it was, so the operator can find it" 2
             position
-      | [ Listing.Named _; Listing.Named { job = name; shape = _ } ] ->
-          failf "an entry whose payload does not parse must not be named %S"
-            name
+      | [ Listing.Named _; Listing.Named name ] ->
+          failf "an entry whose line does not parse must not be named %S" name
       | [ _; _ ]
       | []
       | [ _ ]
@@ -378,8 +403,7 @@ let test_crontab_unreadable_entry_is_counted_and_located () =
   match spool_of well_formed with
   | Listing.Section { entries } -> (
       match entries with
-      | [ Listing.Named _; Listing.Named { job = "rebalance"; shape = _ } ] ->
-          ()
+      | [ Listing.Named _; Listing.Named "rebalance" ] -> ()
       | [ Listing.Named _; Listing.Unnamed { position } ] ->
           failf "the same entry, intact, must be read as named, not as entry %d"
             position
@@ -419,90 +443,6 @@ let test_crontab_unreadable_spool_is_not_no_section () =
   | Listing.Section _
   | Listing.Malformed _ ->
       fail "a read that never happened tells us nothing about the file"
-
-(* The spool file carries several strategies' API secrets in plaintext inside
-   the payloads of its curl lines, so anything this module returns lands in
-   stdout, in scrollback, and in every transcript of the run. Counts, names and
-   positions are the whole permitted output, and that has to hold on the failure
-   paths too: a malformed result quoting the offending line, or an unreadable
-   entry helpfully carrying what could not be read, is the leak this test exists
-   to catch.
-
-   Every string a result can carry is enumerated rather than sampled, so a
-   constructor that later gains a payload stops compiling here and has to be
-   given an answer deliberately. *)
-let strings_returned listing =
-  match listing with
-  | Listing.Section { entries } ->
-      List.concat_map
-        (fun entry ->
-          match entry with
-          | Listing.Named { job; shape = _ } -> [ job ]
-          | Listing.Unnamed { position = _ } -> [])
-        entries
-  | Listing.No_section -> []
-  | Listing.Malformed defect -> (
-      match defect with
-      | Listing.End_without_begin
-      | Listing.Begin_without_end
-      | Listing.Nested_begin ->
-          [])
-  | Listing.Unreadable message -> [ message ]
-
-(* The hole the type alone does not close. [Unreadable] carries a string, and
-   the string it is handed is the transport's own error — which is the merged
-   output of a command that had already begun streaming the spool file when the
-   session died. A payload assembled that way carries the file, so the module's
-   guarantee has to hold against the failure path as well as the successful
-   one, and only redaction at the boundary makes it.
-
-   The marker is what makes the redaction provable rather than a filter: the
-   command prints it before the first byte of the file, so everything from it
-   onwards is content and everything before it is not. *)
-let test_crontab_transport_error_never_carries_the_spool_it_streamed () =
-  let listing =
-    Listing.of_read_output
-      (Error
-         (Remote_exec.Ssh_failed
-            {
-              code = 255;
-              output =
-                Printf.sprintf "%s\n%s\n%s\n%s" contents_marker begin_marker
-                  daily_close rebalance;
-            }))
-  in
-  match listing with
-  | Listing.Unreadable message ->
-      check bool "the secret in the streamed payload is not reported" false
-        (contains ~needle:secret message);
-      check bool "nor the command line carrying it" false
-        (contains ~needle:"curl" message);
-      check bool "nor the payload it was inside" false
-        (contains ~needle:"env_vars" message);
-      check bool "and what did go wrong is still said" true
-        (contains ~needle:"255" message)
-  | Listing.No_section
-  | Listing.Section _
-  | Listing.Malformed _ ->
-      fail "a read that failed part-way through must still be unreadable"
-
-(* The other half of the pair: an error carrying no content is passed through
-   whole, so redaction costs nothing on the paths where there is nothing to
-   redact. Without this arm, discarding every message would satisfy the test
-   above. *)
-let test_crontab_transport_error_without_contents_is_kept_whole () =
-  match
-    Listing.of_read_output
-      (Error
-         (Remote_exec.Ssh_failed { code = 255; output = "Connection closed" }))
-  with
-  | Listing.Unreadable message ->
-      check bool "an error that streamed nothing keeps its detail" true
-        (contains ~needle:"Connection closed" message)
-  | Listing.No_section
-  | Listing.Section _
-  | Listing.Malformed _ ->
-      fail "a transport failure is a failed read"
 
 (* The spool file lives under a directory only root may traverse, and the
    orchestrator writes it as root, so the reading user is routinely one that
@@ -561,6 +501,72 @@ let test_crontab_output_without_a_marker_is_unreadable () =
   | Listing.Malformed _ ->
       fail "output carrying no marker must be a rejection"
 
+(* The hole the type alone does not close. [Unreadable] carries a string, and
+   the string it is handed is the transport's own error -- which is the merged
+   output of a command that had already begun streaming the spool file when the
+   session died. A crontab is a file anything may write, and the legacy shape
+   below carries a job's whole payload, secrets included, on the line itself. So
+   a failed read's message can hold the file, and the module's guarantee has to
+   hold on the failure path as well as the successful one.
+
+   The marker is what makes the cut provable rather than a filter: the command
+   prints it before the first byte of the file, so everything from it onwards is
+   content and everything before it is not. A filter deciding line by line what
+   looks like a secret is a filter that is one day wrong. *)
+let test_crontab_transport_error_never_carries_the_spool_it_streamed () =
+  let listing =
+    Listing.of_read_output
+      (Error
+         (Remote_exec.Ssh_failed
+            {
+              code = 255;
+              output =
+                String.concat "\n"
+                  [ contents_marker; begin_marker; daily_close; rebalance ];
+            }))
+  in
+  match listing with
+  | Listing.Unreadable message ->
+      check bool "the secret in the streamed payload is not reported" false
+        (contains ~needle:secret message);
+      check bool "nor the command line carrying it" false
+        (contains ~needle:"curl" message);
+      check bool "nor the payload it was inside" false
+        (contains ~needle:"env_vars" message);
+      check bool "and what did go wrong is still said" true
+        (contains ~needle:"255" message)
+  | Listing.No_section
+  | Listing.Section _
+  | Listing.Malformed _ ->
+      fail "a read that failed part-way through must still be unreadable"
+
+(* The other half of the pair: an error carrying no content is passed through
+   whole, so the cut costs nothing on the paths where there is nothing to cut.
+   Without this arm, discarding every message would satisfy the test above --
+   and the transport's own account of the failure is the operator's only pointer
+   to where to go and look. *)
+let test_crontab_transport_error_without_contents_is_kept_whole () =
+  match
+    Listing.of_read_output
+      (Error
+         (Remote_exec.Ssh_failed { code = 255; output = "Connection closed" }))
+  with
+  | Listing.Unreadable message ->
+      check bool "an error that streamed nothing keeps its detail" true
+        (contains ~needle:"Connection closed" message);
+      check bool "and still says what went wrong" true
+        (contains ~needle:"255" message)
+  | Listing.No_section
+  | Listing.Section _
+  | Listing.Malformed _ ->
+      fail "a transport failure is a failed read"
+
+(* The rule stated over the whole surface rather than one constructor at a time.
+   Whatever the file held and however it was malformed, what leaves this module
+   is a count, a job's name or a position -- never a line it read. The legacy
+   fixtures are the ones that make the sweep worth running: their payloads carry
+   a realistic secret, so a parser that handed a line back would be caught by
+   the value it returned rather than by inspection. *)
 let test_crontab_never_returns_command_lines () =
   let spools =
     [
@@ -570,7 +576,10 @@ let test_crontab_never_returns_command_lines () =
       ("an unbalanced end marker", end_without_begin);
       ("a section that never ends", never_ends);
       ("nested markers", nested);
-      ("a section mixing both shapes", mixed_with_unresolvable);
+      ("a section of nothing but the old shape", legacy_only_section);
+      ("a section mixing both shapes", mixed_shapes);
+      ( "a section mixing both shapes and one of neither",
+        mixed_with_unresolvable );
     ]
   in
   List.iter
@@ -590,95 +599,258 @@ let test_crontab_never_returns_command_lines () =
         (contains ~needle:"env_vars" returned))
     spools
 
-(* [named_jobs] is what the preserve action and the operator report are built
+(* The file goes onto standard output as it is read rather than into a shell
+   variable first. The capture was there so that a failure part-way through
+   printed no fragment of the file; the file holds no fragment worth
+   withholding, and the capture costs the whole spool held in the shell's
+   memory before a byte of it is printed.
+
+   The marker still comes first, because it is the only thing separating the
+   command's own words from the file's. Streaming without moving the marker
+   ahead of the read would put the file's first line before the announcement of
+   it, so the two checks below are one requirement and not two. *)
+let test_crontab_read_command_streams_the_file () =
+  let command = Listing.read_command in
+  check bool "captures nothing into a shell variable" false
+    (contains ~needle:"$(" command);
+  match
+    ( Bondi_common.String_utils.index_of ~needle:contents_marker command,
+      Bondi_common.String_utils.index_of ~needle:"cat" command )
+  with
+  | Some marker_at, Some read_at ->
+      check bool "and announces the contents ahead of reading them" true
+        (marker_at < read_at)
+  | None, Some _
+  | None, None ->
+      fail "the command must say where the file's contents begin"
+  | Some _, None -> fail "the command must read the file"
+
+(* [jobs_read] is what the preserve action and the operator report are built
    from, and until now it was reached only through a plan test asserting on the
    order of actions. The names it returns are the section's, in the order its
    lines appear. *)
-let test_named_jobs_names_the_section_in_order () =
-  check_named_jobs "names the section's jobs in file order"
-    [ "daily-close"; "rebalance" ]
+let test_jobs_read_names_the_section_in_order () =
+  check_jobs_read "names the section's jobs in file order"
+    (Some [ "daily-close"; "rebalance" ])
     (spool_of well_formed);
-  check_named_jobs "and does so across both line shapes"
-    [ "daily-close"; "rebalance" ]
-    (spool_of mixed_shapes)
+  check_jobs_read "and reports only the entries it could read"
+    (Some [ "rebalance" ]) (spool_of mixed_shapes)
 
 (* An entry whose job could not be read is a line for a human to go and look at
    and not a job another reader can act on, so it is not one of the names. The
    affirmative arm is the same fixture's other two entries: without them, a
-   [named_jobs] returning nothing at all would satisfy the absence. *)
-let test_named_jobs_omits_an_entry_that_could_not_be_read () =
+   [jobs_read] returning nothing at all would satisfy the absence. *)
+let test_jobs_read_omits_an_entry_that_could_not_be_read () =
   let listing = spool_of mixed_with_unresolvable in
   check (option int) "the unreadable entry is still counted" (Some 3)
     (Listing.job_count listing);
-  check_named_jobs "but it is not one of the names it reports"
-    [ "daily-close"; "rebalance" ]
+  check_jobs_read "but it is not one of the names it reports"
+    (Some [ "daily-close"; "rebalance" ])
     listing
 
 (* Every section is the section. A file holding a second, separately balanced
    one holds jobs that fire, and the next write folds the two together -- so a
    report that named only the first would disagree with both the box and the
    rewrite. The hand-added line between them is outside both, and stays out. *)
-let test_named_jobs_covers_every_section_in_the_file () =
-  check_named_jobs "names the jobs of both sections, in file order"
-    [ "daily-close"; "rebalance" ]
+let test_jobs_read_covers_every_section_in_the_file () =
+  check_jobs_read "names the jobs of both sections, in file order"
+    (Some [ "daily-close"; "rebalance" ])
     (spool_of two_sections)
 
-(* A name read off a legacy line is a JSON field the host wrote, and it leaves
-   here for standard output and for whatever path a caller builds from it. One
-   [create] would have rejected cannot have come from a job Bondi deployed, so
-   it is not reported at all. The line remains an entry: it is on the box and
-   the next rewrite removes it, which is a fact the count still carries.
-   The affirmative arm is the same builder with a name a job could carry. *)
-let test_named_jobs_drops_a_legacy_name_no_job_could_carry () =
-  let listing = spool_of hostile_legacy_section in
-  check (option int) "the line is still an entry of the section" (Some 2)
-    (Listing.job_count listing);
-  check_named_jobs
-    "a name no job could have been deployed under is not reported"
-    [ "daily-close" ] listing;
-  check_named_jobs "while the same line carrying a name one could is"
-    [ "daily-close"; "rebalance" ]
-    (spool_of well_formed)
+(* A file the host read that carries no Bondi section names nothing, and it is
+   still an answer: no line on that box fires any of Bondi's jobs. Markers that
+   do not balance and a read that never delivered are not answers, and the
+   caller that compares this against the host's payload directory acts on the
+   difference -- told apart by nothing, a host whose crontab could not be read
+   would have every job in that directory reported as having no line firing it.
 
-(* Nothing on the host supports a claim about what is scheduled there unless a
-   section was read, so every other outcome names nothing. Each absence arm is
-   paired with the same lines read as a section: without the pair, a
-   [named_jobs] that always answered [[]] would pass all four. *)
-let test_named_jobs_is_empty_for_every_outcome_that_is_not_a_section () =
-  check_named_jobs "a file carrying no markers names nothing" []
-    (spool_of no_markers);
-  check_named_jobs "though the same line inside markers is named"
-    [ "operator-cleanup" ]
+   Each arm is paired with the same lines read as a section, because a
+   [jobs_read] that always answered the same thing would otherwise pass. *)
+let test_jobs_read_separates_an_answer_from_a_read_that_did_not_happen () =
+  check_jobs_read "a file carrying no markers is an answer that names nothing"
+    (Some []) (spool_of no_markers);
+  check_jobs_read "though the same line inside markers is named"
+    (Some [ "operator-cleanup" ])
     (spool_of [ begin_marker; hand_added; end_marker; "" ]);
-  check_named_jobs "an end marker without a begin names nothing" []
+  check_jobs_read "an end marker without a begin is not an answer" None
     (spool_of end_without_begin);
-  check_named_jobs "though the same lines with both markers are named"
-    [ "daily-close" ]
-    (spool_of [ begin_marker; daily_close; end_marker; "" ]);
-  check_named_jobs "a section that never ends names nothing" []
+  check_jobs_read "though the same lines with both markers are named"
+    (Some [ "daily-close" ])
+    (spool_of [ begin_marker; daily_close_exec; end_marker; "" ]);
+  check_jobs_read "a section that never ends is not an answer" None
     (spool_of never_ends);
-  check_named_jobs "nested markers name nothing" [] (spool_of nested);
-  check_named_jobs "a read that never happened names nothing" []
+  check_jobs_read "nested markers are not an answer" None (spool_of nested);
+  check_jobs_read "a read that never happened is not an answer" None
     (Listing.of_read_output
        (Error
           (Remote_exec.Ssh_failed { code = 255; output = "Connection closed" })));
-  check_named_jobs "though the same section read successfully is named"
-    [ "daily-close"; "rebalance" ]
+  check_jobs_read "though the same section read successfully is named"
+    (Some [ "daily-close"; "rebalance" ])
     (spool_of well_formed)
 
-(* The shape that named a job, out where the caller reporting on its files can
-   read it. A legacy line has no run file and no environment file by definition
-   -- its payload is on the line -- so a report built from names alone tells the
-   operator that every unmigrated job on the box fails at its next fire, which
-   is the common case on the boxes this reads and the false alarm they would
-   act on. The fixture holds one job of each shape, so a reader that answered
-   the same shape for both cannot pass. *)
-let test_named_jobs_carry_the_shape_that_named_them () =
-  check_named_jobs_with_shape "says which shape named each job"
-    [ "daily-close from a legacy line"; "rebalance from an exec line" ]
-    (spool_of mixed_shapes);
-  check_named_jobs_with_shape "and names nothing where nothing was read" []
-    (spool_of no_markers)
+(* The read says where the file's contents end as well as where they begin. The
+   guard only asks whether the file could be opened, and a [cat] that dies after
+   it has answered still leaves the command exiting 0 -- so without a word after
+   the last byte, a read that stopped part-way through is a read that finished,
+   and the difference is invisible in the output. *)
+let test_crontab_read_command_marks_where_the_contents_end () =
+  let command = Listing.read_command in
+  check bool "says where the file's contents end" true
+    (contains ~needle:end_of_contents_marker command);
+  match
+    ( Bondi_common.String_utils.index_of ~needle:"cat" command,
+      Bondi_common.String_utils.index_of ~needle:end_of_contents_marker command
+    )
+  with
+  | Some read_at, Some marker_at ->
+      check bool "and says it only once the file has been read" true
+        (read_at < marker_at);
+      (* Printed as a statement of its own, joined by [;], the marker ran
+         whatever the read did and said the file had ended whether it had or
+         not. Joined to the read, it is the read's own success that prints it. *)
+      check bool "and only when the read succeeded" true
+        (contains ~needle:"&&"
+           (String.sub command read_at (marker_at - read_at)))
+  | Some _, None -> fail "the command must say where the file's contents end"
+  | None, Some _
+  | None, None ->
+      fail "the command must read the file"
+
+(* What the end marker is for. A read that stopped part-way through is a read
+   that did not happen, and the two shapes of truncation below are the two ways
+   it was previously reported as one that did.
+
+   Cut before the section, the output is a file with no Bondi markers, which
+   [jobs_read] answers as "this host fires nothing" -- and a caller comparing
+   that against the payload directory reports every job on the box as having
+   lost its line. Cut after a section that happens to close, the output is a
+   section holding whatever the read got to, so the jobs below the cut are
+   reported as orphaned files. The second is worse in kind and not in degree: it
+   is a disagreement invented out of a read that never finished.
+
+   Each arm is paired with the same lines read to the end, because a
+   [of_read_output] that answered [None] for everything would otherwise pass. *)
+let test_crontab_truncated_read_is_not_a_host_with_no_jobs () =
+  let cut_before_the_section =
+    String.concat "\n" [ contents_marker; "# m h  dom mon dow   command" ]
+  in
+  check_jobs_read "a read cut before the section is not a host firing nothing"
+    None
+    (Listing.of_read_output (Ok cut_before_the_section));
+  check_jobs_read "though the same file read to the end is that answer"
+    (Some [])
+    (spool_of [ "# m h  dom mon dow   command"; "" ]);
+  let cut_after_a_section_that_closed =
+    String.concat "\n"
+      [ contents_marker; begin_marker; daily_close_exec; end_marker ]
+  in
+  check_jobs_read "a read cut after a section that closed is not that section"
+    None
+    (Listing.of_read_output (Ok cut_after_a_section_that_closed));
+  check_jobs_read "though the same lines read to the end are"
+    (Some [ "daily-close" ])
+    (spool_of [ begin_marker; daily_close_exec; end_marker; "" ])
+
+(* The other half of the pair above, read through the outcome rather than
+   through [jobs_read]: a truncated read is [Unreadable] and not [No_section],
+   so it counts nothing and says why. Without this, answering [Malformed] for
+   every truncation would satisfy the [None]s above while telling an operator to
+   go and fix markers that are not broken. *)
+let test_crontab_truncated_read_says_the_read_did_not_finish () =
+  let listing =
+    Listing.of_read_output
+      (Ok (String.concat "\n" [ contents_marker; begin_marker ]))
+  in
+  match listing with
+  | Listing.Unreadable message ->
+      check bool "says the read is what did not finish" true
+        (contains ~needle:"read" message);
+      check (option int) "and counts nothing" None (Listing.job_count listing)
+  | Listing.No_section ->
+      fail "a read that stopped part-way through is not a host with no section"
+  | Listing.Section _ ->
+      fail "a read that stopped part-way through is not a section"
+  | Listing.Malformed _ ->
+      fail "a read that stopped part-way through is not a broken marker"
+
+(* The failure the closing marker was added for and did not close. The guard
+   only asks whether the file can be opened; a [cat] that then refuses -- a
+   sudoers rule permitting [test] and not [cat], or a read that dies on its
+   first byte -- used to leave the marker printed all the same, because it was
+   a statement of its own joined by [;] and ran whatever the read did.
+
+   What arrives here in that case is the announcement of contents and no
+   contents. That is not a host whose crontab is empty and it is not a host
+   with no section: it is a read that delivered nothing, and answering [Some []]
+   reports every job in the payload directory as having lost its line. *)
+let test_crontab_read_that_delivered_nothing_is_not_an_empty_crontab () =
+  let listing = Listing.of_read_output (Ok (contents_marker ^ "\n")) in
+  check_jobs_read "a read that delivered no contents names no jobs" None listing;
+  match listing with
+  | Listing.Unreadable message ->
+      check bool "and says the read is what did not finish" true
+        (contains ~needle:"read" message)
+  | Listing.No_section ->
+      fail
+        "contents announced and never delivered is not a host with no section"
+  | Listing.Section _ -> fail "no contents were delivered to make a section of"
+  | Listing.Malformed _ -> fail "no contents were delivered to hold a marker"
+
+(* The other side of the same boundary, and the reason the case above cannot be
+   read off the absence of file bytes alone. A spool the host read and found
+   empty prints the contents marker and then the closing one with nothing
+   between, because there was nothing between -- and that is an answer: the
+   file is there, it was read whole, and no line on the box fires anything of
+   Bondi's. It separates from the case above by the closing marker, which the
+   read now prints only when it succeeded. *)
+let test_crontab_empty_spool_is_a_file_read_whole () =
+  let listing = spool_of [] in
+  check_jobs_read "an empty spool read whole is a host that fires nothing"
+    (Some []) listing;
+  match listing with
+  | Listing.No_section -> ()
+  | Listing.Unreadable message ->
+      failf "an empty file read to its end is not a failed read: %s" message
+  | Listing.Section _ -> fail "an empty file carries no section"
+  | Listing.Malformed _ -> fail "an empty file carries no marker to break"
+
+(* A crontab is a file anything may write, and what it may write includes the
+   word this command prints after the file's last byte. Looked for as a bare
+   suffix, that word is indistinguishable from the tail of the last line a
+   dying read managed to deliver -- so a read cut on a line ending in it passed
+   as a read that finished, and the cut that removed the marker took the end of
+   that line with it.
+
+   The marker is its own line or it is not the marker. Matching it with the
+   newline ahead of it is what makes the file's own bytes unable to forge it,
+   and the pair below is the difference: the same lines cut at that word are a
+   read that did not finish, and read to their end are the section they hold. *)
+let marker_word_in_a_comment = "# " ^ end_of_contents_marker
+
+let test_crontab_spool_line_ending_in_the_marker_word_is_not_the_marker () =
+  let cut_on_a_line_carrying_the_word =
+    String.concat "\n"
+      [
+        contents_marker;
+        begin_marker;
+        daily_close_exec;
+        end_marker;
+        marker_word_in_a_comment;
+      ]
+  in
+  check_jobs_read "a line ending in the marker word does not close the read"
+    None
+    (Listing.of_read_output (Ok cut_on_a_line_carrying_the_word));
+  check_jobs_read "though the same lines read to the end are the section"
+    (Some [ "daily-close" ])
+    (spool_of
+       [
+         begin_marker;
+         daily_close_exec;
+         end_marker;
+         marker_word_in_a_comment;
+         "";
+       ])
 
 let () =
   run "Crontab_listing"
@@ -697,10 +869,10 @@ let () =
             `Quick test_crontab_unreadable_entry_is_counted_and_located;
           test_case "an exec line is named from its path" `Quick
             test_crontab_exec_line_is_named_from_its_path;
-          test_case "a legacy line is still named from its payload" `Quick
-            test_crontab_legacy_line_is_still_named_from_its_payload;
-          test_case "a section mixing both shapes names every job" `Quick
-            test_crontab_mixed_section_names_every_job;
+          test_case "a line of the old shape is counted and unnamed" `Quick
+            test_crontab_line_of_the_old_shape_is_counted_and_unnamed;
+          test_case "a section mixing both shapes names only what it reads"
+            `Quick test_crontab_mixed_section_names_only_what_it_reads;
           test_case "a line of neither shape is still unnamed with its position"
             `Quick
             test_crontab_line_of_neither_shape_is_unnamed_with_its_position;
@@ -708,17 +880,14 @@ let () =
       ( "named jobs",
         [
           test_case "names the section's jobs in order" `Quick
-            test_named_jobs_names_the_section_in_order;
+            test_jobs_read_names_the_section_in_order;
           test_case "an entry that could not be read is not a name" `Quick
-            test_named_jobs_omits_an_entry_that_could_not_be_read;
+            test_jobs_read_omits_an_entry_that_could_not_be_read;
           test_case "every section in the file is covered" `Quick
-            test_named_jobs_covers_every_section_in_the_file;
-          test_case "a legacy name no job could carry is dropped" `Quick
-            test_named_jobs_drops_a_legacy_name_no_job_could_carry;
-          test_case "every outcome that is not a section names nothing" `Quick
-            test_named_jobs_is_empty_for_every_outcome_that_is_not_a_section;
-          test_case "each name carries the shape it was read from" `Quick
-            test_named_jobs_carry_the_shape_that_named_them;
+            test_jobs_read_covers_every_section_in_the_file;
+          test_case "a section nobody read is not a host that fires nothing"
+            `Quick
+            test_jobs_read_separates_an_answer_from_a_read_that_did_not_happen;
         ] );
       ( "absence and failure",
         [
@@ -736,15 +905,28 @@ let () =
             test_crontab_absent_and_denied_are_different_outcomes;
           test_case "output carrying no marker is unreadable" `Quick
             test_crontab_output_without_a_marker_is_unreadable;
-        ] );
-      ( "secrets",
-        [
-          test_case "no result ever carries a command line" `Quick
-            test_crontab_never_returns_command_lines;
           test_case "a transport error never carries the spool it streamed"
             `Quick
             test_crontab_transport_error_never_carries_the_spool_it_streamed;
-          test_case "an error carrying no contents keeps its detail" `Quick
-            test_crontab_transport_error_without_contents_is_kept_whole;
+          test_case "a transport error carrying no contents is kept whole"
+            `Quick test_crontab_transport_error_without_contents_is_kept_whole;
+          test_case "no outcome returns a command line it read" `Quick
+            test_crontab_never_returns_command_lines;
+          test_case "the read streams the file" `Quick
+            test_crontab_read_command_streams_the_file;
+          test_case "the read marks where the contents end" `Quick
+            test_crontab_read_command_marks_where_the_contents_end;
+          test_case "a truncated read is not a host with no jobs" `Quick
+            test_crontab_truncated_read_is_not_a_host_with_no_jobs;
+          test_case "a truncated read says the read did not finish" `Quick
+            test_crontab_truncated_read_says_the_read_did_not_finish;
+          test_case "a read that delivered nothing is not an empty crontab"
+            `Quick
+            test_crontab_read_that_delivered_nothing_is_not_an_empty_crontab;
+          test_case "an empty spool read whole is an answer" `Quick
+            test_crontab_empty_spool_is_a_file_read_whole;
+          test_case "a spool line ending in the marker word is not the marker"
+            `Quick
+            test_crontab_spool_line_ending_in_the_marker_word_is_not_the_marker;
         ] );
     ]

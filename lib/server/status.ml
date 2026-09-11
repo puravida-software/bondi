@@ -261,7 +261,8 @@ let gather ~client ~net ~clock ~(service_name : string option) : status_context
     | Some name -> inspect_by_name client ~net ~clock ~container_name:name
   in
   let orchestrator_inspection =
-    inspect_by_name client ~net ~clock ~container_name:"bondi-orchestrator"
+    inspect_by_name client ~net ~clock
+      ~container_name:Bondi_common.Cron_exec_line.orchestrator_container
   in
   let traefik_inspection =
     inspect_by_name client ~net ~clock ~container_name:"bondi-traefik"

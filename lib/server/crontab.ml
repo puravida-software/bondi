@@ -112,7 +112,8 @@ let string_of_lines lines = String.concat "\n" lines ^ "\n"
    docker exec exits with the exec'd command's status, so a failing run is a
    non-zero line and cron mails it. That is what the curl flags used to buy. *)
 let entry_of_cron_job (c : Strategy.Simple.cron_job) =
-  Printf.sprintf "%s docker exec bondi-orchestrator sh -c '%s%s'" c.schedule
+  Printf.sprintf "%s docker exec %s sh -c '%s%s'" c.schedule
+    Bondi_common.Cron_exec_line.orchestrator_container
     Bondi_common.Cron_exec_line.exec_marker
     (Cron_secrets.run_file_of c.name)
 

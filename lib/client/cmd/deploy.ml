@@ -51,7 +51,26 @@ let post_deploy ~client ip_address ~port payload =
     let response_body_str = read_body_string response_body in
     match status with
     | `OK -> Ok ()
-    | _ ->
+    (* Every non-OK status is one outcome here: the orchestrator puts the
+       failure class in the body, and no status it can answer changes what the
+       client does with the response. The remainder is bound to a name rather
+       than [_] so the fallback reads as that decision instead of as an
+       unfinished match; the name is underscored because the value behind it is
+       deliberately not read.
+
+       Not a form to copy. This is a wildcard over [Http.Status.t], which is
+       closed in the type system and unbounded in what it stands for: sixty-nine
+       named tags plus [`Code of int], the arm every status the wire may carry
+       falls into. Enumerating the named ones therefore buys no signal --
+       [`Code _] would still absorb the next one -- and sixty-nine arms
+       answering the same [Error] would hide the decision rather than state it.
+
+       That reasoning is about this type and does not transfer. Where the
+       compiler can make a match mean something -- every Yojson constructor and
+       every variant this repository owns -- the arms are written out, because
+       there a wildcard absorbs the constructor the next change adds and nothing
+       reddens. *)
+    | _non_ok ->
         Error
           (Printf.sprintf "Non-OK response from server %s: %s" ip_address
              response_body_str)
@@ -150,7 +169,8 @@ let cron_jobs_for_server ip_address
    plain [ps] cannot see it. Only the image is asked for -- what the gate needs
    is the version, and a container's state is [Cmd.Setup]'s question. *)
 let orchestrator_image_command =
-  "ps -a --filter name=^/bondi-orchestrator$ --format '{{.Image}}'"
+  Printf.sprintf "ps -a --filter name=^/%s$ --format '{{.Image}}'"
+    Bondi_common.Cron_exec_line.orchestrator_container
 
 (* The version that decides the gate is the one running on the box now, not the
    [bondi_server.version] pin in bondi.yaml: the two have diverged before, and
@@ -198,6 +218,57 @@ let cron_version_gate ~read_version cron_jobs =
       match read_version () with
       | Error message -> Error message
       | Ok version -> Server_version.writes_exec_lines version)
+
+(* What the box's two cron sources say about each other, as the lines to print,
+   for the servers this invocation is about to write cron jobs to.
+
+   The comparison is asked only when this server has cron jobs to write, so a
+   service-only deploy neither consults the box nor pays for the round trips --
+   which is why the readers are parameters rather than something called ahead of
+   the decision, exactly as the version gate above does with its own.
+
+   That scope is a stated limit, not an oversight. Withdraw a job from
+   bondi.yaml and its files stay behind on the box; if it was the last cron job
+   for that server, or the operator deploys the service alone, [cron_jobs] is
+   [None] here and neither source is read, so no deploy can see the orphan it
+   left. Seeing it would mean reading both sources on every deploy, charging two
+   round trips per server to runs that have no cron jobs at all. [bondi status]
+   reads both unconditionally and is where the withdrawn job is caught; what
+   deploy owes is the state of the servers it is about to write to.
+
+   It answers lines and never a verdict. A divergence does not change the exit
+   code and does not stop the deploy: refusing would block the very command that
+   repairs it, and would refuse on the strength of a remote read that can itself
+   fail. What an operator is owed here is the state of the box in the output
+   they are already watching, and an exit code is not what makes that visible.
+
+   Each read is handed over as its own outcome and each goes to the module that
+   owns it, so a spool the host refused stays distinguishable from a host that
+   answered "no section", and a directory that could not be listed stays
+   distinguishable from one that is empty. Neither reader is told what the other
+   answered; that they are two reads of two artifacts is the whole of what makes
+   this a comparison rather than a restatement. The section is read first so a
+   run's two commands leave in the order the report names them. *)
+let cron_divergence_report ~server ~read_crontab ~read_payloads cron_jobs =
+  match cron_jobs with
+  | None
+  | Some [] ->
+      []
+  | Some (_ :: _) ->
+      let crontab = Crontab_listing.of_read_output (read_crontab ()) in
+      let listing = Cron_payload.of_listing_output (read_payloads ()) in
+      Cron_payload.report ~server ~crontab listing
+
+(* The readers the report is handed in production. Both run over the connection
+   the version gate has already opened for this server, so what the comparison
+   costs on a path that was already reading is the two commands and no second
+   handshake. *)
+let reported_cron_divergence (server : Config_file.server) =
+  cron_divergence_report ~server:server.ip_address
+    ~read_crontab:(fun () ->
+      Remote_exec.command_output ~command:Crontab_listing.read_command server)
+    ~read_payloads:(fun () ->
+      Remote_exec.command_output ~command:Cron_payload.listing_command server)
 
 let validate_deployments (config : Config_file.t) deployments :
     ((string * string) list, string) result =
@@ -262,31 +333,50 @@ let run force_traefik_redeploy deployments =
           "Error: no servers configured. Add servers to bondi.yaml under \
            service or each cron job.";
         exit 1);
+      (* What this invocation has for a server is fixed for the whole run, and
+         three phases below ask for it: the version gate, the divergence report
+         and the payload. Derived once and carried beside its server, so the
+         three cannot drift into reading different answers. *)
+      let cron_jobs_per_server =
+        List.map
+          (fun (server : Config_file.server) ->
+            ( server,
+              cron_jobs_for_server server.ip_address config.cron_jobs
+                deployments ))
+          servers
+      in
       (* Before anything is posted: a refusal that arrives after the crontab has
          been written is not a refusal. Every server is gated first, so a
          deploy that would fail on the second one does not write to the
          first. *)
       let gate_failures =
         List.filter_map
-          (fun (server : Config_file.server) ->
+          (fun ((server : Config_file.server), cron_jobs) ->
             match
               cron_version_gate
                 ~read_version:(fun () -> reported_orchestrator_version server)
-                (cron_jobs_for_server server.ip_address config.cron_jobs
-                   deployments)
+                cron_jobs
             with
             | Ok () -> None
             | Error message ->
                 Some
                   (Printf.sprintf "Error on server %s: %s" server.ip_address
                      message))
-          servers
+          cron_jobs_per_server
       in
       (match gate_failures with
       | [] -> ()
       | _ :: _ ->
           List.iter prerr_endline gate_failures;
           exit 1);
+      (* Read before anything is posted, so what is reported is the state this
+         deploy found rather than the state it just created -- and read after
+         the gate, so a run that is about to refuse does not pay for two reads
+         per server or bury its own refusal under them. *)
+      List.iter
+        (fun ((server : Config_file.server), cron_jobs) ->
+          List.iter print_endline (reported_cron_divergence server cron_jobs))
+        cron_jobs_per_server;
       Eio_main.run @@ fun env ->
       let net = Eio.Stdenv.net env in
       let client = Cohttp_eio.Client.make ~https:None net in
@@ -301,7 +391,7 @@ let run force_traefik_redeploy deployments =
       in
       let results =
         List.map
-          (fun (server : Config_file.server) ->
+          (fun ((server : Config_file.server), cron_jobs) ->
             let ip_address = server.ip_address in
             (* The decision carries the service and its tag rather than a bool:
                the payload needs both, and a bool would leave the builder
@@ -316,9 +406,6 @@ let run force_traefik_redeploy deployments =
                   | Some tag ->
                       if is_service_server ip_address then Some (service, tag)
                       else None)
-            in
-            let cron_jobs =
-              cron_jobs_for_server ip_address config.cron_jobs deployments
             in
             let base_payload =
               match service_and_tag with
@@ -378,7 +465,7 @@ let run force_traefik_redeploy deployments =
                 server.port
             in
             post_deploy_via_ssh ~client server ~port base_payload)
-          servers
+          cron_jobs_per_server
       in
       match
         List.find_opt

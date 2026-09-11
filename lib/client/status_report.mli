@@ -160,6 +160,11 @@ type server_report = {
   rows : row list;
   crontab : Crontab_listing.t;
       (** the Bondi section of the host's crontab, as the read left it *)
+  payloads : Cron_payload.listing;
+      (** what the host's payload directory holds, or why that is not known. The
+          section alone cannot say whether the jobs it names still have the
+          files they fire, nor whether the directory holds a job no line fires
+          any more, so the two are carried together and compared. *)
   warnings : string list;
       (** what the orchestrator reported alongside its components *)
 }
@@ -177,11 +182,24 @@ val render_table : server_report list -> string
 
     A source that could not be consulted is a line saying so, never a missing
     one. A component only the orchestrator could confirm is flagged as
-    unverified, so nothing the host never saw reads as ground truth. *)
+    unverified, so nothing the host never saw reads as ground truth.
+
+    Beneath the crontab section sits what its two sources say about each other:
+    a job the section names whose files the directory does not hold, a job whose
+    files it holds and whose line the section does not, and either source that
+    was not read at all. A host whose two sources agree adds nothing there, so
+    silence under that section is itself the answer and the loud cases cannot be
+    lost in routine output. *)
 
 val render_json : server_report list -> string
 (** Render the same report as JSON, keyed by server address.
 
     Each source keeps its own object on every component, so a consumer of this
     is no more able to read a single reconciled value than a reader of the
-    table. *)
+    table.
+
+    The crontab object carries the same findings the table prints beneath that
+    section, in the same order and the same words, so a consumer of this form is
+    never told the host is healthy while the table says otherwise. The field is
+    present on every server, and an empty list is the answer for a host whose
+    two cron sources agree and were both read. *)
