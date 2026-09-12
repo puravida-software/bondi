@@ -3,6 +3,7 @@ module Config_file = Bondi_client.Config_file
 module Remote_exec = Bondi_client.Remote_exec
 module Managed_container = Bondi_common.Managed_container
 module Setup = Bondi_client.Cmd.Setup
+module Status_cmd = Bondi_client.Cmd.Status
 module Setup_phases = Bondi_client.Setup_phases
 module Crontab_listing = Bondi_client.Crontab_listing
 
@@ -315,7 +316,8 @@ let test_orchestrator_probe_error_is_undetermined () =
   check string "a failed listing is undetermined"
     (orchestrator_state_string
        (Setup.Orchestrator_undetermined
-          "command failed (255): Connection closed by 203.0.113.9 port 22"))
+          "the host was not reached (255): Connection closed by 203.0.113.9 \
+           port 22"))
     (orchestrator_state_string
        (Setup.orchestrator_state_of_probe orchestrator_unreachable));
   check string "a successful listing is read"
@@ -406,7 +408,8 @@ let test_docker_probe_error_is_undetermined () =
   check_docker_status
     ~expected:
       (Setup.Docker_undetermined
-         "command failed (255): Connection closed by 203.0.113.9 port 22")
+         "the host was not reached (255): Connection closed by 203.0.113.9 \
+          port 22")
     docker_unreachable
 
 (* The affirmative absence arm: the shell's own report that the command does
@@ -453,7 +456,8 @@ let test_docker_probe_transport_failure_that_says_not_found_is_undetermined () =
   check_docker_status
     ~expected:
       (Setup.Docker_undetermined
-         "command failed (255): sh: line 1: jump-helper: command not found")
+         "the host was not reached (255): sh: line 1: jump-helper: command not \
+          found")
     never_connected;
   match Setup.docker_install_verdict_of_probe never_connected with
   | Setup.Docker_install ->
@@ -552,9 +556,9 @@ let test_ensure_docker_verdict_is_satisfied_when_installed () =
    each job is deployed again, so setup checks the host's curl before the
    orchestrator starts. That check reads a version string, and a
    probe that never ran has no version string in it. Folding the transport's own
-   error into curl's output told the operator that the host had reported
-   "command failed (255): Connection closed by …" but 7.76.0 is required — a
-   failure to ask, dressed up as a fact about curl. *)
+   error into curl's output told the operator that curl had answered
+   "the host was not reached (255): Connection closed by …" but 7.76.0 is
+   required — a failure to ask, dressed up as a fact about curl. *)
 let test_cron_curl_probe_error_is_not_curls_answer () =
   match Setup.cron_curl_verdict_of_probe (Error transport_failure) with
   | Setup.Cron_curl_reported output ->
@@ -2068,6 +2072,86 @@ let test_plan_alloy_already_running () =
     (List.mem Setup.RunAlloy actions)
     true
 
+(* Addressed at 192.0.2.1, which RFC 5737 reserves as unroutable: were the
+   stub on PATH ever to stop being resolved, the operator's own ssh would run,
+   spend its connect timeout and report 255, and the case below would fail
+   loudly rather than pass against nothing. *)
+let unroutable_server : Config_file.server =
+  {
+    ip_address = "192.0.2.1";
+    ssh =
+      Some
+        { user = "deploy"; private_key_contents = "KEY"; private_key_pass = "" };
+    port = None;
+  }
+
+(* The private key's time on disk is a decision per server rather than per
+   remote call. A `bondi setup` run against one box is the client's longest
+   sequence of remote calls by a wide margin -- the readings, every step the
+   plan interprets, and the restart-policy convergence after it -- so it is the
+   run where staging a key with each call costs the most and leaves the most
+   windows in which one is on disk.
+
+   Driven through [setup_server], the function [run] maps over the server list,
+   because that is where the lifetime is decided; asserting it of any one of the
+   three functions below it would leave the other two free to stage their own.
+
+   Both numbers are asserted. "One distinct path" is also what a run that made
+   no calls at all reports, and the stub records nothing when it is never
+   spawned, so the count of invocations is what proves this fixture reaches the
+   calls it is counting. The count is asserted as a floor rather than an exact
+   number: what this case is about is how many keys served them, and pinning the
+   exact number of commands a setup run issues would make every change to the
+   plan a failure here. *)
+let test_a_servers_setup_run_stages_the_key_once () =
+  let outcome, staged =
+    Client_fixtures.staged_keys_during (fun () ->
+        Setup.setup_server (Client_fixtures.mk_config ()) unroutable_server)
+  in
+  (* The run's own verdict is asserted rather than discarded. A stub that
+     answers every command with silence is not a host this run can converge,
+     and a run that reported [Ok] against one would have stopped believing what
+     it read -- which would make the counts below a count of a different run
+     from the one this case is about. *)
+  check bool "the run reported what it could not converge" true
+    (Result.is_error outcome);
+  check bool "the run made more than one remote call" true
+    (List.length staged > 1);
+  check int "over one staged key" 1
+    (List.length (List.sort_uniq String.compare staged))
+
+(* The report [setup] ends on is taken after the run and over its own
+   connections: the four reads of a reading, the orchestrator's own two, and a
+   bounded wait for every container the inspection says has a check to answer
+   for. Those reads stay independent of what [setup_server] decided -- a read
+   that failed is a cell in the report and never an early return -- but
+   independence is a fact about what a read may change, not about how many
+   times key material reaches disk, and the latter is the whole of what the
+   session is for.
+
+   Two stagings is the whole of what one server's run may cost: one for the
+   convergence and one for the report after it. The report's is a second
+   session on purpose, because the run's is closed before the report is taken
+   -- that is what lets a run which stopped part-way still be reported on.
+
+   Both numbers are asserted, for the reason the case above gives: "two
+   distinct paths" is also true of a report whose reads never ran. *)
+let test_a_servers_report_shares_one_staged_key () =
+  let outcome, staged =
+    Client_fixtures.staged_keys_during (fun () ->
+        Setup.setup_and_report
+          ~fetch:(fun ?session server ->
+            Status_cmd.orchestrator_reading ?session ~service_name:None server)
+          (Client_fixtures.mk_config ())
+          unroutable_server)
+  in
+  check bool "the run reported what it could not converge" true
+    (Result.is_error outcome.Setup.converged);
+  check bool "the run and the report made more than two remote calls" true
+    (List.length staged > 2);
+  check int "over one staged key for the run and one for the report" 2
+    (List.length (List.sort_uniq String.compare staged))
+
 let () =
   run "Setup.plan"
     [
@@ -2285,6 +2369,13 @@ let () =
           test_case "logs=true" `Quick test_excluded_containers_logs_true;
           test_case "logs=None" `Quick test_excluded_containers_logs_none;
           test_case "logs=false" `Quick test_excluded_containers_logs_false;
+        ] );
+      ( "a server's run",
+        [
+          test_case "a server's setup run stages the key once" `Quick
+            test_a_servers_setup_run_stages_the_key_once;
+          test_case "a server's report shares one staged key" `Quick
+            test_a_servers_report_shares_one_staged_key;
         ] );
       ( "alloy_river_config",
         [

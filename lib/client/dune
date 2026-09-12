@@ -15,11 +15,6 @@
   bondi.common
   cmdliner
   base64
-  cohttp
-  cohttp-eio
-  eio
-  eio_main
-  uri
   unix
   mustache
   yaml

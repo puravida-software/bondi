@@ -3,6 +3,12 @@ module Remote_exec = Bondi_client.Remote_exec
 
 let contains = Test_helpers.contains
 
+(* The bound the cases that are not about the bound are made under: long enough
+   that nothing in them can reach it, so a case about the error stream or the
+   staged key never turns into a case about the clock. The two that are about it
+   name their own. *)
+let unbounded_enough = 600
+
 let pp_failure fmt (f : Remote_exec.failure) =
   match f with
   | Remote_exec.Not_configured { server } ->
@@ -19,6 +25,9 @@ let pp_failure fmt (f : Remote_exec.failure) =
       Format.fprintf fmt "Signalled { signal = %d; output = %S }" signal output
   | Remote_exec.Stopped { signal; output } ->
       Format.fprintf fmt "Stopped { signal = %d; output = %S }" signal output
+  | Remote_exec.Timed_out { seconds; output } ->
+      Format.fprintf fmt "Timed_out { seconds = %d; output = %S }" seconds
+        output
 
 let failure = testable pp_failure ( = )
 let outcome = result string failure
@@ -89,13 +98,16 @@ let test_success_is_not_a_failure () =
     (Error (Remote_exec.Command_failed { code = 1; output = "  hello  \n" }))
     (Remote_exec.failure_of_status (Unix.WEXITED 1) ~output:"  hello  \n")
 
-(* These five strings are what the two implementations this module replaces
-   printed, and holding them byte-identical is what makes the existing unit and
-   cram assertions evidence that the move preserved behaviour rather than a diff
-   to re-baseline. Asserted as whole rendered strings, not as format strings. *)
+(* Four of these five strings are what the two implementations this module
+   replaces printed, and holding them byte-identical is what makes the existing
+   unit and cram assertions evidence that the move preserved behaviour rather
+   than a diff to re-baseline. The transport arm is the one that moved, for the
+   reason the pair above gives, and every line that pinned its old wording moved
+   with it in the same commit. Asserted as whole rendered strings, not as format
+   strings. *)
 let test_message_renders_the_text_each_shape_rendered_before () =
-  check string "ssh's own failure renders as a command failure"
-    "command failed (255): could not resolve hostname"
+  check string "ssh's own failure renders as a host that was not reached"
+    "the host was not reached (255): could not resolve hostname"
     (Remote_exec.message
        (Remote_exec.Ssh_failed
           { code = 255; output = "  could not resolve hostname \n" }));
@@ -112,6 +124,37 @@ let test_message_renders_the_text_each_shape_rendered_before () =
   check string "an unconsultable server names itself"
     "Missing ssh configuration for server 10.0.0.1"
     (Remote_exec.message (Remote_exec.Not_configured { server = "10.0.0.1" }))
+
+(* A box that was never reached and a command the box ran and refused resolve in
+   different places -- one sends an operator to the network, to this machine's
+   configuration or to the key, the other to the host itself -- and until now
+   both rendered through the same sentence. Shown "command failed" in the middle
+   of a deploy for a box that was never reached, an operator goes to the wrong
+   machine.
+
+   The pair is asserted at one code on purpose. 255 is the only code the
+   transport arm is ever built with, so the words are the whole of the
+   difference and a reader cannot fall back on the number. The second case is
+   also the affirmative arm for the first: without it, a [message] that had
+   stopped saying anything at all would satisfy the absence above. *)
+let test_ssh_failure_names_the_host_not_the_command () =
+  let rendered =
+    Remote_exec.message
+      (Remote_exec.Ssh_failed
+         { code = 255; output = "  Connection closed by 10.0.0.1 port 22 \n" })
+  in
+  check bool "a host that was never reached is not a command that failed" false
+    (contains ~needle:"command failed" rendered);
+  check string "it is the host that is named"
+    "the host was not reached (255): Connection closed by 10.0.0.1 port 22"
+    rendered
+
+let test_command_failure_still_names_the_command () =
+  check string "the host's own refusal reads as it always did"
+    "command failed (255): Connection closed by 10.0.0.1 port 22"
+    (Remote_exec.message
+       (Remote_exec.Command_failed
+          { code = 255; output = "  Connection closed by 10.0.0.1 port 22 \n" }))
 
 let server_without_ssh : Bondi_client.Config_file.server =
   { ip_address = "10.0.0.1"; ssh = None; port = None }
@@ -157,46 +200,8 @@ let test_unconfigured_server_is_an_arm_not_an_exception () =
    unroutable. Were the substitution ever to stop working, the operator's own
    client would run, spend its connect timeout and report 255, and these
    assertions would fail loudly rather than pass quietly. *)
-(* PATH is restored on every path out, including the one where there was no
-   PATH to begin with: leaving a stub directory on it outlives this case and
-   every later one in the executable resolves [ssh] to whichever stub ran last.
-   There is no [unsetenv] in [Unix], so an absent PATH is restored as an empty
-   one -- which is what an absent PATH means to a search. *)
-let with_path value f =
-  let previous = Sys.getenv_opt "PATH" in
-  Unix.putenv "PATH" value;
-  Fun.protect
-    ~finally:(fun () ->
-      match previous with
-      | None -> Unix.putenv "PATH" ""
-      | Some previous -> Unix.putenv "PATH" previous)
-    f
-
-let with_ssh_stub script f =
-  let dir = Filename.temp_dir "bondi-ssh-stub-" "" in
-  (* The directory is removed by a cleanup of its own rather than after the
-     stub's removal, so a stub that could not be removed does not also leak the
-     directory that holds it. *)
-  Fun.protect
-    ~finally:(fun () ->
-      try Unix.rmdir dir with
-      | Unix.Unix_error _ -> ())
-    (fun () ->
-      let stub = Filename.concat dir "ssh" in
-      Fun.protect
-        ~finally:(fun () ->
-          try Sys.remove stub with
-          | Sys_error _ -> ())
-        (fun () ->
-          let oc = open_out stub in
-          output_string oc script;
-          close_out oc;
-          Unix.chmod stub 0o755;
-          with_path
-            (match Sys.getenv_opt "PATH" with
-            | None -> dir
-            | Some previous -> dir ^ ":" ^ previous)
-            f))
+let with_path = Client_fixtures.with_path
+let with_ssh_stub = Client_fixtures.with_ssh_stub
 
 let unroutable_server : Bondi_client.Config_file.server =
   {
@@ -227,15 +232,18 @@ let test_runner_and_classifier_compose_over_a_real_non_zero_command () =
         (Error
            (Remote_exec.Command_failed
               { code = 7; output = "docker: command not found\n" }))
-        (Remote_exec.command_output ~command:"docker ps" unroutable_server));
+        (Remote_exec.command_output ~timeout_seconds:unbounded_enough
+           ~command:"docker ps" unroutable_server));
   with_ssh_stub "#!/bin/sh\nexit 255\n" (fun () ->
       check outcome "255 is still read as ssh's own failure"
         (Error (Remote_exec.Ssh_failed { code = 255; output = "" }))
-        (Remote_exec.command_output ~command:"docker ps" unroutable_server));
+        (Remote_exec.command_output ~timeout_seconds:unbounded_enough
+           ~command:"docker ps" unroutable_server));
   with_ssh_stub "#!/bin/sh\necho ok\n" (fun () ->
       check outcome "and a command that exits 0 is not a failure at all"
         (Ok "ok\n")
-        (Remote_exec.command_output ~command:"docker ps" unroutable_server))
+        (Remote_exec.command_output ~timeout_seconds:unbounded_enough
+           ~command:"docker ps" unroutable_server))
 
 (* Standard error is what a failed call is reported with, and it is only that.
    A call that succeeded is the host answering the question it was asked, and
@@ -258,7 +266,8 @@ let test_standard_error_is_merged_on_a_failure_and_only_there () =
      echo BONDI_ACME_PRESENT\n" (fun () ->
       check outcome "a call that succeeded carries the answer alone"
         (Ok "BONDI_ACME_PRESENT\n")
-        (Remote_exec.command_output ~command:"acme probe" unroutable_server));
+        (Remote_exec.command_output ~timeout_seconds:unbounded_enough
+           ~command:"acme probe" unroutable_server));
   with_ssh_stub
     "#!/bin/sh\n\
      echo BONDI_ACME_ABSENT\n\
@@ -273,7 +282,8 @@ let test_standard_error_is_merged_on_a_failure_and_only_there () =
                   "BONDI_ACME_ABSENT\n\
                    mesg: ttyname failed: Inappropriate ioctl for device\n";
               }))
-        (Remote_exec.command_output ~command:"acme probe" unroutable_server))
+        (Remote_exec.command_output ~timeout_seconds:unbounded_enough
+           ~command:"acme probe" unroutable_server))
 
 (* One runner serves the fed and the unfed call, which is what stops the next
    caller that needs to feed a command from writing a second one -- the way the
@@ -287,11 +297,12 @@ let test_input_absent_and_present_use_the_one_runner () =
   with_ssh_stub "#!/bin/sh\ncat\n" (fun () ->
       check outcome "a command that is not fed reaches end of input at once"
         (Ok "")
-        (Remote_exec.command_output ~command:"cat" unroutable_server);
+        (Remote_exec.command_output ~timeout_seconds:unbounded_enough
+           ~command:"cat" unroutable_server);
       check outcome "and a fed one is handed exactly what it was fed"
         (Ok "hello stdin\n")
-        (Remote_exec.command_output ~input:"hello stdin" ~command:"cat"
-           unroutable_server))
+        (Remote_exec.command_output ~input:"hello stdin"
+           ~timeout_seconds:unbounded_enough ~command:"cat" unroutable_server))
 
 (* A command that exits without draining its input closes the pipe while the
    payload is still being written. At its default disposition SIGPIPE terminates
@@ -308,13 +319,61 @@ let test_a_fed_command_that_exits_early_does_not_kill_the_client () =
   with_ssh_stub "#!/bin/sh\nexit 7\n" (fun () ->
       check outcome "the exit status is reported rather than lost"
         (Error (Remote_exec.Command_failed { code = 7; output = "" }))
-        (Remote_exec.command_output ~input:payload ~command:"true"
-           unroutable_server));
+        (Remote_exec.command_output ~input:payload
+           ~timeout_seconds:unbounded_enough ~command:"true" unroutable_server));
   with_ssh_stub "#!/bin/sh\nwc -c | tr -d ' '\n" (fun () ->
       check outcome "and a command that drains it receives every byte"
         (Ok "200000\n")
-        (Remote_exec.command_output ~input:payload ~command:"wc -c"
-           unroutable_server))
+        (Remote_exec.command_output ~input:payload
+           ~timeout_seconds:unbounded_enough ~command:"wc -c" unroutable_server))
+
+(* A payload past the pipe buffer, fed to a command that is itself printing past
+   the pipe buffer before it reads a byte of it. Neither half alone provokes
+   anything: the case above already pushes 200 KB in, and passes, because its
+   stub prints nothing until stdin closes; the case below already pulls 200 KB
+   out, and passes, because nothing is being written while it does. Only the two
+   at once close the circle -- this client blocked writing a pipe the command is
+   not reading, the command blocked writing a pipe this client is not reading --
+   and a caller sending a deploy payload to a command that reports as it works is
+   exactly that shape.
+
+   The stub's [awk] has only a BEGIN rule, so it exits without touching stdin;
+   the [wc -c] after it is what the payload is delivered to. Both halves are
+   asserted, because either on its own would pass against a runner that dropped
+   the other: the tail is the payload arriving whole, and the length is the
+   command's own output having been collected while that was still in flight.
+
+   Bounded well short of [unbounded_enough] because the failure this case
+   detects is a deadlock rather than a wrong answer, and a deadlock is only
+   observable when something ends it. The number is a detector and not a
+   measurement -- a fifth of a megabyte through two pipes on a loopback stub is
+   milliseconds, so there are four orders of magnitude between the work and the
+   bound, and no slow machine reaches it. *)
+let long_enough_to_fail_visibly = 30
+
+let interleaving_ssh_stub =
+  "#!/bin/sh\n\
+   awk 'BEGIN{s=\"\";for(i=0;i<1000;i++)s=s \"x\";for(j=0;j<200;j++)print s}'\n\
+   wc -c | tr -d ' '\n"
+
+let test_input_larger_than_a_pipe_buffer_is_delivered_whole () =
+  let payload = String.make 200_000 'x' in
+  with_ssh_stub interleaving_ssh_stub (fun () ->
+      match
+        Remote_exec.command_output ~input:payload
+          ~timeout_seconds:long_enough_to_fail_visibly ~command:"wc -c"
+          unroutable_server
+      with
+      | Error failure ->
+          fail
+            ("the stub exits zero and the payload fits the bound: "
+            ^ Remote_exec.message failure)
+      | Ok output ->
+          check bool "every byte of the payload reached the command" true
+            (String.ends_with ~suffix:"200000\n" output);
+          check int
+            "and the command's own output was collected while it was in flight"
+            200_207 (String.length output))
 
 (* Ignoring SIGPIPE is how the test above survives at all, and it is a change to
    a disposition that belongs to the whole process. Restoring it is therefore
@@ -339,8 +398,8 @@ let test_the_sigpipe_disposition_is_restored () =
     (fun () ->
       with_ssh_stub "#!/bin/sh\ncat\n" (fun () ->
           let (_ : (string, Remote_exec.failure) result) =
-            Remote_exec.command_output ~input:"hello" ~command:"cat"
-              unroutable_server
+            Remote_exec.command_output ~input:"hello"
+              ~timeout_seconds:unbounded_enough ~command:"cat" unroutable_server
           in
           ());
       let observed = Sys.signal Sys.sigpipe Sys.Signal_default in
@@ -416,13 +475,99 @@ let test_both_shapes_of_configured_key_reach_disk () =
   check string "and one that does not is written as it was given" verbatim_key
     (Remote_exec.with_temp_key verbatim_key read_file)
 
+(* The private key's time on disk is a decision per server rather than per
+   remote call: this client makes tens of calls against one box in a run, and a
+   staging that comes with each of them is a crash window with each of them.
+
+   The count of distinct key paths is asserted beside the count of invocations,
+   because "one distinct path" is also what a session whose calls never ran
+   reports -- and a stub that is never spawned records nothing at all. *)
+let test_two_calls_in_one_session_stage_the_key_once () =
+  let calls, staged =
+    Client_fixtures.staged_keys_during (fun () ->
+        Remote_exec.with_session ~timeout_seconds:unbounded_enough
+          unroutable_server (fun session ->
+            let first =
+              Remote_exec.command_output ~session
+                ~timeout_seconds:unbounded_enough ~command:"true"
+                unroutable_server
+            in
+            let second =
+              Remote_exec.command_output ~session
+                ~timeout_seconds:unbounded_enough ~command:"true"
+                unroutable_server
+            in
+            (first, second)))
+  in
+  (match calls with
+  | Ok (first, second) ->
+      check outcome "the first call reached the host" (Ok "") first;
+      check outcome "the second call reached the host" (Ok "") second
+  | Error staging ->
+      fail ("the key can be staged here: " ^ Remote_exec.message staging));
+  check int "both calls were made" 2 (List.length staged);
+  check int "over one staged key" 1
+    (List.length (List.sort_uniq String.compare staged))
+
+(* Key material must not outlive the session that needed it, and the path out
+   an implementation forgets is the one nobody drove: a body that raises. The
+   path is read back from the stub because the session says nothing about it and
+   the file is gone by the time the call returns.
+
+   The ordinary path out is asserted first, so the raising case cannot pass
+   against a session that never wrote a key at all. *)
+let test_the_staged_key_does_not_outlive_the_session () =
+  let path_of staged =
+    match staged with
+    | [ path ] -> path
+    | [] -> fail "the stub recorded no invocation, so no key was staged"
+    | _ :: _ :: _ -> fail "one call should have staged one key"
+  in
+  let (), staged =
+    Client_fixtures.staged_keys_during (fun () ->
+        match
+          Remote_exec.with_session ~timeout_seconds:unbounded_enough
+            unroutable_server (fun session ->
+              Remote_exec.command_output ~session
+                ~timeout_seconds:unbounded_enough ~command:"true"
+                unroutable_server)
+        with
+        | Ok (Ok _) -> ()
+        | Ok (Error _) -> fail "the stub exits zero"
+        | Error _ -> fail "the key can be staged here")
+  in
+  check bool "the key does not outlive an ordinary session" false
+    (Sys.file_exists (path_of staged));
+  let (), staged =
+    Client_fixtures.staged_keys_during (fun () ->
+        match
+          Remote_exec.with_session ~timeout_seconds:unbounded_enough
+            unroutable_server (fun session ->
+              check outcome "the call inside the session reached the host"
+                (Ok "")
+                (Remote_exec.command_output ~session
+                   ~timeout_seconds:unbounded_enough ~command:"true"
+                   unroutable_server);
+              raise (Raised_from_f "from the session's body"))
+        with
+        | Ok () -> fail "the exception from the body should have propagated"
+        | Error _ -> fail "the exception from the body should have propagated"
+        | exception Raised_from_f _ -> ())
+  in
+  check bool "nor one the body left by raising" false
+    (Sys.file_exists (path_of staged))
+
 (* Which failures mean the host ran the command is one policy, and every caller
    that words a report around it asks the same question. Asked here, of the
-   type, so that a sixth constructor is a compile error in one place rather than
-   a silent fifth wording.
+   type, so that a further constructor is a compile error in one place rather
+   than a second wording nobody sees.
 
-   All five arms are asserted, not only the true one: the four that answer false
-   are what stops a predicate that answers true to everything from passing. *)
+   All six arms are asserted, not only the true one: the five that answer false
+   are what stops a predicate that answers true to everything from passing. The
+   bound's own arm is among them because [explain] words a report around this
+   answer, and a timeout read as a host verdict would tell an operator the host
+   ran their deploy and refused it -- when what happened is that this client
+   stopped waiting and the work may still be going on. *)
 let test_ran_on_host_names_the_one_answer_the_host_gave () =
   check bool "a non-zero exit is the host's own verdict" true
     (Remote_exec.ran_on_host
@@ -437,7 +582,10 @@ let test_ran_on_host_names_the_one_answer_the_host_gave () =
     (Remote_exec.ran_on_host
        (Remote_exec.Signalled { signal = 15; output = "" }));
   check bool "and neither does a stopped one" false
-    (Remote_exec.ran_on_host (Remote_exec.Stopped { signal = 19; output = "" }))
+    (Remote_exec.ran_on_host (Remote_exec.Stopped { signal = 19; output = "" }));
+  check bool "a call given up on carries none either" false
+    (Remote_exec.ran_on_host
+       (Remote_exec.Timed_out { seconds = 60; output = "" }))
 
 (* Carried across, assertions unchanged, from the suite that covered these
    options while they lived in the module this one replaces.
@@ -500,10 +648,12 @@ let test_both_streams_are_drained_together () =
   with_ssh_stub large_stderr_stub (fun () ->
       check outcome "a command that fills the error pipe still returns"
         (Ok "done\n")
-        (Remote_exec.command_output ~command:"docker logs c" unroutable_server));
+        (Remote_exec.command_output ~timeout_seconds:unbounded_enough
+           ~command:"docker logs c" unroutable_server));
   with_ssh_stub large_stdout_stub (fun () ->
       match
-        Remote_exec.command_output ~command:"docker logs c" unroutable_server
+        Remote_exec.command_output ~timeout_seconds:unbounded_enough
+          ~command:"docker logs c" unroutable_server
       with
       | Error _ -> fail "the stub exits zero"
       | Ok output ->
@@ -525,9 +675,10 @@ let test_a_caller_may_ask_for_the_error_stream_on_a_successful_command () =
       check outcome "asked for, the error stream arrives with the answer"
         (Ok "from stdout\nfrom stderr\n")
         (Remote_exec.command_output ~standard_error:Remote_exec.Merged_always
-           ~command:"logs c" unroutable_server);
+           ~timeout_seconds:unbounded_enough ~command:"logs c" unroutable_server);
       check outcome "and by default it does not" (Ok "from stdout\n")
-        (Remote_exec.command_output ~command:"logs c" unroutable_server))
+        (Remote_exec.command_output ~timeout_seconds:unbounded_enough
+           ~command:"logs c" unroutable_server))
 
 (* An [ssh] that is not on this machine's PATH is the local shell exiting 127,
    which is the same code the host's own shell exits when the remote command
@@ -547,8 +698,8 @@ let test_a_missing_local_ssh_is_not_the_hosts_answer () =
     (fun () ->
       with_path empty (fun () ->
           match
-            Remote_exec.command_output ~command:"docker --version"
-              unroutable_server
+            Remote_exec.command_output ~timeout_seconds:unbounded_enough
+              ~command:"docker --version" unroutable_server
           with
           | Ok _ -> fail "there is no ssh to run"
           | Error observed ->
@@ -560,8 +711,8 @@ let test_a_missing_local_ssh_is_not_the_hosts_answer () =
                 observed));
   with_ssh_stub "#!/bin/sh\necho ok\n" (fun () ->
       check outcome "an ssh that is there is spawned as before" (Ok "ok\n")
-        (Remote_exec.command_output ~command:"docker --version"
-           unroutable_server))
+        (Remote_exec.command_output ~timeout_seconds:unbounded_enough
+           ~command:"docker --version" unroutable_server))
 
 (* This client's own inability to make the call -- no temporary directory to
    write the key into, no descriptors left to spawn with -- is a failure it can
@@ -577,7 +728,8 @@ let test_a_client_that_cannot_write_its_key_reports_a_value () =
   with_ssh_stub "#!/bin/sh\necho ok\n" (fun () ->
       check outcome "the same call succeeds where the key can be written"
         (Ok "ok\n")
-        (Remote_exec.command_output ~command:"true" unroutable_server);
+        (Remote_exec.command_output ~timeout_seconds:unbounded_enough
+           ~command:"true" unroutable_server);
       let previous = Filename.get_temp_dir_name () in
       Filename.set_temp_dir_name
         (Filename.concat previous "bondi-absent-tmpdir");
@@ -585,7 +737,8 @@ let test_a_client_that_cannot_write_its_key_reports_a_value () =
         ~finally:(fun () -> Filename.set_temp_dir_name previous)
         (fun () ->
           match
-            Remote_exec.command_output ~command:"true" unroutable_server
+            Remote_exec.command_output ~timeout_seconds:unbounded_enough
+              ~command:"true" unroutable_server
           with
           | Ok _ -> fail "there is nowhere to write the key"
           | Error observed ->
@@ -599,7 +752,8 @@ let test_a_client_that_cannot_write_its_key_reports_a_value () =
                 | Remote_exec.Ssh_failed _
                 | Remote_exec.Command_failed _
                 | Remote_exec.Signalled _
-                | Remote_exec.Stopped _ ->
+                | Remote_exec.Stopped _
+                | Remote_exec.Timed_out _ ->
                     false)))
 
 (* The rendered message is printed to a terminal and pasted into reports, and
@@ -634,9 +788,14 @@ let test_explain_prefixes_only_the_host_s_own_answer () =
     (Remote_exec.explain ~subject:"the read"
        (Remote_exec.Command_failed { code = 1; output = "boom" }));
   check string "and one that was never reached is not"
-    "command failed (255): boom"
+    "the host was not reached (255): boom"
     (Remote_exec.explain ~subject:"the read"
-       (Remote_exec.Ssh_failed { code = 255; output = "boom" }))
+       (Remote_exec.Ssh_failed { code = 255; output = "boom" }));
+  check string "nor is one this client stopped waiting for"
+    "the command did not finish within 60s and was given up on, and may still \
+     be running on the host: boom"
+    (Remote_exec.explain ~subject:"the read"
+       (Remote_exec.Timed_out { seconds = 60; output = "boom" }))
 
 (* The guarded [Command_failed] test that two setup probes each spelled out,
    asked of the type instead. A code that matches on any other arm would be
@@ -658,7 +817,74 @@ let test_exited_with_is_the_hosts_own_code_alone () =
          Remote_exec.Ssh_failed { code = 127; output = "" };
          Remote_exec.Signalled { signal = 127; output = "" };
          Remote_exec.Stopped { signal = 127; output = "" };
+         Remote_exec.Timed_out { seconds = 127; output = "" };
        ])
+
+(* The connection bounds in [ssh_options] cover a box that refuses and a box
+   that goes quiet. Neither covers a host that took the command and is still
+   running it: ssh waits for as long as the command does, and until this bound
+   nothing said how long that may be.
+
+   The two numbers here differ on purpose, and the one in force is the call's.
+   A read that asks for a minute inside a session opened for a deploy's own
+   half-hour is asking for a minute: a session that overrode it would hold a
+   read of a wedged box to the deploy's whole budget, which is the wait the
+   bound exists to end. The session names a different number so that a runner
+   that took the session's would be caught, and neither would be visible if they
+   agreed.
+
+   The second arm is the same stub differing only in how long it sleeps. Without
+   it a runner that gave up on every command would satisfy the first. *)
+let sleeping_ssh_stub ~seconds =
+  Printf.sprintf "#!/bin/sh\nsleep %d\necho awake\n" seconds
+
+let call_bounded_by_its_own_number stub =
+  with_ssh_stub stub (fun () ->
+      Remote_exec.with_session ~timeout_seconds:600 unroutable_server
+        (fun session ->
+          Remote_exec.command_output ~session ~timeout_seconds:1
+            ~command:"a command that takes its time" unroutable_server))
+
+let test_a_command_that_outlives_its_bound_fails_with_the_bound_named () =
+  match call_bounded_by_its_own_number (sleeping_ssh_stub ~seconds:3) with
+  | Error staging ->
+      fail ("the key can be staged here: " ^ Remote_exec.message staging)
+  | Ok answer -> (
+      check outcome "the call's own bound is the one it is held to"
+        (Error (Remote_exec.Timed_out { seconds = 1; output = "" }))
+        answer;
+      match answer with
+      | Ok output -> fail ("the command should not have finished: " ^ output)
+      | Error failure ->
+          check bool "and the text an operator reads names that bound" true
+            (contains ~needle:"within 1s" (Remote_exec.message failure)))
+
+(* A command given up on is still a failure with something to say, and what it
+   managed to print before the bound passed is the half of it worth reading: a
+   deploy killed at its bound had usually named the step it had reached. The
+   stub speaks first and then sleeps past the bound, so the line is already
+   drained when the deadline arrives and nothing but the carry could put it in
+   the failure. *)
+let test_what_a_command_said_before_its_bound_is_carried () =
+  match
+    call_bounded_by_its_own_number
+      "#!/bin/sh\necho 'reached step two'\nsleep 3\n"
+  with
+  | Error staging ->
+      fail ("the key can be staged here: " ^ Remote_exec.message staging)
+  | Ok answer ->
+      check outcome "the failure carries what the command managed to print"
+        (Error
+           (Remote_exec.Timed_out { seconds = 1; output = "reached step two\n" }))
+        answer
+
+let test_a_command_that_finishes_inside_its_bound_is_unaffected () =
+  match call_bounded_by_its_own_number (sleeping_ssh_stub ~seconds:0) with
+  | Error staging ->
+      fail ("the key can be staged here: " ^ Remote_exec.message staging)
+  | Ok answer ->
+      check outcome "a command that answers in time answers as it always did"
+        (Ok "awake\n") answer
 
 let () =
   run "Remote_exec"
@@ -678,6 +904,10 @@ let () =
         [
           test_case "renders the text each shape rendered before" `Quick
             test_message_renders_the_text_each_shape_rendered_before;
+          test_case "an ssh failure names the host, not the command" `Quick
+            test_ssh_failure_names_the_host_not_the_command;
+          test_case "a command failure still names the command" `Quick
+            test_command_failure_still_names_the_command;
           test_case "bounds the output it carries" `Quick
             test_message_bounds_the_output_it_carries;
           test_case "an unconfigured server is an arm, not an exception" `Quick
@@ -706,6 +936,11 @@ let () =
           test_case "a client that cannot write its key reports a value" `Quick
             test_a_client_that_cannot_write_its_key_reports_a_value;
         ] );
+      ( "input",
+        [
+          test_case "input larger than a pipe buffer is delivered whole" `Quick
+            test_input_larger_than_a_pipe_buffer_is_delivered_whole;
+        ] );
       ( "writing the key to disk",
         [
           test_case "a raising call leaves no key and still reports its fault"
@@ -714,6 +949,24 @@ let () =
             test_the_key_is_written_readable_by_its_owner_alone;
           test_case "both shapes of configured key reach disk" `Quick
             test_both_shapes_of_configured_key_reach_disk;
+        ] );
+      ( "session",
+        [
+          test_case "two calls in one session stage the key once" `Quick
+            test_two_calls_in_one_session_stage_the_key_once;
+          test_case "the key is gone when the session closes" `Quick
+            test_the_staged_key_does_not_outlive_the_session;
+        ] );
+      ( "timeout",
+        [
+          test_case
+            "a command that outlives its bound fails with the bound named"
+            `Quick
+            test_a_command_that_outlives_its_bound_fails_with_the_bound_named;
+          test_case "a command that finishes inside its bound is unaffected"
+            `Quick test_a_command_that_finishes_inside_its_bound_is_unaffected;
+          test_case "what a command said before its bound is carried" `Quick
+            test_what_a_command_said_before_its_bound_is_carried;
         ] );
       ( "classifying a failure",
         [

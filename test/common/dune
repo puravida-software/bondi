@@ -6,6 +6,7 @@
   test_alloy_river
   test_managed_container
   test_cron_exec_line
+  test_builtin_container
   test_cron_section
   test_cron_legacy_line
   test_alert

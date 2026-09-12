@@ -58,6 +58,19 @@ succeeds, so the failure is genuinely mid-plan.
   >   *BONDI_CRON_PAYLOAD_LISTED*)
   >     echo BONDI_CRON_PAYLOAD_LISTED
   >     echo BONDI_CRON_PAYLOAD_END ;;
+  >   # The orchestrator's image on its own, which is the version the report's
+  >   # orchestrator read holds this box to before running a subcommand inside
+  >   # its container. Without this arm the command falls through to *) and
+  >   # answers nothing, which reads as a box whose version could not be read --
+  >   # the same unavailable source for a reason no fixture chose. The pattern
+  >   # ends the command rather than merely containing it: the probe's own
+  >   # listing asks for {{.State}} and {{.Image}} together, and an arm that
+  >   # matched both would answer the probe with a version.
+  >   *'name=^/bondi-orchestrator$'*"--format '{{.Image}}'") echo 'mlopez1506/bondi-server:0.10.1' ;;
+  >   # This box is below the floor, so its orchestrator is never asked. The arm
+  >   # is here so that a change which stopped asking the version would show up
+  >   # as this line rather than as a silent fall-through to *).
+  >   *'bondi-server status'*) echo 'a box below the floor was asked anyway' >&2; exit 1 ;;
   >   *) : ;;
   > esac
   > STUB

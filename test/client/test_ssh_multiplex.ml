@@ -56,15 +56,18 @@ let test_stable_within_a_process () =
     (Remote_exec.multiplex_options ())
     (Remote_exec.multiplex_options ())
 
-(* A tunnel is one long-lived connection; routing it through a shared master
-   would make teardown a question of channels rather than killing a process. *)
-let test_tunnel_does_not_multiplex () =
-  let cmd =
-    Bondi_client.Ssh_tunnel.tunnel_command ~key_path:"/tmp/k" ~user:"root"
-      ~host:"203.0.113.1" ~local_port:1234 ~remote_port:3030
-  in
-  check bool "tunnel has no ControlMaster" false
-    (contains ~needle:"ControlMaster" cmd)
+(* The affirmative arm for the split is [test_reuses_one_connection] above; this
+   is the negative one. Reading the shared options must not set up a control
+   socket, because taking them costs nothing while taking the multiplex set
+   creates a mode-700 directory on the first call. Fold the two together and
+   every reader of the connection bounds -- including the cases that only assert
+   those bounds -- acquires that side effect. *)
+let test_shared_options_do_not_multiplex () =
+  let shared = String.concat " " Remote_exec.ssh_options in
+  check bool "shared options have no ControlMaster" false
+    (contains ~needle:"ControlMaster" shared);
+  check bool "shared options have no ControlPath" false
+    (contains ~needle:"ControlPath" shared)
 
 let () =
   run "ssh multiplexing"
@@ -76,6 +79,7 @@ let () =
           test_case "socket dir is private" `Quick test_socket_dir_is_private;
           test_case "stable within a process" `Quick
             test_stable_within_a_process;
-          test_case "tunnel opts out" `Quick test_tunnel_does_not_multiplex;
+          test_case "shared options opt out" `Quick
+            test_shared_options_do_not_multiplex;
         ] );
     ]

@@ -56,6 +56,11 @@ let ordering_of_version version =
   | [ _ ] ->
       None
 
+(* The one comparison both floors are decided by, so the two cannot drift apart
+   on what happens exactly at the boundary. *)
+let ordering_reaches ~floor_major ~floor_minor (major, minor) =
+  major > floor_major || (major = floor_major && minor >= floor_minor)
+
 let writes_exec_lines version =
   match ordering_of_version version with
   | None ->
@@ -67,10 +72,10 @@ let writes_exec_lines version =
             server is running: %s. Set bondi_server.version in bondi.yaml to \
             %s or later, run bondi setup, then deploy again."
            minimum_for_exec_lines (String.trim version) minimum_for_exec_lines)
-  | Some (major, minor) ->
+  | Some ordering ->
       if
-        major > minimum_major
-        || (major = minimum_major && minor >= minimum_minor)
+        ordering_reaches ~floor_major:minimum_major ~floor_minor:minimum_minor
+          ordering
       then Ok ()
       else
         Error
@@ -82,3 +87,51 @@ let writes_exec_lines version =
               rather than now. Set bondi_server.version in bondi.yaml to %s or \
               later, run bondi setup, then deploy again."
              version minimum_for_exec_lines minimum_for_exec_lines)
+
+(* The second floor, and the earlier of the two: the first release whose server
+   binary is a group of subcommands at all rather than a single program that
+   serves. 0.15.0 -- tag v0.15.0, commit b2fee6c -- is where deploy, run, status
+   and check arrived together, which is why one number covers every caller that
+   runs one of them.
+
+   It is deliberately a release below minimum_for_exec_lines and not the same
+   number. A 0.15.x box answers a deploy and a status correctly; the only thing
+   it cannot do is write an exec line into its own crontab, and refusing it here
+   would refuse a box that works for the capability actually being used.
+
+   Not read by the release recipe: the recipe refuses a tag below the higher
+   floor, and a tag that clears that one clears this one by construction. The
+   pair is held separately from the string for the same reason the pair above
+   is. *)
+let command_surface_major = 0
+let command_surface_minor = 15
+let minimum_for_command_surface = "0.15.0"
+
+let answers_command_surface version =
+  match ordering_of_version version with
+  | None ->
+      Error
+        (Printf.sprintf
+           "could not read an orchestrator version from the server; \
+            bondi-server %s or later is required, because this command runs a \
+            'bondi-server' subcommand inside the orchestrator container. The \
+            server is running: %s. Set bondi_server.version in bondi.yaml to \
+            %s or later, run bondi setup, then try again."
+           minimum_for_command_surface (String.trim version)
+           minimum_for_command_surface)
+  | Some ordering ->
+      if
+        ordering_reaches ~floor_major:command_surface_major
+          ~floor_minor:command_surface_minor ordering
+      then Ok ()
+      else
+        Error
+          (Printf.sprintf
+             "the server is running bondi-server %s, but this command runs a \
+              'bondi-server' subcommand inside the orchestrator container, \
+              which requires %s or later. An older image has no subcommands: \
+              it ignores the arguments and starts a second server against a \
+              port already bound, so the command would fail without ever \
+              running. Set bondi_server.version in bondi.yaml to %s or later, \
+              run bondi setup, then try again."
+             version minimum_for_command_surface minimum_for_command_surface)

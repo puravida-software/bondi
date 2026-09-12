@@ -2,10 +2,11 @@
     reconciled.
 
     Docker read over SSH is ground truth about the box; the orchestrator's own
-    HTTP report holds what only it knows, such as whether a cron job's last run
-    completed. Each keeps its own field on every row, because a single merged
-    value would have to prefer one of them, and preferring one silently is how a
-    table stops being auditable — a blend cannot be checked against anything.
+    account of itself holds what only it knows, such as whether a cron job's
+    last run completed. Each keeps its own field on every row, because a single
+    merged value would have to prefer one of them, and preferring one silently
+    is how a table stops being auditable — a blend cannot be checked against
+    anything.
 
     Where the two describe the same component differently, the difference is the
     finding, not a defect in the report: it is drift nothing else detects.
@@ -39,14 +40,15 @@ type observation = {
     that was never reached is a question about the network or the credentials
     for it; a source that answered with something this client cannot read is a
     question about what is running at the other end — a version skew for the
-    orchestrator over HTTP, a daemon that is down or a CLI that is not there for
-    the host over SSH. Reporting the second as the first sends the reader
-    looking in the wrong place, and the answer that would have shown them which
-    is gone by then — hence the message carries what arrived.
+    orchestrator's account, a daemon that is down or a CLI that is not there for
+    the host's. Reporting the second as the first sends the reader looking in
+    the wrong place, and the answer that would have shown them which is gone by
+    then — hence the message carries what arrived.
 
-    Both sources produce both arms. Which one an SSH-sourced reading became is
-    decided from the remote call's own outcome rather than from its rendered
-    text, since the text cannot say. *)
+    Both sources produce both arms, and both are read off the same box over the
+    same connection, so which arm a reading became is decided from the remote
+    call's own outcome rather than from its rendered text, since the text cannot
+    say. *)
 type unavailability =
   | Not_consulted of string  (** nothing was obtained from it at all *)
   | Not_understood of string

@@ -343,7 +343,7 @@ let test_report_source_absent_is_not_source_unavailable () =
   check_absent ~source:"docker"
     (row_named (container_name "ibgateway") answered).docker;
   check string "a listing that never ran carries why"
-    "command failed (255): ssh: connect: no route to host"
+    "the host was not reached (255): ssh: connect: no route to host"
     (unavailability_of ~source:"docker"
        (row_named (container_name "ibgateway") could_not_be_asked).docker)
 
@@ -864,7 +864,8 @@ let test_report_exit_failure_on_timeout () =
        which of the two happened, so the row has to. *)
 let test_report_exit_failure_on_unreadable_health () =
   let unreadable =
-    waited (Health.Unreadable "command failed (255): Connection closed")
+    waited
+      (Health.Unreadable "the host was not reached (255): Connection closed")
   in
   check bool "a health that could not be read fails the run too" true
     (Report.exit_failure unreadable);

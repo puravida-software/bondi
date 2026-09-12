@@ -16,16 +16,6 @@
     writer of the files and the writer of the line must name the same path or
     the line points at nothing. *)
 
-val orchestrator_container : string
-(** The name of the container the orchestrator runs under on a host.
-
-    It sits beside the grammar rather than beside either reader because the line
-    that execs into that container, and the commands that inspect it, stop it,
-    replace it and copy a job's files out of it, must all name one string.
-    Spelled a second time, a rename reaches some of them and not others: nothing
-    fails to build and no test reddens, and what is lost is a job's payload
-    files on the run that replaces the container. *)
-
 val cron_root : string
 (** The directory a cron job's files live under, one directory per job. It is a
     path inside the orchestrator container; setup bind-mounts the host directory

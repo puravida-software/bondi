@@ -3,6 +3,11 @@ let container_arg =
   Cmdliner.Arg.(
     required & pos 0 (some string) None & info [] ~docv:"CONTAINER_NAME" ~doc)
 
+(* As [docker ps]: an operator is waiting on this, and a box that is answering
+   answers a log read at once however much it has to print. What this bounds is
+   the wait before they are told the box did not answer. *)
+let logs_seconds = 60
+
 let run container_name =
   let container_name = String.trim container_name in
   if container_name = "" then (
@@ -23,6 +28,7 @@ let run container_name =
                  not for a printer. *)
               Remote_exec.docker_command_output_text
                 ~standard_error:Remote_exec.Merged_always
+                ~timeout_seconds:logs_seconds
                 ~command:("logs " ^ container_name) server
             with
             | Ok output ->
@@ -42,7 +48,8 @@ let run container_name =
       | Some (Error err) ->
           prerr_endline err;
           exit 1
-      | _ ->
+      | Some (Ok _)
+      | None ->
           outputs
           |> List.filter_map (function
             | Ok value -> Some value

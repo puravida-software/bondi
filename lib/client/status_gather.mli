@@ -16,7 +16,7 @@ type orchestrator_reading = {
   warnings : string list;
       (** what it reported alongside them, in its own words *)
 }
-(** What the orchestrator answered over HTTP. *)
+(** What the orchestrator answered about itself. *)
 
 type reading = {
   docker : Host_inventory.t;  (** the host's own containers, over SSH *)
@@ -50,6 +50,8 @@ val reading_of_reads :
     checked without a host. *)
 
 val gather :
+  ?session:Remote_exec.session ->
+  timeout_seconds:int ->
   fetch:
     (Config_file.server ->
     (orchestrator_reading, Status_report.unavailability) result) ->
@@ -57,16 +59,38 @@ val gather :
   reading
 (** Run every read against [server] and assemble the result.
 
-    The HTTP fetch arrives as [fetch] rather than being performed here because
-    its caller owns the scheduler it needs, and the two commands that produce
-    this report do not have the same one. Passing it in leaves each of them its
-    own process shape.
+    The orchestrator's own reading arrives as [fetch] rather than being
+    performed here, and the reason is a dependency and not a preference:
+    {!Orchestrator_status} reads an answer into {!orchestrator_reading}, which
+    is this module's type, so it depends on this module. A read performed here
+    would have to call it back, and the two would be a cycle. The parameter is
+    what keeps the read above both of them, in the command that wants it.
+
+    It is not what it was for. It arrived because the orchestrator was reached
+    over a scheduler its caller owned and this module did not; there is no
+    scheduler now, and every one of these reads goes over the same runner. What
+    survives is the type-level reason above.
 
     No read is allowed to abort the others or the run: a failure becomes a value
     in the reading, which is the only way a report survives the conditions that
-    make it worth printing. *)
+    make it worth printing.
+
+    [timeout_seconds] is how long each remote read may take before it is given
+    up on, per read rather than for the four together: they are independent
+    calls and a budget shared between them would make one slow read report the
+    others as failures. The fetch is not covered — it is the caller's own call
+    and arrives here already bounded or not.
+
+    [session] is the staged key the four remote reads are made over. It is
+    optional so that a caller which has not opened one still gets its reading,
+    each read opening and closing a session of its own — which is what all four
+    did before there were sessions, and is the same answer at four times the key
+    material's time on disk. A caller that reaches the orchestrator over the
+    same runner hands [fetch] the session it opened here, which is how the fifth
+    reading joins the four rather than paying its own handshake. *)
 
 val health_waits :
+  ?session:Remote_exec.session ->
   timeout_seconds:int ->
   Config_file.server ->
   Host_inventory.t ->
@@ -83,7 +107,16 @@ val health_waits :
 
     This is a caller's choice and not part of taking a reading. Reporting a
     health state and waiting for one are different jobs, and the command that
-    only reports one never calls this. *)
+    only reports one never calls this.
+
+    [session] is the staged key each wait is run over, as in {!gather}: a caller
+    that took its reading inside a session waits inside the same one.
+
+    [timeout_seconds] is the wait the host is asked to perform, and this is the
+    only read whose invocation bound is not the caller's to choose: it is that
+    number plus enough slack for the connection, because a bound at the wait's
+    own length would report a container that used its whole budget as a call
+    that was given up on. *)
 
 val report_of_reading :
   config:Config_file.t ->

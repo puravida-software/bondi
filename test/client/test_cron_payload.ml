@@ -126,7 +126,7 @@ let read jobs =
     { entries = List.map (fun job -> Crontab_listing.Named job) jobs }
 
 let section_never_read =
-  Crontab_listing.Unreadable "command failed (255): Permission denied"
+  Crontab_listing.Unreadable "the host was not reached (255): Permission denied"
 
 let check_report ~expected ~crontab listing =
   check (list string) "report" expected
@@ -866,8 +866,8 @@ let test_payload_neither_source_read_is_one_sentence () =
     ~expected:
       [
         "which cron jobs on server 203.0.113.9 are scheduled to run could not \
-         be read, and neither could which of them still hold their files: \
-         command failed (255): Connection closed by 203.0.113.9 port 22";
+         be read, and neither could which of them still hold their files: the \
+         host was not reached (255): Connection closed by 203.0.113.9 port 22";
       ]
     ~crontab:section_never_read
     (Cron_payload.of_listing_output (Error transport_failure))

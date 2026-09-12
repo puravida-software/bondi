@@ -1,7 +1,7 @@
 open Alcotest
 module Probe = Bondi_client.Orchestrator_probe
 module Remote_exec = Bondi_client.Remote_exec
-module Cron_exec_line = Bondi_common.Cron_exec_line
+module Builtin_container = Bondi_common.Builtin_container
 
 let contains = Test_helpers.contains
 
@@ -113,7 +113,7 @@ let test_failure_message_carries_the_diagnostics () =
    a second spelling here would be found by nothing -- the probe would go on
    looking for a container the rest of setup had stopped creating. *)
 let test_the_probe_names_the_container_the_common_module_names () =
-  let container = Cron_exec_line.orchestrator_container in
+  let container = Builtin_container.orchestrator in
   check bool "the readiness probe names it" true
     (contains ~needle:container (Probe.probe_command ~port:3030 ~attempts:30));
   check bool "the diagnostics command names it" true

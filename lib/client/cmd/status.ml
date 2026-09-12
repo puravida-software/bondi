@@ -1,105 +1,91 @@
+let ( let* ) = Result.bind
+
 type output_format = Table | Json
 
-let read_body_string body =
-  Eio.Buf_read.(of_flow ~max_size:max_int body |> take_all)
+(* How long one remote read may take before this command reports that the box
+   did not answer. Every read [status] makes is a listing, a file, or the
+   orchestrator's own account of itself: a box that is answering answers them at
+   once, and an operator is waiting on the table while it happens. The read of
+   the orchestrator's image tag is not among them -- that one is
+   [Orchestrator_version]'s and is held to that module's bound, for the reason
+   given there. *)
+let read_seconds = 60
 
-(* A fixed bound on one request to one orchestrator, not user configuration. A
-   host that refuses the connection answers at once; one that drops the packets
-   — a firewalled port is an ordinary way for "the orchestrator is down" to
-   present — answers never, and this call has no deadline of its own. Both
-   commands that make it print a report at the end of their work, so an
-   unbounded wait here is the report being lost on exactly the failure it exists
-   to describe. *)
-let fetch_timeout_seconds = 10.0
+(* The command the box runs for a status read: the orchestrator's own binary, as
+   a subcommand, inside the container it runs in. The selector is an argument
+   because a service name is not a credential -- the one payload this client
+   sends that is goes on standard input instead, and that is the deploy's.
 
-let fetch_status ~clock ~client ip_address ~port ~service_name =
-  let base_url = Printf.sprintf "http://%s:%d/api/v1/status" ip_address port in
-  let url =
-    match service_name with
-    | None -> base_url
-    | Some name ->
-        Printf.sprintf "%s?service=%s" base_url
-          (Uri.pct_encode ~component:`Query name)
+   [-i] is the shape every command this client runs inside the orchestrator
+   takes, so that a caller reading one of them has read all of them. Nothing is
+   written on this one's standard input, which the runner closes at once.
+
+   The [docker] is not spelled here. The runner supplies it, so that no call
+   site can spell it differently. *)
+let status_exec_command ~service_name =
+  Printf.sprintf "exec -i %s bondi-server status%s"
+    Bondi_common.Builtin_container.orchestrator
+    (match service_name with
+    | None -> ""
+    | Some name -> " --service " ^ Filename.quote name)
+
+(* Every way a remote read can fail leaves the orchestrator unconsulted, and
+   that is what is reported -- including a command that ran on the box and
+   failed. A [docker exec] that failed is the box's account of why the
+   orchestrator could not be reached: the container is not there, the daemon
+   refused, the binary knows no such subcommand. None of those is the
+   orchestrator having answered.
+
+   [Status_report] classifies its own failed reads the other way, sending a
+   command that ran on the host to [Not_understood], and it is right to: what
+   failed there is the read of the host, and the host is the source. Here the
+   host is the transport and the orchestrator is the source, so the same failure
+   means the opposite thing. [Not_understood] is left to a body that arrived and
+   could not be read, which is the one an older client against a newer
+   orchestrator produces and the one an operator must be able to tell apart. *)
+let not_consulted ~subject failure =
+  Status_report.Not_consulted (Remote_exec.explain ~subject failure)
+
+(* What the floor below is decided from, as this command's report words a box it
+   could not read. The reading itself is [Orchestrator_version]'s, shared with
+   the deploy path rather than spelled a second time here: the two commands hold
+   their boxes to the same floor, so a box refused by one has to be refused by
+   the other from the same answer. What is not shared is this -- a failed read
+   is a source that could not be consulted, which is a cell in a table and not
+   the sentence a deploy prints. *)
+let reported_orchestrator_version ?session (server : Config_file.server) =
+  match Orchestrator_version.read ?session server with
+  | Error failure ->
+      Error (not_consulted ~subject:"the orchestrator listing" failure)
+  | Ok version -> Ok version
+
+(* One server's reading from the orchestrator, over the box's own command
+   surface.
+
+   The floor is applied before the subcommand is run rather than after it fails,
+   because a binary from before there were subcommands does not fail: it ignores
+   the arguments and starts a second server against a port already bound, so a
+   caller that asked anyway would spend its whole bound on a command that was
+   never going to answer and then report a box that did not respond. A refusal
+   is a cell in the report and never an exit -- this command reports on every
+   configured server, and a run that stopped at the first old box would lose the
+   account of the ones that are fine. *)
+let orchestrator_reading ?session ~service_name (server : Config_file.server) =
+  let* version = reported_orchestrator_version ?session server in
+  let* () =
+    match Server_version.answers_command_surface version with
+    | Ok () -> Ok ()
+    | Error message -> Error (Status_report.Not_consulted message)
   in
-  let uri = Uri.of_string url in
-  try
-    (* The body is read inside the bound as well as the request: a server that
-       accepts the connection and then stalls part-way through its response
-       holds the reader open just as long as one that never answers. *)
-    let status, body_str =
-      Eio.Time.with_timeout_exn clock fetch_timeout_seconds (fun () ->
-          let resp, body =
-            Eio.Switch.run (fun sw -> Cohttp_eio.Client.get ~sw client uri)
-          in
-          (Cohttp.Response.status resp, read_body_string body))
-    in
-    match status with
-    | `OK -> Orchestrator_status.reading_of_body ~ip_address body_str
-    | _ ->
-        (* The server answered, and what it answered with is the evidence. This
-           is not a source that could not be reached. *)
-        Error
-          (Status_report.Not_understood
-             (Printf.sprintf "%s answered %s: %s" ip_address
-                (Cohttp.Code.string_of_status status)
-                body_str))
-  with
-  (* Named before the catch-all so the bound reports itself in its own words:
-     the exception's name says nothing an operator can act on, and "took too
-     long" is a different instruction from "refused the connection". *)
-  | Eio.Time.Timeout ->
-      Error
-        (Status_report.Not_consulted
-           (Printf.sprintf "server %s did not answer within %.0f seconds"
-              ip_address fetch_timeout_seconds))
-  (* Re-raised rather than caught. A cancellation is the caller withdrawing the
-     question, not the server failing to answer it, and turning one into a cell
-     in the report is how Ctrl-C comes to print a table instead of stopping. *)
-  | Eio.Cancel.Cancelled _ as cancelled -> raise cancelled
-  | exn ->
-      Error
-        (Status_report.Not_consulted
-           (Printf.sprintf "Error calling status endpoint on server %s: %s"
-              ip_address (Printexc.to_string exn)))
-
-(* Same reasoning as the deploy path: the orchestrator answers on loopback only,
-   so a status read from another machine goes through a forwarded port. A server
-   declared without [ssh] is dialled directly -- correct for localhost and for a
-   tunnel the operator opened themselves.
-
-   A tunnel that never came up is [Not_consulted], not [Not_understood]: nothing
-   was obtained from the box at all, and the distinction is what tells an
-   operator whether to look at their key or at the orchestrator. *)
-let orchestrator_reading ~clock ~client ~service_name
-    (server : Config_file.server) =
-  let port =
-    Option.value ~default:Bondi_common.Defaults.server_port server.port
-  in
-  (* A loopback address is the box itself: the published port is already
-     reachable and forwarding loopback to loopback buys nothing. *)
   match
-    if Bondi_common.Net.is_loopback server.ip_address then None else server.ssh
+    Remote_exec.docker_command_output ?session ~timeout_seconds:read_seconds
+      ~command:(status_exec_command ~service_name)
+      server
   with
-  | None -> fetch_status ~clock ~client server.ip_address ~port ~service_name
-  | Some ssh -> (
-      match
-        Ssh_tunnel.with_tunnel ~ssh ~host:server.ip_address ~remote_port:port
-          (fun local_port ->
-            Ok
-              (fetch_status ~clock ~client "127.0.0.1" ~port:local_port
-                 ~service_name))
-      with
-      | Ok reading -> reading
-      | Error msg ->
-          Error
-            (Status_report.Not_consulted
-               (Printf.sprintf "%s: %s" server.ip_address msg)))
-
-let orchestrator_reading_standalone ~service_name server =
-  Eio_main.run @@ fun env ->
-  orchestrator_reading ~clock:(Eio.Stdenv.clock env)
-    ~client:(Cohttp_eio.Client.make ~https:None (Eio.Stdenv.net env))
-    ~service_name server
+  | Error failure ->
+      Error (not_consulted ~subject:"the orchestrator's report" failure)
+  | Ok body ->
+      Orchestrator_status.reading_of_body ~ip_address:server.ip_address body
 
 let run output_format () =
   match Config_file.read () with
@@ -112,22 +98,32 @@ let run output_format () =
         | Some service -> Some service.name
         | None -> None
       in
-      Eio_main.run @@ fun env ->
-      let net = Eio.Stdenv.net env in
-      let client = Cohttp_eio.Client.make ~https:None net in
       let reports =
         List.map
           (fun (server : Config_file.server) ->
+            let reading ?session () =
+              Status_gather.gather ?session ~timeout_seconds:read_seconds
+                ~fetch:(orchestrator_reading ?session ~service_name)
+                server
+            in
             (* This command reports a health state and never waits for one: a
                wait costs a bound per component, and an operator asking what is
                running is not asking anyone to hold still while it settles. *)
             Status_gather.report_of_reading ~config ~address:server.ip_address
               ~waits:[]
-              (Status_gather.gather
-                 ~fetch:
-                   (orchestrator_reading ~clock:(Eio.Stdenv.clock env) ~client
-                      ~service_name)
-                 server))
+              (match
+                 Remote_exec.with_session ~timeout_seconds:read_seconds server
+                   (fun session -> reading ~session ())
+               with
+              | Ok taken -> taken
+              (* A session that could not be staged is a server with no ssh
+                 block, no ssh on this machine, or nowhere to write a key, and
+                 every read would have answered with that same failure. The body
+                 never ran, so taking the reading without a session is what
+                 derives it -- once per read, exactly as it was derived before
+                 there was a session to open -- rather than reading anything
+                 twice. *)
+              | Error _ -> reading ()))
           (Config_file.servers config)
       in
       let output =

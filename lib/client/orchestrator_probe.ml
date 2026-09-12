@@ -14,7 +14,7 @@ let unreachable_marker = "BONDI_ORCHESTRATOR_UNREACHABLE"
    into it. A probe that spelled the name itself could go on waiting for a
    container nothing creates any more, and would report the host unreachable
    rather than say so. *)
-let container_name = Bondi_common.Cron_exec_line.orchestrator_container
+let container_name = Bondi_common.Builtin_container.orchestrator
 let health_path = "/api/v1/health"
 let readiness_attempts = 30
 

@@ -34,22 +34,9 @@ let test_a_line_of_another_shape_names_nothing () =
     (Cron_exec_line.job_name_of
        "0 6 * * * /usr/bin/curl -sS -d '{\"job\":\"x\"}'")
 
-(* The one spelling of the container name. Pinned as a literal rather than read
-   back off the module under test, which would agree with any value at all: what
-   the hosts actually run is a container called bondi-orchestrator, and a typo
-   here is a setup run that cannot find the container it just started. *)
-let test_the_orchestrator_container_has_one_name () =
-  check string "the name every command on a host uses" "bondi-orchestrator"
-    Cron_exec_line.orchestrator_container
-
 let () =
   run "Cron_exec_line"
     [
-      ( "orchestrator_container",
-        [
-          test_case "the orchestrator container has one name" `Quick
-            test_the_orchestrator_container_has_one_name;
-        ] );
       ( "run_file_of",
         [
           test_case "path under the cron root" `Quick

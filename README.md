@@ -11,7 +11,7 @@ Dead simple deployment tool for Dockerized services.
 Bondi is both a server and a CLI.
 
 The server:
-- listens for deployments from the CLI or API
+- runs the deployments the CLI sends it over SSH, and listens for deployments on its API
 - pulls the Docker image and runs it
 - exposes a web UI for managing the server
 
@@ -123,9 +123,9 @@ bondi setup
 
 The orchestrator image's entrypoint is the `bondi-server` binary, and that binary
 is a command group. Run with no command it serves the HTTP API — which is what
-`bondi setup` starts on your server, and what every existing deployment relies on
-— and the other subcommands answer the same questions without an HTTP request,
-for an operator who is already on the box:
+`bondi setup` starts on your server — and the other subcommands answer the same
+questions without an HTTP request. `bondi deploy` and `bondi status` reach a box
+through them over SSH, and so can an operator who is already on it:
 
 ```bash
 ssh YOUR_USER@YOUR_SERVER -- 'docker exec -i bondi-orchestrator bondi-server status'
