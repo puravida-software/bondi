@@ -346,7 +346,7 @@ let test_deploy_payload_includes_logs_flag () =
   in
   check (option bool) "logs survives JSON round-trip" (Some false) decoded.logs
 
-(* cron_version_gate *)
+(* version_gate *)
 
 (* The gate protects the exec-shaped crontab line: a box whose orchestrator
    predates the [run] subcommand would take the line happily and fail at its
@@ -360,7 +360,7 @@ let test_cron_deploy_against_an_under_version_box_is_refused () =
       [ ("backup", "v1") ]
   in
   let read_version () = Ok "0.12.0" in
-  match Deploy.cron_version_gate ~read_version jobs with
+  match Deploy.version_gate ~read_version jobs with
   | Ok () -> Alcotest.fail "expected a cron-declaring deploy to be refused"
   | Error msg ->
       check bool
@@ -368,24 +368,64 @@ let test_cron_deploy_against_an_under_version_box_is_refused () =
         true
         (Bondi_common.String_utils.contains ~needle:"0.12.0" msg)
 
-(* A deploy with no cron jobs on this server writes no crontab line, so there is
-   nothing for the version to gate -- and consulting the box anyway would make
-   every service-only deploy pay for a question nobody asked. The reader here
-   fails if it is called at all. *)
-let test_deploy_without_cron_jobs_is_not_gated () =
-  let read_version () = Error "the box was consulted" in
-  match Deploy.cron_version_gate ~read_version None with
+(* A deploy with no cron jobs on this server writes no crontab line, so the
+   crontab floor is not what it is held to -- but it still runs a command inside
+   the orchestrator's container to get there, and a binary with no subcommands
+   answers that by ignoring the arguments and serving. So the box is read for
+   every deploy now, and the floor applied to a service-only one is the lower of
+   the two. *)
+let test_a_service_only_deploy_is_held_to_the_command_surface () =
+  let read_version () = Ok "0.14.0" in
+  match Deploy.version_gate ~read_version None with
+  | Ok () ->
+      Alcotest.fail
+        "expected a box with no subcommands to be refused a service deploy"
+  | Error msg ->
+      check bool
+        ("the refusal names what the box reported: " ^ msg)
+        true
+        (Bondi_common.String_utils.contains ~needle:"0.14.0" msg);
+      check bool
+        ("and what is required of it: " ^ msg)
+        true
+        (Bondi_common.String_utils.contains
+           ~needle:Bondi_client.Server_version.minimum_for_command_surface msg)
+
+(* The other side of the same box: at the command surface floor and below the
+   crontab one, a deploy that writes no crontab line proceeds. Without this arm
+   the case above is satisfied by a gate that refuses everything, and the two
+   floors would have collapsed back into one. *)
+let test_a_service_only_deploy_is_not_held_to_the_crontab_floor () =
+  let read_version () =
+    Ok Bondi_client.Server_version.minimum_for_command_surface
+  in
+  match Deploy.version_gate ~read_version None with
   | Ok () -> ()
-  | Error msg -> Alcotest.fail ("expected no gate, got: " ^ msg)
+  | Error msg -> Alcotest.fail ("expected the deploy to proceed, got: " ^ msg)
 
 (* [Some []] is not a shape [cron_jobs_for_server] produces, but it is a shape
-   the gate accepts, and it writes no crontab line either -- so the reader must
-   stay unasked for it too. *)
-let test_deploy_with_an_empty_cron_list_is_not_gated () =
-  let read_version () = Error "the box was consulted" in
-  match Deploy.cron_version_gate ~read_version (Some []) with
+   the gate accepts, and it writes no crontab line either -- so it is held to
+   the same floor as [None] and not to the crontab one. *)
+let test_a_deploy_with_an_empty_cron_list_is_held_to_the_lower_floor () =
+  let read_version () =
+    Ok Bondi_client.Server_version.minimum_for_command_surface
+  in
+  match Deploy.version_gate ~read_version (Some []) with
   | Ok () -> ()
-  | Error msg -> Alcotest.fail ("expected no gate, got: " ^ msg)
+  | Error msg -> Alcotest.fail ("expected the deploy to proceed, got: " ^ msg)
+
+(* Every deploy reads the box now, so a box that cannot be read stops a
+   service-only deploy as surely as it stops a cron-declaring one. There is no
+   longer a path that reaches a server without having seen what it is running:
+   the read and the command the deploy runs go over the same connection, so a
+   box that could not answer the first was never going to answer the second. *)
+let test_a_deploy_against_an_unreadable_box_is_refused () =
+  let read_version () = Error "the orchestrator's version could not be read" in
+  match Deploy.version_gate ~read_version None with
+  | Ok () -> Alcotest.fail "expected an unreadable box to refuse a deploy"
+  | Error msg ->
+      check string "the reader's own words reach the operator"
+        "the orchestrator's version could not be read" msg
 
 (* The arm the gate exists to let through: cron jobs declared *and* a box
    carrying the [run] subcommand, so the deploy proceeds. Refusing an
@@ -400,7 +440,7 @@ let test_cron_deploy_against_a_supported_box_proceeds () =
       [ ("backup", "v1") ]
   in
   let read_version () = Ok Bondi_client.Server_version.minimum_for_exec_lines in
-  match Deploy.cron_version_gate ~read_version jobs with
+  match Deploy.version_gate ~read_version jobs with
   | Ok () -> ()
   | Error msg ->
       Alcotest.fail ("expected a supported box to be deployed to: " ^ msg)
@@ -441,7 +481,7 @@ let crontab_naming job =
          "BONDI_CRONTAB_CONTENTS";
          "# BEGIN BONDI CRON";
          Printf.sprintf "0 3 * * * docker exec %s sh -c '%s%s'"
-           Bondi_common.Cron_exec_line.orchestrator_container
+           Bondi_common.Builtin_container.orchestrator
            Bondi_common.Cron_exec_line.exec_marker
            (Bondi_common.Cron_exec_line.run_file_of job);
          "# END BONDI CRON";
@@ -522,7 +562,7 @@ let test_a_deploy_that_finds_a_divergence_still_proceeds () =
           ~read_crontab:(fun () -> crontab_naming "nightly-report")
           ~read_payloads:(fun () -> empty_payload_directory)
           jobs));
-  match Deploy.cron_version_gate ~read_version jobs with
+  match Deploy.version_gate ~read_version jobs with
   | Ok () -> ()
   | Error msg -> Alcotest.fail ("a divergence became a refusal: " ^ msg)
 
@@ -602,6 +642,129 @@ let test_a_partial_cron_deploy_sees_the_orphan_a_withdrawal_left () =
            (List.length lines)
            (String.concat " | " lines))
 
+(* the command the box runs, and what comes back from it *)
+
+(* The one string this client and the box have to agree on. The box's binary is
+   a group of subcommands and [deploy] is the one that reads a payload on
+   standard input; [-i] is what keeps that input open through the container.
+   Spelled here as a literal rather than assembled from the pieces a reader
+   would have to reassemble in their head: a change to any of them is a change
+   to what every deployed box is asked to do, and this line is where that shows
+   up. The [docker] itself is the runner's -- it prefixes it so no call site can
+   spell it differently. *)
+let test_the_exec_command_a_deploy_runs () =
+  check string "the deploy runs the box's own deploy subcommand"
+    "exec -i bondi-orchestrator bondi-server deploy" Deploy.deploy_exec_command
+
+(* A box answering something no orchestrator produces -- a container that is not
+   there, a daemon that refused, an image whose binary knows no such
+   subcommand -- is the box's answer and is reported as one, with the words it
+   used. The failure this guards against is the opposite: a client that replaces
+   what the box said with its own account of not having understood it, which
+   leaves an operator with nothing to act on and points them at their own
+   machine. *)
+let test_an_answer_no_orchestrator_produces_is_the_boxs () =
+  let answered = "Error: No such container: bondi-orchestrator" in
+  match
+    Deploy.deploy_outcome ~ip_address:"1.2.3.4"
+      (Error
+         (Bondi_client.Remote_exec.Command_failed
+            { code = 1; output = answered }))
+  with
+  | Ok () -> Alcotest.fail "expected the box's refusal to be a failure"
+  | Error msg ->
+      check bool
+        ("the failure names the server it came from: " ^ msg)
+        true
+        (Bondi_common.String_utils.contains ~needle:"1.2.3.4" msg);
+      check bool
+        ("and carries the box's own words: " ^ msg)
+        true
+        (Bondi_common.String_utils.contains ~needle:answered msg);
+      check bool
+        ("and says the box ran it and refused: " ^ msg)
+        true
+        (Bondi_common.String_utils.contains ~needle:"ran on the host and failed"
+           msg)
+
+(* The arm that makes the one above mean something: a box that answered is a
+   deploy that happened. What the box wrote is not read -- the exit code is the
+   verdict, and a client that parsed the report would refuse a deploy that
+   succeeded the first time the report gained a field. *)
+let test_a_box_that_answered_is_a_deploy_that_happened () =
+  match
+    Deploy.deploy_outcome ~ip_address:"1.2.3.4"
+      (Ok "{\"status\":\"success\",\"tag\":\"v1\"}")
+  with
+  | Ok () -> ()
+  | Error msg -> Alcotest.fail ("expected a success, got: " ^ msg)
+
+let gated_server ip : Config_file.server =
+  {
+    ip_address = ip;
+    ssh =
+      Some
+        {
+          user = "deploy";
+          private_key_contents = "not-a-real-key";
+          private_key_pass = "";
+        };
+    port = None;
+  }
+
+(* A refusal that arrives after the first box has been written to is not a
+   refusal. Two boxes, the second of them too old: the run has to end without
+   the first having been deployed to, which is a property of the order the two
+   loops run in and not of either one alone. The deployer here reports what it
+   was asked to do, so being asked at all is visible in the outcome. *)
+let test_the_gate_refuses_before_anything_is_posted () =
+  let servers =
+    [ (gated_server "10.0.0.1", None); (gated_server "10.0.0.2", None) ]
+  in
+  let read_version (server : Config_file.server) =
+    if server.ip_address = "10.0.0.2" then Ok "0.14.0"
+    else Ok Bondi_client.Server_version.minimum_for_exec_lines
+  in
+  let deploy (server : Config_file.server) _cron_jobs =
+    Error ("deployed to " ^ server.ip_address)
+  in
+  match Deploy.deploy_servers ~read_version ~deploy servers with
+  | Ok () -> Alcotest.fail "expected the old box to refuse the run"
+  | Error messages ->
+      let said = String.concat " | " messages in
+      check bool
+        ("the refusal names the box that was too old: " ^ said)
+        true
+        (Bondi_common.String_utils.contains ~needle:"10.0.0.2" said);
+      check bool
+        ("and nothing was deployed: " ^ said)
+        false
+        (Bondi_common.String_utils.contains ~needle:"deployed to" said)
+
+(* The same two servers, both current, so the loop is reached and every server
+   in it is reached in turn. Without this arm the absence above passes against a
+   deployer that is never called on any fixture.
+
+   Both failures are asserted, in order. One message could not tell "both
+   servers ran and the first was reported" apart from "only the first ran", and
+   the sink these reach is a terminal that shows every line it is given -- two
+   boxes that both failed are two things the operator has to fix. *)
+let test_every_gated_server_is_deployed_to_in_order () =
+  let servers =
+    [ (gated_server "10.0.0.1", None); (gated_server "10.0.0.2", None) ]
+  in
+  let read_version _ = Ok Bondi_client.Server_version.minimum_for_exec_lines in
+  let deploy (server : Config_file.server) _cron_jobs =
+    Error ("deployed to " ^ server.ip_address)
+  in
+  match Deploy.deploy_servers ~read_version ~deploy servers with
+  | Ok () -> Alcotest.fail "expected the deployer's own failure to be reported"
+  | Error messages ->
+      check (list string)
+        "every server is reached, in order, and every failure is the run's"
+        [ "deployed to 10.0.0.1"; "deployed to 10.0.0.2" ]
+        messages
+
 let () =
   run "Deploy_helpers"
     [
@@ -643,15 +806,20 @@ let () =
           test_case "omits alert fields when unconfigured" `Quick
             test_deploy_wire_omits_alert_fields_when_unconfigured;
         ] );
-      ( "cron_version_gate",
+      ( "version_gate",
         [
           test_case
             "a cron-declaring deploy against an under-version box is refused"
             `Quick test_cron_deploy_against_an_under_version_box_is_refused;
-          test_case "a deploy declaring no cron jobs is not gated" `Quick
-            test_deploy_without_cron_jobs_is_not_gated;
-          test_case "a deploy with an empty cron list is not gated" `Quick
-            test_deploy_with_an_empty_cron_list_is_not_gated;
+          test_case "a service-only deploy is held to the command surface"
+            `Quick test_a_service_only_deploy_is_held_to_the_command_surface;
+          test_case "a service-only deploy is not held to the crontab floor"
+            `Quick test_a_service_only_deploy_is_not_held_to_the_crontab_floor;
+          test_case
+            "a deploy with an empty cron list is held to the lower floor" `Quick
+            test_a_deploy_with_an_empty_cron_list_is_held_to_the_lower_floor;
+          test_case "a deploy against a box that cannot be read is refused"
+            `Quick test_a_deploy_against_an_unreadable_box_is_refused;
           test_case "a cron-declaring deploy against a supported box proceeds"
             `Quick test_cron_deploy_against_a_supported_box_proceeds;
           test_case
@@ -676,5 +844,18 @@ let () =
         [
           test_case "includes logs flag" `Quick
             test_deploy_payload_includes_logs_flag;
+        ] );
+      ( "the exec a deploy runs",
+        [
+          test_case "the exec command a deploy runs" `Quick
+            test_the_exec_command_a_deploy_runs;
+          test_case "an answer no orchestrator produces is the box's" `Quick
+            test_an_answer_no_orchestrator_produces_is_the_boxs;
+          test_case "a box that answered is a deploy that happened" `Quick
+            test_a_box_that_answered_is_a_deploy_that_happened;
+          test_case "the gate refuses before anything is posted" `Quick
+            test_the_gate_refuses_before_anything_is_posted;
+          test_case "every gated server is deployed to, in order" `Quick
+            test_every_gated_server_is_deployed_to_in_order;
         ] );
     ]

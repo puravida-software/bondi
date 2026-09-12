@@ -29,6 +29,19 @@ listing.
   >   *BONDI_CRON_PAYLOAD_LISTED*)
   >     echo BONDI_CRON_PAYLOAD_LISTED
   >     echo BONDI_CRON_PAYLOAD_END ;;
+  >   # The orchestrator's image on its own, which is the version the report's
+  >   # orchestrator read holds this box to before running a subcommand inside
+  >   # its container. Without this arm the command falls through to *) and
+  >   # answers nothing, which reads as a box whose version could not be read --
+  >   # the same unavailable source for a reason no fixture chose. The pattern
+  >   # ends the command rather than merely containing it: the probe's own
+  >   # listing asks for {{.State}} and {{.Image}} together, and an arm that
+  >   # matched both would answer the probe with a version.
+  >   *'name=^/bondi-orchestrator$'*"--format '{{.Image}}'") echo 'mlopez1506/bondi-server:0.10.1' ;;
+  >   # This box is below the floor, so its orchestrator is never asked. The arm
+  >   # is here so that a change which stopped asking the version would show up
+  >   # as this line rather than as a silent fall-through to *).
+  >   *'bondi-server status'*) echo 'a box below the floor was asked anyway' >&2; exit 1 ;;
   >   *) : ;;
   > esac
   > STUB
@@ -63,7 +76,7 @@ and are taken whether or not the plan ran.
   $ sed 's/not reachable: .*/not reachable: <detail>/' out.log
   Setting up the servers...
   Processing server: 127.0.0.1
-  Error: server 127.0.0.1: could not list the bondi-orchestrator container on the server, so setup will not act on whether it is running: command failed (255): Connection closed by 10.0.0.1 port 22
+  Error: server 127.0.0.1: could not list the bondi-orchestrator container on the server, so setup will not act on whether it is running: the host was not reached (255): Connection closed by 10.0.0.1 port 22
   
   Server: 127.0.0.1
   
@@ -84,9 +97,13 @@ and are taken whether or not the plan ran.
 
 No container was started under a name that was never checked. The affirmative
 arm is the listing count: the probe did run, so the absence below is the refusal
-to act on its failure rather than a run that stopped before reaching it.
+to act on its failure rather than a run that stopped before reaching it. It is
+the probe's own listing that is counted and not every command naming the
+container: the report taken after the run reads the same container's image to
+hold the box to the floor for the orchestrator's subcommands, which is a second
+command against the same name and not this phase.
 
-  $ grep -c -F -- 'ps -a --filter name=^/bondi-orchestrator$' ssh-argv.log
+  $ grep -c -- 'ps -a --filter name=\^/bondi-orchestrator\$ --format .{{.State}}' ssh-argv.log
   1
 
   $ grep -c -F -- '--name bondi-orchestrator' ssh-argv.log

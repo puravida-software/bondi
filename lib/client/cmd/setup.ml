@@ -1,11 +1,22 @@
 let ( let* ) = Result.bind
 
+(* How long any one command this file runs on a box may take before it is given
+   up on. One number rather than one per call, for two reasons. The calls are
+   all made over a single session opened per server, and a call inside a session
+   is held to the session's bound -- so a shorter number on the quick probes
+   would be a number with no effect. And the number the session is opened with
+   has to cover the slowest thing setup asks a box to do: installing Docker out
+   of the distribution's package manager, or running an image the box has yet to
+   pull. Fifteen minutes is that, on a box with a slow link; a probe that comes
+   back in under a second is not made worse by being allowed more. *)
+let host_command_seconds = 900
+
 (* ------------------------------------------------------------------------- *)
 (* Types                                                                     *)
 (* ------------------------------------------------------------------------- *)
 
+module Builtin_container = Bondi_common.Builtin_container
 module Managed_container = Bondi_common.Managed_container
-module Cron_exec_line = Bondi_common.Cron_exec_line
 
 (* The listing that produces this state is a remote command that can fail to run
    at all, so "no container" and "no answer" are separate constructors. Reading
@@ -141,7 +152,7 @@ let phase_of_action : action -> Setup_phases.phase = function
    cannot see it. *)
 let orchestrator_ps_command =
   Printf.sprintf "ps -a --filter name=^/%s$ --format '{{.State}}\t{{.Image}}'"
-    Cron_exec_line.orchestrator_container
+    Builtin_container.orchestrator
 
 (* ------------------------------------------------------------------------- *)
 (* Orchestrator run command (pure, testable)                                  *)
@@ -153,8 +164,10 @@ let orchestrator_ps_command =
    on every host bondi has ever set up.
 
    Default 127.0.0.1. Cron is unaffected -- lib/server/crontab.ml calls
-   http://localhost:3030 from the host, which is the published mapping. Remote
-   callers use a tunnel:  ssh -N -L 3030:127.0.0.1:3030 root@<box>
+   http://localhost:3030 from the host, which is the published mapping. Bondi's
+   own commands do not use the port at all: they run the orchestrator's
+   subcommands inside its container over SSH, so no client needs this address
+   to be reachable from anywhere but the box.
 
    Non-loopback is allowed but not unauthenticated: without api_token the API
    is open, and an open API on a public address is remote root. Refusing here
@@ -217,7 +230,7 @@ let orchestrator_run_command ~cron_payload_needed (config : Config_file.t) :
           /var/run/docker.sock:/var/run/docker.sock%s%s%s --group-add $(stat \
           -c %%g /var/run/docker.sock) --label bondi.managed=true --label \
           bondi.type=infrastructure --label bondi.logs=true %s"
-         Cron_exec_line.orchestrator_container
+         Builtin_container.orchestrator
          Bondi_common.Defaults.bondi_restart_policy bind volume_mounts user_flag
          token_env image)
 
@@ -227,7 +240,7 @@ let orchestrator_port_command =
   Printf.sprintf
     "docker inspect %s -f '{{range $p, $c := .HostConfig.PortBindings}}{{range \
      $c}}{{.HostIp}}{{end}}{{end}}'"
-    Cron_exec_line.orchestrator_container
+    Builtin_container.orchestrator
 
 let published_binding_matches ~expected output =
   let got = String.trim output in
@@ -244,7 +257,7 @@ let published_binding_matches ~expected output =
    Creation is therefore not the only moment the policy can be checked. *)
 let orchestrator_restart_command =
   Printf.sprintf "docker inspect %s -f '{{.HostConfig.RestartPolicy.Name}}'"
-    Cron_exec_line.orchestrator_container
+    Builtin_container.orchestrator
 
 (* docker update writes HostConfig.RestartPolicy.Name on the running container:
    same pid, same StartedAt, no signal -- measured 2026-09-02 against Docker
@@ -254,7 +267,7 @@ let orchestrator_restart_command =
    change a flag. *)
 let orchestrator_restart_update_command ~policy =
   Printf.sprintf "docker update --restart=%s %s" policy
-    Cron_exec_line.orchestrator_container
+    Builtin_container.orchestrator
 
 let declared_restart_matches ~expected output =
   let got = String.trim output in
@@ -460,8 +473,8 @@ let alloy_config_mode_of_probe ~expected output =
 
    The Engine's own record is deliberately unchanged. The Docker CLI expands
    --env-file on the client, into the container's environment, before the create
-   call ever leaves it, so the key sits in `docker inspect bondi-alloy` byte for
-   byte as it did under -e. [observed -- 2026-09-03: `docker run -d --env-file
+   call ever leaves it, so the key sits in the alloy container's `docker
+   inspect` byte for byte as it did under -e. [observed -- 2026-09-03: `docker run -d --env-file
    f` left the file's variables in .Config.Env unchanged. The expansion happens
    in the client, so the reading is against docker CLI 29.7.2 and it is the
    client version that decides it.]
@@ -489,12 +502,13 @@ let alloy_remove_config_command =
 
 let alloy_run_command ~image =
   Printf.sprintf
-    "docker run -d --name bondi-alloy --restart %s -v \
+    "docker run -d --name %s --restart %s -v \
      /var/run/docker.sock:/var/run/docker.sock:ro -v %s:%s:ro --label \
      bondi.managed=true --label bondi.type=infrastructure --label \
      bondi.logs=false --env-file %s %s run %s"
-    Bondi_common.Defaults.bondi_restart_policy alloy_config_path
-    alloy_config_path alloy_env_path (Filename.quote image) alloy_config_path
+    Builtin_container.alloy Bondi_common.Defaults.bondi_restart_policy
+    alloy_config_path alloy_config_path alloy_env_path (Filename.quote image)
+    alloy_config_path
 
 let orchestrator_state_of_ps_output output =
   let line =
@@ -532,7 +546,8 @@ let orchestrator_state_of_probe = function
   | Error err -> Orchestrator_undetermined err
 
 let alloy_ps_command =
-  "ps -a --filter name=^/bondi-alloy$ --format '{{.State}}\t{{.Image}}'"
+  Printf.sprintf "ps -a --filter name=^/%s$ --format '{{.State}}\t{{.Image}}'"
+    Builtin_container.alloy
 
 (* The listing is filtered to the one name, so any line at all is that
    container — including one that does not parse, and one in "created",
@@ -637,9 +652,9 @@ let docker_install_verdict_of_probe probe =
 
    That reading is a version string, and a command that never ran has no version
    string in it. Folding the transport's own error into curl's output tells the
-   operator that the host reported "command failed (255): Connection closed by …"
-   but 7.76.0 is required, which is a failure to ask dressed as a fact about
-   curl. Absence is different: the host's own report that the command does not
+   operator that curl answered "the host was not reached (255): Connection
+   closed by …" but 7.76.0 is required, which is a failure to ask dressed as a
+   fact about curl. Absence is different: the host's own report that the command does not
    exist arrives on the same channel and is an answer, so the two are told apart
    by the status the host's shell returned rather than by the channel it came
    on or the words it came with. *)
@@ -742,11 +757,12 @@ let acme_file_state_of_probe = function
           (Printf.sprintf "the host answered without saying which: %s"
              (String.trim output))
 
-let gather_context (server : Config_file.server) :
+let gather_context ?session (server : Config_file.server) :
     (setup_context, string) result =
   let docker_status =
     docker_status_of_probe
-      (Remote_exec.docker_command_output ~command:"--version" server)
+      (Remote_exec.docker_command_output ?session
+         ~timeout_seconds:host_command_seconds ~command:"--version" server)
   in
   let orchestrator =
     match docker_status with
@@ -754,7 +770,8 @@ let gather_context (server : Config_file.server) :
     | Docker_undetermined message -> Orchestrator_undetermined message
     | Docker_installed _ ->
         orchestrator_state_of_probe
-          (Remote_exec.docker_command_output_text
+          (Remote_exec.docker_command_output_text ?session
+             ~timeout_seconds:host_command_seconds
              ~command:orchestrator_ps_command server)
   in
   let alloy_state =
@@ -763,7 +780,8 @@ let gather_context (server : Config_file.server) :
     | Docker_undetermined message -> Alloy_undetermined message
     | Docker_installed _ ->
         alloy_state_of_probe
-          (Remote_exec.docker_command_output_text ~command:alloy_ps_command
+          (Remote_exec.docker_command_output_text ?session
+             ~timeout_seconds:host_command_seconds ~command:alloy_ps_command
              server)
   in
   let managed =
@@ -776,7 +794,8 @@ let gather_context (server : Config_file.server) :
     | Docker_undetermined message -> Managed_unobserved message
     | Docker_installed _ -> (
         match
-          Remote_exec.docker_command_output_text ~command:managed_ps_command
+          Remote_exec.docker_command_output_text ?session
+            ~timeout_seconds:host_command_seconds ~command:managed_ps_command
             server
         with
         | Ok output -> Managed_observed (managed_of_ps_output output)
@@ -792,7 +811,8 @@ let gather_context (server : Config_file.server) :
      and a host with no Docker can still be holding one. *)
   let crontab =
     Crontab_listing.of_read_output
-      (Remote_exec.command_output ~command:Crontab_listing.read_command server)
+      (Remote_exec.command_output ?session ~timeout_seconds:host_command_seconds
+         ~command:Crontab_listing.read_command server)
   in
   Ok { docker_status; orchestrator; alloy_state; managed; crontab }
 
@@ -918,7 +938,7 @@ let plan (config : Config_file.t) ~(specs : Managed_container.t list)
   let server = orchestrator_actions config ctx in
   (* Every state that leaves a container behind removes it first, stopped ones
      included: [docker run] refuses a name that is already taken, so a stopped
-     bondi-alloy makes every later setup fail on a name conflict — and because
+     alloy container makes every later setup fail on a name conflict — and because
      alloy precedes the managed containers here, nothing after it converges
      either. The stop stays ahead of the removal because [RemoveAlloy]'s [docker
      rm] refuses a paused or restarting container just as it refuses a running
@@ -1035,7 +1055,7 @@ let plan_for_config (config : Config_file.t) (ctx : setup_context) =
           (Printf.sprintf
              "could not list the %s container on the server, so setup will not \
               act on whether it is running: %s"
-             Cron_exec_line.orchestrator_container message)
+             Builtin_container.orchestrator message)
     | Orchestrator_absent
     | Orchestrator_not_running
     | Orchestrator_running _ ->
@@ -1050,9 +1070,9 @@ let plan_for_config (config : Config_file.t) (ctx : setup_context) =
     | Alloy_undetermined message, Some _ ->
         Error
           (Printf.sprintf
-             "could not list the bondi-alloy container on the server, so setup \
-              will not act on whether it is running: %s"
-             message)
+             "could not list the %s container on the server, so setup will not \
+              act on whether it is running: %s"
+             Builtin_container.alloy message)
     | Alloy_undetermined _, None
     | (Alloy_absent | Alloy_present), _ ->
         Ok ()
@@ -1113,7 +1133,7 @@ let alloy_river_config (config : Config_file.t) (alloy : Config_file.alloy) :
 (* Phase 3: Interpreter                                                      *)
 (* ------------------------------------------------------------------------- *)
 
-let interpret ~cron_payload_needed (server : Config_file.server)
+let interpret ?session ~cron_payload_needed (server : Config_file.server)
     (config : Config_file.t) (actions : action list) : (unit, string) result =
   let ip_address = server.Config_file.ip_address in
   (* One action, applied. No arm here knows what follows it: the plan stops at
@@ -1127,7 +1147,8 @@ let interpret ~cron_payload_needed (server : Config_file.server)
            [docker_install_verdict_of_probe]; this arm only carries it out. *)
         match
           docker_install_verdict_of_probe
-            (Remote_exec.docker_command_output ~command:"--version" server)
+            (Remote_exec.docker_command_output ?session
+               ~timeout_seconds:host_command_seconds ~command:"--version" server)
         with
         (* Bare: [run] below names the server once, for every arm. *)
         | Docker_abort message -> Error message
@@ -1146,7 +1167,9 @@ let interpret ~cron_payload_needed (server : Config_file.server)
                get-docker.sh"
             in
             let* output =
-              Remote_exec.command_output_text ~command:install_cmd server
+              Remote_exec.command_output_text ?session
+                ~timeout_seconds:host_command_seconds ~command:install_cmd
+                server
             in
             print_endline
               (Printf.sprintf "Docker installed on server %s: %s" ip_address
@@ -1160,7 +1183,8 @@ let interpret ~cron_payload_needed (server : Config_file.server)
         let* () =
           match
             acme_file_state_of_probe
-              (Remote_exec.command_output_text
+              (Remote_exec.command_output_text ?session
+                 ~timeout_seconds:host_command_seconds
                  ~command:(acme_probe_command ~path:acme_file)
                  server)
           with
@@ -1175,7 +1199,10 @@ let interpret ~cron_payload_needed (server : Config_file.server)
                 Printf.sprintf "sudo chown root:root %s && sudo chmod 600 %s"
                   acme_file acme_file
               in
-              let* _ = Remote_exec.command_output_text ~command:cmd server in
+              let* _ =
+                Remote_exec.command_output_text ?session
+                  ~timeout_seconds:host_command_seconds ~command:cmd server
+              in
               print_endline
                 (Printf.sprintf "ACME file permissions updated on server %s: %s"
                    ip_address acme_file);
@@ -1188,7 +1215,8 @@ let interpret ~cron_payload_needed (server : Config_file.server)
                   acme_dir acme_file acme_file acme_file
               in
               let* output =
-                Remote_exec.command_output_text ~command:cmd server
+                Remote_exec.command_output_text ?session
+                  ~timeout_seconds:host_command_seconds ~command:cmd server
               in
               print_endline
                 (Printf.sprintf "ACME file created on server %s: %s" ip_address
@@ -1204,7 +1232,10 @@ let interpret ~cron_payload_needed (server : Config_file.server)
             (Filename.quote network_name)
             (Filename.quote network_name)
         in
-        let* _ = Remote_exec.command_output_text ~command:cmd server in
+        let* _ =
+          Remote_exec.command_output_text ?session
+            ~timeout_seconds:host_command_seconds ~command:cmd server
+        in
         print_endline
           (Printf.sprintf "Network %s is present on server %s" network_name
              ip_address);
@@ -1216,7 +1247,8 @@ let interpret ~cron_payload_needed (server : Config_file.server)
         let* path =
           match
             cron_docker_state_of_probe
-              (Remote_exec.command_output_text
+              (Remote_exec.command_output_text ?session
+                 ~timeout_seconds:host_command_seconds
                  ~command:cron_docker_probe_command server)
           with
           | Cron_docker_on_path path -> Ok path
@@ -1230,7 +1262,7 @@ let interpret ~cron_payload_needed (server : Config_file.server)
                     fails every scheduled job at its next fire. Install Docker \
                     from the distribution's packages, or place it on the PATH \
                     cron runs jobs with, then run bondi setup again."
-                   ip_address Cron_exec_line.orchestrator_container)
+                   ip_address Builtin_container.orchestrator)
           | Cron_docker_undetermined message ->
               Error
                 (Printf.sprintf
@@ -1250,7 +1282,9 @@ let interpret ~cron_payload_needed (server : Config_file.server)
         let* output =
           match
             cron_curl_verdict_of_probe
-              (Remote_exec.command_output ~command:"curl --version" server)
+              (Remote_exec.command_output ?session
+                 ~timeout_seconds:host_command_seconds ~command:"curl --version"
+                 server)
           with
           | Cron_curl_reported output -> Ok output
           | Cron_curl_undetermined message ->
@@ -1280,8 +1314,9 @@ let interpret ~cron_payload_needed (server : Config_file.server)
            This is planned ahead of the stop, so a host this cannot reach is a
            host nothing has been stopped on yet. *)
         let* _ =
-          Remote_exec.command_output_text ~command:Cron_payload.preserve_command
-            server
+          Remote_exec.command_output_text ?session
+            ~timeout_seconds:host_command_seconds
+            ~command:Cron_payload.preserve_command server
         in
         print_endline
           (Printf.sprintf
@@ -1296,22 +1331,23 @@ let interpret ~cron_payload_needed (server : Config_file.server)
            fires; this arm only obtains the listing and prints what comes back. *)
         let listing =
           Cron_payload.of_listing_output
-            (Remote_exec.command_output ~command:Cron_payload.listing_command
-               server)
+            (Remote_exec.command_output ?session
+               ~timeout_seconds:host_command_seconds
+               ~command:Cron_payload.listing_command server)
         in
         List.iter print_endline
           (Cron_payload.report ~server:ip_address ~crontab listing);
         Ok ()
     | StopOrchestrator ->
         let* _ =
-          Remote_exec.docker_command_output_text
-            ~command:
-              (Printf.sprintf "stop %s" Cron_exec_line.orchestrator_container)
+          Remote_exec.docker_command_output_text ?session
+            ~timeout_seconds:host_command_seconds
+            ~command:(Printf.sprintf "stop %s" Builtin_container.orchestrator)
             server
         in
         print_endline
           (Printf.sprintf "Stopped %s container on server %s"
-             Cron_exec_line.orchestrator_container ip_address);
+             Builtin_container.orchestrator ip_address);
         Ok ()
     | RemoveOrchestrator ->
         (* Asserts the outcome rather than the command's exit status: an
@@ -1324,19 +1360,24 @@ let interpret ~cron_payload_needed (server : Config_file.server)
             "docker rm --force %s > /dev/null 2>&1; docker ps -a --filter \
              name=^/%s$ --format '{{.Names}}' | grep -q . && { echo '%s could \
              not be removed' >&2; exit 1; } || true"
-            Cron_exec_line.orchestrator_container
-            Cron_exec_line.orchestrator_container
-            Cron_exec_line.orchestrator_container
+            Builtin_container.orchestrator Builtin_container.orchestrator
+            Builtin_container.orchestrator
         in
-        let* _ = Remote_exec.command_output_text ~command:cmd server in
+        let* _ =
+          Remote_exec.command_output_text ?session
+            ~timeout_seconds:host_command_seconds ~command:cmd server
+        in
         print_endline
           (Printf.sprintf "Removed %s container on server %s"
-             Cron_exec_line.orchestrator_container ip_address);
+             Builtin_container.orchestrator ip_address);
         Ok ()
     | RunServer ->
         let image = "mlopez1506/bondi-server:" ^ config.bondi_server.version in
         let* run_cmd = orchestrator_run_command ~cron_payload_needed config in
-        let* _ = Remote_exec.command_output_text ~command:run_cmd server in
+        let* _ =
+          Remote_exec.command_output_text ?session
+            ~timeout_seconds:host_command_seconds ~command:run_cmd server
+        in
         (* Assert the posture rather than assume the run command took. This is
            the step whose absence let an undeclared loopback binding be reverted
            silently on 2026-08-29: the container came back healthy on 0.0.0.0
@@ -1344,8 +1385,9 @@ let interpret ~cron_payload_needed (server : Config_file.server)
            "is it up", which is a different question. *)
         let expected = orchestrator_bind_address config in
         let* published =
-          Remote_exec.command_output_text ~command:orchestrator_port_command
-            server
+          Remote_exec.command_output_text ?session
+            ~timeout_seconds:host_command_seconds
+            ~command:orchestrator_port_command server
         in
         let* () =
           match published_binding_matches ~expected published with
@@ -1364,7 +1406,8 @@ let interpret ~cron_payload_needed (server : Config_file.server)
            fetches the container's own account of the failure only when there is
            one to explain. *)
         let probe =
-          Remote_exec.command_output
+          Remote_exec.command_output ?session
+            ~timeout_seconds:host_command_seconds
             ~command:
               (Orchestrator_probe.probe_command
                  ~port:Bondi_common.Defaults.server_port
@@ -1376,7 +1419,8 @@ let interpret ~cron_payload_needed (server : Config_file.server)
           |> Result.map_error (fun reason ->
               let diagnostics =
                 match
-                  Remote_exec.command_output_text
+                  Remote_exec.command_output_text ?session
+                    ~timeout_seconds:host_command_seconds
                     ~command:Orchestrator_probe.diagnostics_command server
                 with
                 | Ok output -> String.trim output
@@ -1387,7 +1431,7 @@ let interpret ~cron_payload_needed (server : Config_file.server)
         in
         print_endline
           (Printf.sprintf "%s is serving on server %s: %s"
-             Cron_exec_line.orchestrator_container ip_address image);
+             Builtin_container.orchestrator ip_address image);
         Ok ()
     | EnsureAlloyConfig -> (
         match config.alloy with
@@ -1413,7 +1457,8 @@ let interpret ~cron_payload_needed (server : Config_file.server)
                most one name -- so reaching the buffer would take on the order
                of a thousand declared labels. *)
             let* _ =
-              Remote_exec.command_output_text ~input:river_config
+              Remote_exec.command_output_text ?session ~input:river_config
+                ~timeout_seconds:host_command_seconds
                 ~command:
                   (alloy_config_write_command ~mode:alloy_config_declared_mode)
                 server
@@ -1423,8 +1468,9 @@ let interpret ~cron_payload_needed (server : Config_file.server)
                or that landed somewhere a later phase does not look at, is
                otherwise a clean setup over a file at the host's umask. *)
             let* probe_output =
-              Remote_exec.command_output_text ~command:alloy_config_mode_command
-                server
+              Remote_exec.command_output_text ?session
+                ~timeout_seconds:host_command_seconds
+                ~command:alloy_config_mode_command server
             in
             let* () =
               match
@@ -1478,7 +1524,8 @@ let interpret ~cron_payload_needed (server : Config_file.server)
                write is in flight, so a payload larger than the buffer would
                deadlock. *)
             let* _ =
-              Remote_exec.command_output_text ~input:contents
+              Remote_exec.command_output_text ?session ~input:contents
+                ~timeout_seconds:host_command_seconds
                 ~command:(alloy_env_write_command ~mode:alloy_env_declared_mode)
                 server
             in
@@ -1498,39 +1545,46 @@ let interpret ~cron_payload_needed (server : Config_file.server)
                 ~default:Bondi_common.Defaults.alloy_image
             in
             let* output =
-              Remote_exec.command_output_text
+              Remote_exec.command_output_text ?session
+                ~timeout_seconds:host_command_seconds
                 ~command:(alloy_run_command ~image) server
             in
             print_endline
-              (Printf.sprintf "bondi-alloy container started on server %s: %s"
-                 ip_address (String.trim output));
+              (Printf.sprintf "%s container started on server %s: %s"
+                 Builtin_container.alloy ip_address (String.trim output));
             Ok ())
     | StopAlloy ->
         let* _ =
-          Remote_exec.docker_command_output_text ~command:"stop bondi-alloy"
+          Remote_exec.docker_command_output_text ?session
+            ~timeout_seconds:host_command_seconds
+            ~command:(Printf.sprintf "stop %s" Builtin_container.alloy)
             server
         in
         print_endline
-          (Printf.sprintf "Stopped bondi-alloy container on server %s"
-             ip_address);
+          (Printf.sprintf "Stopped %s container on server %s"
+             Builtin_container.alloy ip_address);
         Ok ()
     | RemoveAlloy ->
         let* _ =
-          Remote_exec.docker_command_output_text ~command:"rm bondi-alloy"
+          Remote_exec.docker_command_output_text ?session
+            ~timeout_seconds:host_command_seconds
+            ~command:(Printf.sprintf "rm %s" Builtin_container.alloy)
             server
         in
         let* _ =
-          Remote_exec.command_output_text ~command:alloy_remove_config_command
-            server
+          Remote_exec.command_output_text ?session
+            ~timeout_seconds:host_command_seconds
+            ~command:alloy_remove_config_command server
         in
         print_endline
-          (Printf.sprintf
-             "Removed bondi-alloy container and config on server %s" ip_address);
+          (Printf.sprintf "Removed %s container and config on server %s"
+             Builtin_container.alloy ip_address);
         Ok ()
     | CleanAlloyConfig ->
         let* _ =
-          Remote_exec.command_output_text ~command:alloy_remove_config_command
-            server
+          Remote_exec.command_output_text ?session
+            ~timeout_seconds:host_command_seconds
+            ~command:alloy_remove_config_command server
         in
         print_endline
           (Printf.sprintf
@@ -1557,7 +1611,8 @@ let interpret ~cron_payload_needed (server : Config_file.server)
             ~default:""
         in
         let* _ =
-          Remote_exec.command_output_text ~input ~command:write_cmd server
+          Remote_exec.command_output_text ?session ~input
+            ~timeout_seconds:host_command_seconds ~command:write_cmd server
         in
         print_endline
           (Printf.sprintf "Wrote secret environment file on server %s: %s"
@@ -1566,7 +1621,8 @@ let interpret ~cron_payload_needed (server : Config_file.server)
     | RunManaged spec ->
         let args = Managed_container.run_args spec |> List.map Filename.quote in
         let* output =
-          Remote_exec.docker_command_output_text
+          Remote_exec.docker_command_output_text ?session
+            ~timeout_seconds:host_command_seconds
             ~command:(String.concat " " args) server
         in
         print_endline
@@ -1577,7 +1633,8 @@ let interpret ~cron_payload_needed (server : Config_file.server)
     | StopManaged name ->
         let container = Managed_container.container_name_of name in
         let* _ =
-          Remote_exec.docker_command_output_text
+          Remote_exec.docker_command_output_text ?session
+            ~timeout_seconds:host_command_seconds
             ~command:("stop " ^ Filename.quote container)
             server
         in
@@ -1588,7 +1645,8 @@ let interpret ~cron_payload_needed (server : Config_file.server)
     | RemoveManaged name ->
         let container = Managed_container.container_name_of name in
         let* _ =
-          Remote_exec.docker_command_output_text
+          Remote_exec.docker_command_output_text ?session
+            ~timeout_seconds:host_command_seconds
             ~command:("rm " ^ Filename.quote container)
             server
         in
@@ -1599,7 +1657,8 @@ let interpret ~cron_payload_needed (server : Config_file.server)
     | CleanManagedConfig name ->
         let dir = Managed_container.config_dir_of name in
         let* _ =
-          Remote_exec.command_output_text
+          Remote_exec.command_output_text ?session
+            ~timeout_seconds:host_command_seconds
             ~command:("sudo rm -rf " ^ Filename.quote dir)
             server
         in
@@ -1646,11 +1705,14 @@ let interpret ~cron_payload_needed (server : Config_file.server)
    container, so the pid and StartedAt are untouched -- measured 2026-09-02
    against Docker 29.x, not reasoned from the documentation. Recreating the
    orchestrator to change a flag would drop TLS for every site on the box. *)
-let converge_orchestrator_restart_policy (server : Config_file.server) =
+let converge_orchestrator_restart_policy ?session (server : Config_file.server)
+    =
   let ip_address = server.Config_file.ip_address in
   let expected = Bondi_common.Defaults.bondi_restart_policy in
   let* reported =
-    Remote_exec.command_output_text ~command:orchestrator_restart_command server
+    Remote_exec.command_output_text ?session
+      ~timeout_seconds:host_command_seconds
+      ~command:orchestrator_restart_command server
   in
   match orchestrator_restart_convergence ~expected reported with
   | Restart_policy_already_applied -> Ok ()
@@ -1665,13 +1727,17 @@ let converge_orchestrator_restart_policy (server : Config_file.server) =
             nothing, which is what a removed or unreadable container looks \
             like, so its restart policy was left alone rather than corrected \
             blind"
-           Cron_exec_line.orchestrator_container ip_address
+           Builtin_container.orchestrator ip_address
            orchestrator_restart_command)
   | Restart_policy_needs_update { observed; command } ->
-      let* _ = Remote_exec.command_output_text ~command server in
+      let* _ =
+        Remote_exec.command_output_text ?session
+          ~timeout_seconds:host_command_seconds ~command server
+      in
       let* applied =
-        Remote_exec.command_output_text ~command:orchestrator_restart_command
-          server
+        Remote_exec.command_output_text ?session
+          ~timeout_seconds:host_command_seconds
+          ~command:orchestrator_restart_command server
       in
       let* () =
         declared_restart_matches ~expected applied
@@ -1679,7 +1745,7 @@ let converge_orchestrator_restart_policy (server : Config_file.server) =
             Printf.sprintf
               "%s restart policy on server %s is still %s after asking for %s \
                -- refusing to report success on a posture that was not applied"
-              Cron_exec_line.orchestrator_container ip_address got expected)
+              Builtin_container.orchestrator ip_address got expected)
       in
       (* Operator-visible on purpose: a box that needed correcting is a box
          whose containers would not have come back, and naming both policies is
@@ -1688,7 +1754,7 @@ let converge_orchestrator_restart_policy (server : Config_file.server) =
         (Printf.sprintf
            "%s restart policy on server %s was %s, corrected to %s without \
             restarting it"
-           Cron_exec_line.orchestrator_container ip_address observed expected);
+           Builtin_container.orchestrator ip_address observed expected);
       Ok ()
 
 (* ------------------------------------------------------------------------- *)
@@ -1703,65 +1769,86 @@ let setup_server config server =
   | Error failure ->
       prerr_endline (Remote_exec.message failure);
       Error "missing ssh configuration"
-  (* The credentials are read again, per call, by the module that owns the key
-     on disk. What is decided here is only whether there are any: a server with
-     no [ssh] block is reported once, by name, rather than once per command it
-     was never going to run. Which server that is, and how the absence reads,
-     are both the runner's to say -- this is the one place that asks it. *)
+  (* The credentials are read again by the session below, which is the module
+     that owns the key on disk. What is decided here is only whether there are
+     any: a server with no [ssh] block is reported once, by name, rather than
+     once per command it was never going to run. Which server that is, and how
+     the absence reads, are both the runner's to say -- this is the one place
+     that asks it. *)
   | Ok _ -> (
-      let* context = gather_context server in
-      (* [plan_for_config] refuses a reading it could not take, and it does not
-         know which host it was taken from. Every failure the interpreter
-         reports names its server, and [run] below prints them all at the end of
-         a multi-server run, far from the "Processing server" line that would
-         otherwise have to identify them. *)
-      let* actions =
-        plan_for_config config context
-        |> Result.map_error (fun message ->
-            Printf.sprintf "server %s: %s" ip_address message)
-      in
-      (* Log skip/restart reason when a container is already there *)
-      (match context.orchestrator with
-      | Orchestrator_absent -> ()
-      (* Nothing to report: [plan_for_config] above has already refused a
-         listing that never ran, so this line is never reached with one. *)
-      | Orchestrator_undetermined _ -> ()
-      | Orchestrator_not_running ->
-          print_endline
-            (Printf.sprintf
-               "%s on server %s exists but is not running, replacing it..."
-               Cron_exec_line.orchestrator_container ip_address)
-      | Orchestrator_running { version = running } ->
-          if not (List.mem RunServer actions) then
+      let converge ?session () =
+        let* context = gather_context ?session server in
+        (* [plan_for_config] refuses a reading it could not take, and it does
+           not know which host it was taken from. Every failure the interpreter
+           reports names its server, and [run] below prints them all at the end
+           of a multi-server run, far from the "Processing server" line that
+           would otherwise have to identify them. *)
+        let* actions =
+          plan_for_config config context
+          |> Result.map_error (fun message ->
+              Printf.sprintf "server %s: %s" ip_address message)
+        in
+        (* Log skip/restart reason when a container is already there *)
+        (match context.orchestrator with
+        | Orchestrator_absent -> ()
+        (* Nothing to report: [plan_for_config] above has already refused a
+           listing that never ran, so this line is never reached with one. *)
+        | Orchestrator_undetermined _ -> ()
+        | Orchestrator_not_running ->
             print_endline
               (Printf.sprintf
-                 "%s container is already running on server %s: %s, skipping..."
-                 Cron_exec_line.orchestrator_container ip_address running)
-          else
-            let reason =
-              if running <> config.bondi_server.version then
-                Printf.sprintf "version mismatch: running %s, want %s" running
-                  config.bondi_server.version
-              else "adding cron job support"
-            in
-            print_endline
-              (Printf.sprintf "%s on server %s: %s, stopping to restart..."
-                 Cron_exec_line.orchestrator_container ip_address reason));
-      let* () =
-        interpret
-          ~cron_payload_needed:(cron_payload_needed config context)
-          server config actions
+                 "%s on server %s exists but is not running, replacing it..."
+                 Builtin_container.orchestrator ip_address)
+        | Orchestrator_running { version = running } ->
+            if not (List.mem RunServer actions) then
+              print_endline
+                (Printf.sprintf
+                   "%s container is already running on server %s: %s, \
+                    skipping..."
+                   Builtin_container.orchestrator ip_address running)
+            else
+              let reason =
+                if running <> config.bondi_server.version then
+                  Printf.sprintf "version mismatch: running %s, want %s" running
+                    config.bondi_server.version
+                else "adding cron job support"
+              in
+              print_endline
+                (Printf.sprintf "%s on server %s: %s, stopping to restart..."
+                   Builtin_container.orchestrator ip_address reason));
+        let* () =
+          interpret ?session
+            ~cron_payload_needed:(cron_payload_needed config context)
+            server config actions
+        in
+        match context.docker_status with
+        (* A host that had no Docker holds no container this run did not just
+           create, and it was created by a command that carries the flag. The
+           convergence exists for containers that predate the run; here there
+           are none. *)
+        | Docker_not_installed _ -> Ok ()
+        (* [plan_for_config] has already refused a Docker version it could
+           not read, so this arm is never reached with one. *)
+        | Docker_undetermined _ -> Ok ()
+        | Docker_installed _ ->
+            converge_orchestrator_restart_policy ?session server
       in
-      match context.docker_status with
-      (* A host that had no Docker holds no container this run did not just
-         create, and it was created by a command that carries the flag. The
-         convergence exists for containers that predate the run; here there are
-         none. *)
-      | Docker_not_installed _ -> Ok ()
-      (* [plan_for_config] has already refused a Docker version it could not
-         read, so this arm is never reached with one. *)
-      | Docker_undetermined _ -> Ok ()
-      | Docker_installed _ -> converge_orchestrator_restart_policy server)
+      (* One staged key for the whole of a server's run, rather than one with
+         every command in it. This is the client's longest sequence of remote
+         calls -- the readings, every step the plan interprets, and the
+         restart-policy convergence after them -- so a key staged with each of
+         them is a window with each of them, and a handshake with each of them.
+
+         A session that could not be staged runs the same body without one,
+         which is exactly what this function did before there were sessions:
+         every call opens its own. It is not a second attempt, because a
+         [with_session] that returns [Error] is one whose body never ran. *)
+      match
+        Remote_exec.with_session ~timeout_seconds:host_command_seconds server
+          (fun session -> converge ~session ())
+      with
+      | Ok outcome -> outcome
+      | Error _ -> converge ())
 
 (* What one server's run produced: whether it converged, and what the host holds
    afterwards. They are separate because a run that stopped part-way is exactly
@@ -1773,22 +1860,46 @@ type server_outcome = {
   report : Status_report.server_report;
 }
 
-(* The report is taken after the run, whatever the run returned. Its reads are
-   its own SSH connections and its own HTTP request, so none of them can change
-   what [setup_server] decided, and a read that failed becomes a cell rather
-   than an early return. *)
+(* The report is taken after the run, whatever the run returned. Its reads stay
+   independent of what [setup_server] decided — none of them can change it, and
+   a read that failed becomes a cell rather than an early return — and they
+   share one staging of the key, which is a different question: independence is
+   about what a read may change, and the session is about how many times key
+   material reaches disk. The run's own session is closed by the time this
+   begins, because a run that stopped part-way is exactly when the report is
+   worth taking, so this opens a second one rather than extending the first. *)
 let setup_and_report ~fetch config (server : Config_file.server) =
   let converged = setup_server config server in
-  let reading = Status_gather.gather ~fetch server in
-  (* The wait is scoped by the reading rather than by the configuration: what
-     declares a healthcheck is a fact about the containers on the box, and a
-     declared component the host does not have is not something to wait for —
-     it is already the report's own row. Taking the reading first is what makes
-     the wait about the box as this run left it. *)
-  let waits =
-    Status_gather.health_waits
-      ~timeout_seconds:Container_health.wait_timeout_seconds server
-      reading.docker
+  let taken ?session () =
+    let reading =
+      Status_gather.gather ?session ~timeout_seconds:host_command_seconds
+        ~fetch:(fetch ?session) server
+    in
+    (* The wait is scoped by the reading rather than by the configuration: what
+       declares a healthcheck is a fact about the containers on the box, and a
+       declared component the host does not have is not something to wait for —
+       it is already the report's own row. Taking the reading first is what
+       makes the wait about the box as this run left it. *)
+    let waits =
+      Status_gather.health_waits ?session
+        ~timeout_seconds:Container_health.wait_timeout_seconds server
+        reading.docker
+    in
+    (reading, waits)
+  in
+  let reading, waits =
+    match
+      Remote_exec.with_session ~timeout_seconds:host_command_seconds server
+        (fun session -> taken ~session ())
+    with
+    | Ok pair -> pair
+    (* A session that could not be staged is a server with no ssh block, no ssh
+       on this machine, or nowhere to write a key, and every read would have
+       answered with that same failure. The body never ran, so taking the
+       report without a session is what derives it -- once per read, exactly as
+       it was derived before there was a session to open -- rather than reading
+       anything twice. *)
+    | Error _ -> taken ()
   in
   {
     converged;
@@ -1818,7 +1929,8 @@ let run () =
       let outcomes =
         List.map
           (setup_and_report
-             ~fetch:(Status.orchestrator_reading_standalone ~service_name)
+             ~fetch:(fun ?session server ->
+               Status.orchestrator_reading ?session ~service_name server)
              config)
           servers
       in

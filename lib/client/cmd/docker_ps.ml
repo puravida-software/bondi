@@ -1,3 +1,9 @@
+(* How long this client waits for one box before it reports that the box did not
+   answer. A [docker ps] on a host that is answering at all is immediate, and an
+   operator is sitting in front of this command while it runs, so the bound is
+   the patience of the person waiting rather than the cost of the work. *)
+let listing_seconds = 60
+
 let run () =
   match Config_file.read () with
   | Error message ->
@@ -11,7 +17,8 @@ let run () =
               (* Pass-through, like [docker logs]: what the operator is shown
                  is what the command said, on either stream. *)
               Remote_exec.docker_command_output_text
-                ~standard_error:Remote_exec.Merged_always ~command:"ps" server
+                ~standard_error:Remote_exec.Merged_always
+                ~timeout_seconds:listing_seconds ~command:"ps" server
             with
             | Ok output ->
                 Ok
@@ -30,7 +37,8 @@ let run () =
       | Some (Error err) ->
           prerr_endline err;
           exit 1
-      | _ ->
+      | Some (Ok _)
+      | None ->
           outputs
           |> List.filter_map (function
             | Ok value -> Some value

@@ -10,6 +10,17 @@ type server_ssh = {
 type server = {
   ip_address : string;
   ssh : server_ssh option; [@default None]
+  (* Accepted and never read. Nothing dials the orchestrator's port any more --
+     every bondi command reaches a box by running the server's subcommands
+     inside its container over SSH -- and the port the orchestrator is published
+     on is [Bondi_common.Defaults.server_port], which `bondi setup` applies, not
+     this. Setting it therefore changes nothing.
+
+     It is kept because the deriver decodes strictly: a bondi.yaml written
+     before that change and still carrying `port:` under a server would stop
+     parsing if the field were removed. Not to be confused with
+     [user_service.port] below, which is the port your own container listens
+     on and is very much read. *)
   port : int option; [@default None]
 }
 [@@deriving yojson]
@@ -33,7 +44,9 @@ type user_service = {
 (* [bind_address] is the host address the orchestrator's port is published on,
    and it is the only thing that decides whether the API faces the internet.
    Absent means 127.0.0.1: reachable from the box (which is how cron calls it)
-   and from an SSH tunnel, and from nowhere else.
+   and from nowhere else on the network. No bondi command needs more than that
+   -- they reach the orchestrator by running its subcommands inside its
+   container over SSH, not by connecting to this port.
 
    It is declared here rather than applied by hand because `bondi setup`
    converges the whole box against this file. A binding applied outside it

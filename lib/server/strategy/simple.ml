@@ -2,7 +2,6 @@ open Json_helpers
 module Alert = Bondi_common.Alert
 
 let ( let* ) = Result.bind
-let traefik_name = "bondi-traefik"
 
 (* [exit_code_severities] wraps [Alert.severity_map] only to map its
    [severity_map_error] to the string error [ppx_deriving_yojson] requires;
@@ -360,7 +359,7 @@ let interpret ~clock ~client ~net (actions : action list) :
         in
         let opts : Docker.Client.run_image_options =
           {
-            container_name = traefik_name;
+            container_name = Bondi_common.Builtin_container.traefik;
             config = traefik_config.container_config;
             host_config = Some traefik_config.host_config;
             networking_conf = Some default_networking_config;

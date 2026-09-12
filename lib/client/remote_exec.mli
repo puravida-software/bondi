@@ -40,6 +40,20 @@ type failure =
       *)
   | Stopped of { signal : int; output : string }
       (** That same shell stopped rather than killed, numbered as above. *)
+  | Timed_out of { seconds : int; output : string }
+      (** The call outlived the bound it was made under, and this client stopped
+          waiting after [seconds]. [output] is what the command had printed by
+          then, both streams together.
+
+          Its own arm rather than one of the six above, because none of them is
+          true of it. [Local_failure] says nothing ran on any host, and here
+          something did; [Command_failed] would claim a verdict the host never
+          gave; [Signalled] is the shell this client spawns being killed by
+          somebody else, which is what this client killing it deliberately is
+          not. The difference is load-bearing rather than tidy: a deploy given
+          up on may be work still going on the box, and reporting it as a host
+          that was never reached sends an operator to re-run something that may
+          already be running. *)
 
 val ssh_config : Config_file.server -> (Config_file.server_ssh, failure) result
 (** [ssh_config server] is the credentials a remote call needs, or the arm
@@ -148,7 +162,18 @@ val explain : subject:string -> failure -> string
 val message : failure -> string
 (** The operator-facing text for a failure.
 
-    The four format strings are byte-identical to what each of the two
+    A host that was never reached and a command the host ran and refused read
+    differently here, and they are separated by their words rather than by their
+    number: ssh reserves 255 for its own failures, so the two arms can carry the
+    same code and the sentence is the whole of the difference. The transport arm
+    says the host was not reached; the command arm says the command failed. They
+    shared one sentence until a deploy went behind it, at which point a box that
+    was never reached was telling an operator mid-deploy that their command had
+    failed, which sends them to the wrong machine. The distinction is made here
+    rather than in each caller that words a report around it, because that is
+    how the two came to read alike in the first place.
+
+    Every other format string is byte-identical to what each of the two
     implementations this module replaces printed, which is what lets their
     existing assertions stand as evidence that consolidating them changed
     nothing. Output is trimmed here rather than on the way in, so a caller that
@@ -183,14 +208,81 @@ type standard_error =
           operator what the container said, and a container says much of it on
           standard error. *)
 
+type session
+(** A connection's worth of remote calls against one server, with the private
+    key staged once for its lifetime.
+
+    Opaque because there is nothing in it a caller has anything to do with: the
+    one thing it holds is a path to key material, and a caller that could read
+    it could copy it. It is created by {!with_session} and consumed by the
+    runners, and a session belongs to the server it was opened on — passing one
+    to a call against a different server would hand that host another host's
+    key, which the type does not prevent and which no caller has reason to do.
+*)
+
+val with_session :
+  timeout_seconds:int ->
+  Config_file.server ->
+  (session -> 'a) ->
+  ('a, failure) result
+(** [with_session ~timeout_seconds server f] stages the key, runs [f] with the
+    session, and removes the key on every path out of [f], including one [f]
+    leaves by raising.
+
+    How long key material is on disk is one decision per server rather than one
+    per remote call. A run against a single box makes tens of calls, and a
+    staging with each of them is a crash window with each of them; a session is
+    the same write-then-delete with one window, held open for as long as the
+    caller has questions to ask. The trade is deliberate: fewer windows, and a
+    longer one in each.
+
+    The failure arms are the staging's own — no [ssh] block in the
+    configuration, no [ssh] on this machine's PATH, nowhere to write the key —
+    and every one of them is what each call inside [f] would have answered on
+    its own. [f] is not run when one of them is returned, so a caller may
+    re-derive its answer without a session and be sure nothing was done twice.
+    An exception raised by [f] itself is [f]'s own and reaches the caller with
+    its backtrace rather than becoming one of those arms.
+
+    [timeout_seconds] is the bound this session is opened at: how long a call
+    made over it may take before it is given up on and answered with
+    [Timed_out], for a call that names no bound of its own. It is per call and
+    not per session: a session is a key's lifetime and a run against a box asks
+    tens of questions, so a budget for all of them together would be a number
+    nobody could choose.
+
+    Every runner in this module requires its own [timeout_seconds] and is held
+    to it ({!command_output} says why), so the only call this number actually
+    bounds today is the one {!command_output} makes when it was handed no
+    session and opened one here itself. A caller that opens a session and then
+    names a bound at every call inside it is passing a number that governs
+    nothing, and whether those callers should keep passing one is a question at
+    those call sites rather than in this signature. It stays required here so
+    that a session cannot be opened without the bound its own calls run under
+    being stated.
+
+    Which limit this is: the whole invocation, from the spawn to the last byte
+    the command printed. The bounds in {!ssh_options} are the connection's --
+    how long ssh waits for a box to accept the connection, and how long it
+    tolerates an established one going quiet. A host that accepted the
+    connection and is still running the command is inside every one of those and
+    outside this one, which is the failure this bound exists for. What this
+    bound governs is how long this machine waits. What becomes of the command on
+    the far side when the connection it was running over goes away is the host's
+    own business -- it may be signalled, it may run to the end -- and nothing
+    here can say which. *)
+
 val command_output :
+  ?session:session ->
   ?input:string ->
   ?standard_error:standard_error ->
+  timeout_seconds:int ->
   command:string ->
   Config_file.server ->
   (string, failure) result
-(** [command_output ~command server] runs [command] on [server] through a shell
-    and collects what it printed, as the outcome rather than as a sentence.
+(** [command_output ~timeout_seconds ~command server] runs [command] on [server]
+    through a shell and collects what it printed, as the outcome rather than as
+    a sentence.
 
     Standard error is merged into the output when the command failed, so a
     failure is reported with whatever it said about why rather than with an exit
@@ -207,16 +299,18 @@ val command_output :
     says much of it on its error stream, so they pass [Merged_always]. Every
     other caller is a probe read by shape and takes the default.
 
-    Both streams are drained together. A runner that drained one to end of file
-    and then the other hangs on any command that fills the pipe it is not
-    reading -- 64 KB on Linux, which [docker logs] passes without trying.
+    Both streams are drained together, and together with the write of [input]
+    when there is one. A runner that finishes with one of the three before it
+    starts the next hangs on any command that fills a pipe nobody is reading --
+    64 KB on Linux, which [docker logs] passes without trying and which a deploy
+    payload passes in the other direction.
 
     A final line the command left unterminated arrives with a newline that the
     command did not print, which is what the line-at-a-time read this replaced
     also did. Nothing else about the bytes is changed, and nothing is trimmed.
 
     The runner is not re-entrant. It changes this process's SIGPIPE disposition
-    for the duration of the write and restores it afterwards, and that setting
+    for the duration of the call and restores it afterwards, and that setting
     belongs to the whole process rather than to a call: two calls in flight at
     once would restore each other's. Every remote call this client makes is
     serial -- the servers are walked with [List.map] -- so there is never a
@@ -229,8 +323,28 @@ val command_output :
     Feeding it here rather than embedding it in the command keeps a payload that
     carries credentials out of argv on both machines, and it is the reason there
     is one runner instead of a second one for callers that have something to
-    send. Nothing drains the command's output while the write is in flight, so
-    [input] must be small enough to fit the pipe buffer.
+    send. How big it is, is not a caller's problem: the command's output is
+    drained while the write is in flight, so a payload past the pipe buffer and
+    a command that answers while it is still reading are both ordinary.
+
+    [timeout_seconds] is the bound this call is held to, whether it carries a
+    session or not. A call without one opens a session at this number; a call
+    with one is held to this number and not to the session's, because what a
+    session contributes to a call made over it is the key and not the clock. A
+    read that asks for a minute inside a session a deploy opened for half an
+    hour is asking for a minute, and a session that overrode it would hold a
+    read of a box that has stopped answering to the deploy's whole budget --
+    which is the wait the bound exists to end, and it would make the number
+    written at the call a knob wired to nothing. It is required so that no call
+    site can be written without saying what it is prepared to wait for. The
+    bound is read in one place, off the session the run is made over, which is
+    stamped with this number before the run.
+
+    [session] is the staged key this call is made over. A call given one makes
+    no key of its own and leaves none behind; a call without one opens a session
+    for its own duration, which is what every call did before there were
+    sessions. It is optional because it is an amortisation and not a change of
+    meaning: the same command, against the same host, with the same outcome.
 
     A server with no [ssh] block is a source that cannot be consulted, not an
     error to raise: the result says so and the caller decides what that means.
@@ -241,28 +355,34 @@ val command_output :
     for a case it can name. *)
 
 val docker_command_output :
+  ?session:session ->
   ?input:string ->
   ?standard_error:standard_error ->
+  timeout_seconds:int ->
   command:string ->
   Config_file.server ->
   (string, failure) result
-(** [docker_command_output ~command server] runs [docker command] on the server,
-    as {!command_output} otherwise.
+(** [docker_command_output ~timeout_seconds ~command server] runs
+    [docker command] on the server, as {!command_output} otherwise.
 
     The [docker] is supplied here rather than by each caller so no call site can
     spell it differently. *)
 
 val command_output_text :
+  ?session:session ->
   ?input:string ->
   ?standard_error:standard_error ->
+  timeout_seconds:int ->
   command:string ->
   Config_file.server ->
   (string, string) result
 (** As {!command_output}, with the failure already rendered by {!message}. *)
 
 val docker_command_output_text :
+  ?session:session ->
   ?input:string ->
   ?standard_error:standard_error ->
+  timeout_seconds:int ->
   command:string ->
   Config_file.server ->
   (string, string) result
@@ -289,10 +409,15 @@ val ssh_options : string list
     exactly the failure it exists to describe -- and the keepalive is the half a
     connect timeout cannot reach, a session established and then gone quiet.
 
-    Exposed so the bounds can be asserted on, and so that the one caller that
-    does not use this module's runner still makes its connection with the same
-    bounds. They are a property of the client, not of any one call site, and a
-    call site spelling them differently is the defect. *)
+    These bound the connection and say nothing about the command: a host that
+    accepted the connection and is still working is inside all of them. How long
+    that may go on is the [timeout_seconds] the call names, which is the whole
+    invocation.
+
+    Exposed so the bounds can be asserted on. Every remote call this client
+    makes goes through {!with_session}, so there is no second place that could
+    spell them differently; the assertions are what keeps it that way. They are
+    a property of the client, not of any one call site. *)
 
 val multiplex_options : unit -> string list
 (** SSH options that reuse one connection across many commands.
@@ -307,11 +432,11 @@ val multiplex_options : unit -> string list
     agents share one uid, so a predictable path in a shared /tmp would let one
     repo's job ride another's deployment connection.
 
-    Not folded into {!ssh_options} because a tunnel does not want it: a forward
-    is one long-lived connection that gains nothing from a shared master, and
-    routing it through one would make tearing it down a question of channels
-    rather than of killing a process. Whether a call kind multiplexes therefore
-    stays that call kind's own answer. *)
+    Not folded into {!ssh_options} because the two cost different things to
+    take. The shared options are a constant; this is a function because the
+    first call creates the control directory, and folding them together would
+    give every reader of the connection bounds that side effect -- including a
+    caller, or a test, that wants only to know what the bounds are. *)
 
 val with_temp_key : string -> (string -> 'a) -> 'a
 (** [with_temp_key contents f] writes the decoded key to a mode-600 temporary
@@ -324,8 +449,13 @@ val with_temp_key : string -> (string -> 'a) -> 'a
     decoding is not exposed on its own because no caller has anything to do with
     a decoded key except write it, and this is the write.
 
-    Exposed for the tunnel, which needs the same key on disk for a forward
-    rather than for a remote command. Key material must not outlive the call
-    that needs it, and a second implementation of the write-then-delete is a
-    second place a copy can be left behind -- which is why there is one here and
-    none anywhere else. *)
+    Key material must not outlive the call that needs it, and a second
+    implementation of the write-then-delete is a second place a copy can be left
+    behind -- which is why there is one here and none anywhere else. Inside this
+    module it has exactly one caller, {!with_session}; every remote call reaches
+    a key through a session, so the question of how long one is on disk is
+    settled in that single place.
+
+    It stays exposed so that the write, its mode and its removal can be asserted
+    on directly. No caller outside this module needs it: a key reaches disk
+    through a session or not at all. *)

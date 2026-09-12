@@ -1,10 +1,13 @@
-(** The orchestrator's own account of a server, as it arrives over HTTP.
+(** The orchestrator's own account of a server, as it arrives.
 
-    The wire shape of [GET /api/v1/status] and the one step that turns a
-    response body into the report's vocabulary. It performs no I/O: the caller
-    obtains the body and brings it here, so what this client does with an answer
-    can be checked against a captured one rather than against a running server.
-*)
+    The shape of that answer and the one step that turns it into the report's
+    vocabulary. It performs no I/O: the caller obtains the body and brings it
+    here, so what this client does with an answer can be checked against a
+    captured one rather than against a running server.
+
+    How the body is obtained is deliberately not named here, and this module
+    does not change when it changes -- which it has. What it is a reader of is
+    the document the orchestrator writes about itself. *)
 
 type component_status = {
   name : string;
@@ -47,7 +50,7 @@ val reading_of_body :
   ip_address:string ->
   string ->
   (Status_gather.orchestrator_reading, Status_report.unavailability) result
-(** Read a response body into the report's vocabulary.
+(** Read an answer's body into the report's vocabulary.
 
     A body that is not JSON and a body that is JSON of the wrong shape are the
     same outcome here — the orchestrator answered, and what it said could not be

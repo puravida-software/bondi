@@ -53,6 +53,19 @@ inspection says has a healthcheck to answer for. This host's checks pass.
   >   *BONDI_CRON_PAYLOAD_LISTED*)
   >     echo BONDI_CRON_PAYLOAD_LISTED
   >     echo BONDI_CRON_PAYLOAD_END ;;
+  >   # The orchestrator's image on its own, which is the version the report's
+  >   # orchestrator read holds this box to before running a subcommand inside
+  >   # its container. Without this arm the command falls through to *) and
+  >   # answers nothing, which reads as a box whose version could not be read --
+  >   # the same unavailable source for a reason no fixture chose. The pattern
+  >   # ends the command rather than merely containing it: the probe's own
+  >   # listing asks for {{.State}} and {{.Image}} together, and an arm that
+  >   # matched both would answer the probe with a version.
+  >   *'name=^/bondi-orchestrator$'*"--format '{{.Image}}'") echo 'mlopez1506/bondi-server:0.10.3' ;;
+  >   # This box is below the floor, so its orchestrator is never asked. The arm
+  >   # is here so that a change which stopped asking the version would show up
+  >   # as this line rather than as a silent fall-through to *).
+  >   *'bondi-server status'*) echo 'a box below the floor was asked anyway' >&2; exit 1 ;;
   >   *) : ;;
   > esac
   > STUB
@@ -160,13 +173,15 @@ last thing the plan did.
   $ test "$READ" -gt "$RAN" && echo "the host is read after it is converged"
   the host is read after it is converged
 
-The orchestrator was genuinely asked — once for the server, over HTTP, with its
-one answer then carried onto every row. What the normalisation above hides is the
-kernel's wording, not whether the source was consulted. A run that quietly
-declined to ask would print a different sentence here, and every row carries the
-source's own account of why it has nothing.
+The orchestrator was genuinely looked for — once for the server, with its one
+answer then carried onto every row. This box runs a server from before there
+were subcommands to ask it with, so the answer is the refusal, naming what the
+box reported, what is required and the command that fixes it. What the
+normalisation above hides is that wording, not whether the source was
+consulted. A run that quietly declined to look would print a different sentence
+here, and every row carries the source's own account of why it has nothing.
 
-  $ grep -c 'not reachable: Error calling status endpoint on server 127.0.0.1' out.log
+  $ grep -c "not reachable: the server is running bondi-server 0.10.3, but this command runs a 'bondi-server' subcommand" out.log
   5
 
 Nothing the report printed carries a line of the crontab, or any part of one. The

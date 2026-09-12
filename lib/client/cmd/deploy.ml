@@ -1,3 +1,5 @@
+let ( let* ) = Result.bind
+
 (* Cron job for deploy payload - excludes server (server filters which jobs to send per target) *)
 type deploy_cron_job = {
   name : string;
@@ -32,91 +34,6 @@ type deploy_payload = {
   logs : bool option; [@default None]
 }
 [@@deriving yojson]
-
-let read_body_string body =
-  Eio.Buf_read.(of_flow ~max_size:max_int body |> take_all)
-
-let post_deploy ~client ip_address ~port payload =
-  let url = Printf.sprintf "http://%s:%d/api/v1/deploy" ip_address port in
-  let uri = Uri.of_string url in
-  let headers = Cohttp.Header.init_with "Content-Type" "application/json" in
-  let body_str = payload |> deploy_payload_to_yojson |> Yojson.Safe.to_string in
-  let body = Cohttp_eio.Body.of_string body_str in
-  try
-    let response, response_body =
-      Eio.Switch.run (fun sw ->
-          Cohttp_eio.Client.post ~sw ~headers ~body client uri)
-    in
-    let status = Cohttp.Response.status response in
-    let response_body_str = read_body_string response_body in
-    match status with
-    | `OK -> Ok ()
-    (* Every non-OK status is one outcome here: the orchestrator puts the
-       failure class in the body, and no status it can answer changes what the
-       client does with the response. The remainder is bound to a name rather
-       than [_] so the fallback reads as that decision instead of as an
-       unfinished match; the name is underscored because the value behind it is
-       deliberately not read.
-
-       Not a form to copy. This is a wildcard over [Http.Status.t], which is
-       closed in the type system and unbounded in what it stands for: sixty-nine
-       named tags plus [`Code of int], the arm every status the wire may carry
-       falls into. Enumerating the named ones therefore buys no signal --
-       [`Code _] would still absorb the next one -- and sixty-nine arms
-       answering the same [Error] would hide the decision rather than state it.
-
-       That reasoning is about this type and does not transfer. Where the
-       compiler can make a match mean something -- every Yojson constructor and
-       every variant this repository owns -- the arms are written out, because
-       there a wildcard absorbs the constructor the next change adds and nothing
-       reddens. *)
-    | _non_ok ->
-        Error
-          (Printf.sprintf "Non-OK response from server %s: %s" ip_address
-             response_body_str)
-  with
-  | exn ->
-      Error
-        (Printf.sprintf "Error calling deploy endpoint on server %s: %s"
-           ip_address (Printexc.to_string exn))
-
-(* The orchestrator is published on loopback, so the only way in from another
-   machine is a forwarded port. Going through SSH is also what encrypts this
-   request: the payload below carries env_vars, registry_user and registry_pass,
-   and over plain HTTP to a public address those crossed the internet in the
-   clear on every deploy.
-
-   A server declared without [ssh] is dialled directly, which is still correct
-   for a box reached over a tunnel the operator opened themselves, and for
-   localhost in development -- but only for a deploy that declares no cron
-   jobs. A cron-declaring deploy against such a server never reaches here: the
-   version gate has to read the box's orchestrator over the same connection,
-   and it refuses a box whose image it could not see rather than writing a
-   crontab line that box may not be able to execute.
-
-   Direct dialling is NOT a fallback for a missing key: without [ssh] there is
-   nothing to authenticate with, so there is no tunnel to attempt. *)
-let post_deploy_via_ssh ~client (server : Config_file.server) ~port payload =
-  (* A loopback address is the box itself -- bondi running on the machine it is
-     deploying to. The orchestrator's published port is already reachable there,
-     and forwarding loopback to loopback would only add an SSH round trip and a
-     key that does not need to exist. *)
-  match
-    if Bondi_common.Net.is_loopback server.ip_address then None else server.ssh
-  with
-  | None ->
-      print_endline
-        (Printf.sprintf "Deploying to server: %s at http://%s:%d/api/v1/deploy"
-           server.ip_address server.ip_address port);
-      post_deploy ~client server.ip_address ~port payload
-  | Some ssh ->
-      print_endline
-        (Printf.sprintf
-           "Deploying to server: %s over an SSH tunnel to 127.0.0.1:%d"
-           server.ip_address port);
-      Ssh_tunnel.with_tunnel ~ssh ~host:server.ip_address ~remote_port:port
-        (fun local_port ->
-          post_deploy ~client "127.0.0.1" ~port:local_port payload)
 
 let parse_name_tag s : (string * string, string) result =
   match String.split_on_char ':' s with
@@ -164,21 +81,37 @@ let cron_jobs_for_server ip_address
       in
       if with_tags = [] then None else Some with_tags
 
-(* [-a] rather than plain [ps]: an orchestrator that died on startup is still on
-   the host and still the image the next [bondi setup] would replace, and a
-   plain [ps] cannot see it. Only the image is asked for -- what the gate needs
-   is the version, and a container's state is [Cmd.Setup]'s question. *)
-let orchestrator_image_command =
-  Printf.sprintf "ps -a --filter name=^/%s$ --format '{{.Image}}'"
-    Bondi_common.Cron_exec_line.orchestrator_container
+(* The two reads this command makes of its own are both of something already on
+   the box -- the crontab and the payload directory -- and a box that is
+   answering answers both at once. A minute is generous for either and short
+   enough that a box which has stopped answering is not waited on for the
+   deploy's own budget. The third read a deploy makes, of the orchestrator's
+   image tag, is [Orchestrator_version]'s and is held to that module's bound for
+   the reason given there. *)
+let read_seconds = 60
 
-(* The version that decides the gate is the one running on the box now, not the
-   [bondi_server.version] pin in bondi.yaml: the two have diverged before, and
-   the pin is what the operator meant rather than what is there. *)
-let reported_orchestrator_version (server : Config_file.server) =
-  match
-    Remote_exec.docker_command_output ~command:orchestrator_image_command server
-  with
+(* How long a box may take to answer the deploy itself, which is the one thing
+   this command asks for that is not a read. It has to cover what the box does
+   with the payload: pulling an image that may not be there yet, over whatever
+   link that box has to the registry, and then the wait the strategy makes on
+   the new container's health check -- a wait an operator sets in bondi.yaml and
+   may set high. Half an hour covers both, where the minute above would expire
+   on the pull alone.
+
+   Giving up is not calling it off. The box goes on deploying, because what this
+   bound governs is how long this machine watches; the outcome is recoverable
+   from the box afterwards. So a bound that is too short costs a report and a
+   bound that is too long costs a terminal that sits there, and that asymmetry
+   is why this one is the generous of the two. *)
+let deploy_seconds = 1800
+
+(* What the gate decides from, as an operator reads a refusal to read it. The
+   reading itself is [Orchestrator_version]'s, shared with [Cmd.Status] so that
+   the two commands hold their boxes to the same floor from the same answer;
+   what is here is the wording, which is a deploy's and would be wrong in a
+   status report. *)
+let reported_orchestrator_version ?session (server : Config_file.server) =
+  match Orchestrator_version.read ?session server with
   (* A server with no [ssh] block is answered from the configuration, before
      anything is spawned, so nothing about it failed to be read. Rendering it
      with the other six sends an operator whose bondi.yaml is missing a block
@@ -187,37 +120,47 @@ let reported_orchestrator_version (server : Config_file.server) =
   | Error (Remote_exec.Not_configured { server = ip_address }) ->
       Error
         (Printf.sprintf
-           "a deploy declaring cron jobs reads the orchestrator's version from \
-            the server before it writes a crontab line, and server %s has no \
-            ssh: block in bondi.yaml to read it over. Add one, then deploy \
-            again."
+           "a deploy reaches a server by running a command inside its \
+            orchestrator over SSH, and server %s has no ssh: block in \
+            bondi.yaml to reach it over. Add one, then deploy again."
            ip_address)
   | Error
       (( Remote_exec.Ssh_not_found _ | Remote_exec.Local_failure _
        | Remote_exec.Ssh_failed _ | Remote_exec.Command_failed _
-       | Remote_exec.Signalled _ | Remote_exec.Stopped _ ) as failure) ->
+       | Remote_exec.Signalled _ | Remote_exec.Stopped _
+       | Remote_exec.Timed_out _ ) as failure) ->
       Error
         (Printf.sprintf
-           "the orchestrator's version could not be read, and a deploy \
-            declaring cron jobs will not write a crontab line to a server \
-            whose image it has not seen: %s"
+           "the orchestrator's version could not be read, and a deploy is not \
+            sent to a server whose image it has not seen: %s"
            (Remote_exec.explain ~subject:"the orchestrator listing" failure))
-  | Ok output ->
-      Ok (Server_version.orchestrator_version_of_image (String.trim output))
+  | Ok version -> Ok version
 
-(* The gate is asked only when this server has cron jobs to write, so a
-   service-only deploy neither consults the box nor pays for the round trip --
-   which is why the reader is a parameter rather than something called ahead of
-   the decision. *)
-let cron_version_gate ~read_version cron_jobs =
+(* Which floor a server is held to is decided by the work it is about to be
+   given, and every server is held to one: a deploy reaches the box by running a
+   subcommand inside the orchestrator's container, and a binary from before
+   there were subcommands answers that by ignoring the arguments and starting a
+   second server against a port already bound. So there is no deploy that can
+   skip the question, and a box is read once whatever the answer is used for.
+
+   A server that is also having cron jobs written to it is held to the higher
+   floor alone. Writing the exec-shaped crontab line is the later and stronger
+   capability and the release that carries it carries the subcommands by
+   construction, so asking the lower question of that server as well would only
+   be able to refuse it a second time -- and refusing it against the lower
+   number would send an operator to an image that is still going to be refused
+   here. One floor per server, and it is the one its work requires.
+
+   The reader is a parameter rather than something called ahead of the decision
+   so that this stays a decision made from a value, testable against a box that
+   does not exist. It is called once, so a server is read once. *)
+let version_gate ~read_version cron_jobs =
+  let* version = read_version () in
   match cron_jobs with
   | None
   | Some [] ->
-      Ok ()
-  | Some (_ :: _) -> (
-      match read_version () with
-      | Error message -> Error message
-      | Ok version -> Server_version.writes_exec_lines version)
+      Server_version.answers_command_surface version
+  | Some (_ :: _) -> Server_version.writes_exec_lines version
 
 (* What the box's two cron sources say about each other, as the lines to print,
    for the servers this invocation is about to write cron jobs to.
@@ -225,7 +168,9 @@ let cron_version_gate ~read_version cron_jobs =
    The comparison is asked only when this server has cron jobs to write, so a
    service-only deploy neither consults the box nor pays for the round trips --
    which is why the readers are parameters rather than something called ahead of
-   the decision, exactly as the version gate above does with its own.
+   the decision. The gate above takes its reader for the other reason a reader
+   is a parameter: it asks its question of every server, and what the parameter
+   buys there is a decision made from a value rather than from a host.
 
    That scope is a stated limit, not an oversight. Withdraw a job from
    bondi.yaml and its files stay behind on the box; if it was the last cron job
@@ -260,15 +205,148 @@ let cron_divergence_report ~server ~read_crontab ~read_payloads cron_jobs =
       Cron_payload.report ~server ~crontab listing
 
 (* The readers the report is handed in production. Both run over the connection
-   the version gate has already opened for this server, so what the comparison
-   costs on a path that was already reading is the two commands and no second
-   handshake. *)
-let reported_cron_divergence (server : Config_file.server) =
+   the caller opened for this server, which is the same one the deploy itself
+   goes over, so what the comparison costs on a path that was already connecting
+   is the two commands and no second handshake.
+
+   The session is the caller's rather than this function's because it is not
+   this function's decision: it is one connection per server, taken by whatever
+   walks the server list, and a session opened here would be a second one for
+   the same box in the same breath. A server with no cron jobs reads nothing --
+   the guard is still the one in the comparison above -- and pays neither
+   command. *)
+let reported_cron_divergence ?session (server : Config_file.server) cron_jobs =
   cron_divergence_report ~server:server.ip_address
     ~read_crontab:(fun () ->
-      Remote_exec.command_output ~command:Crontab_listing.read_command server)
+      Remote_exec.command_output ?session ~timeout_seconds:read_seconds
+        ~command:Crontab_listing.read_command server)
     ~read_payloads:(fun () ->
-      Remote_exec.command_output ~command:Cron_payload.listing_command server)
+      Remote_exec.command_output ?session ~timeout_seconds:read_seconds
+        ~command:Cron_payload.listing_command server)
+    cron_jobs
+
+(* The command the box runs for a deploy: the orchestrator's own binary, as a
+   subcommand, inside the container it runs in. [-i] is what keeps this
+   machine's standard input open through to it, which is how the payload gets
+   there -- the payload is never an argument, because it carries registry
+   credentials and environment values and a command line is readable by every
+   process on the box.
+
+   The [docker] is not spelled here. The runner supplies it, so that no call
+   site can spell it differently. *)
+let deploy_exec_command =
+  Printf.sprintf "exec -i %s bondi-server deploy"
+    Bondi_common.Builtin_container.orchestrator
+
+(* What the box answered, as an operator reads it.
+
+   Its own words are carried rather than replaced. An orchestrator that refused
+   says why on its error stream and the runner brings that back; a container
+   that is not there, a daemon that refused, an image whose binary knows no such
+   subcommand each answer in words no orchestrator would have written, and those
+   are exactly the words that name the problem. A client that put its own
+   account of not having understood them in their place would drop the only
+   evidence there was and point the operator at their own machine.
+
+   What the box wrote is not otherwise read. The exit code is the verdict -- the
+   box writes its report and exits zero, or writes why it refused and exits
+   non-zero -- and a client that parsed the report would begin refusing deploys
+   that had succeeded the first time that report gained a field. *)
+let deploy_outcome ~ip_address = function
+  | Ok (_ : string) -> Ok ()
+  | Error failure ->
+      Error
+        (Printf.sprintf "Error on server %s: %s" ip_address
+           (Remote_exec.explain ~subject:"the deploy" failure))
+
+let post_deploy ?session (server : Config_file.server) payload =
+  deploy_outcome ~ip_address:server.ip_address
+    (Remote_exec.docker_command_output ?session ~timeout_seconds:deploy_seconds
+       ~input:(payload |> deploy_payload_to_yojson |> Yojson.Safe.to_string)
+       ~command:deploy_exec_command server)
+
+(* Everything this command does to one server once that server has been let
+   through the gate, over one connection: the two reads the cron comparison
+   makes and the deploy itself. One session, because it is one server's worth of
+   work and the key is on disk for as long as the work lasts rather than for
+   each call within it.
+
+   The comparison is read before this server is deployed to, so what it reports
+   is the state the deploy found rather than the state it just made. It is not
+   read before every *other* server is deployed to, which it was when the reads
+   had a loop of their own -- but a deploy to another box writes neither this
+   box's crontab nor its payload directory, so the property that was worth
+   having is per server and it is the one held here.
+
+   A session that could not be staged is not a deploy that half happened: the
+   body never ran, so the work is re-derived without one and every call in it
+   answers with the failure the staging returned.
+
+   The number it is opened at bounds nothing here either, for the same reason:
+   the two reads ask for a minute and the deploy asks for half an hour, and
+   [Remote_exec] gives each of them what it asked for. The deploy's bound is
+   what is stated because a call over this session that named none of its own
+   would be the deploy. *)
+let deploy_to_server (server : Config_file.server) cron_jobs payload =
+  let work ?session () =
+    List.iter print_endline (reported_cron_divergence ?session server cron_jobs);
+    print_endline (Printf.sprintf "Deploying to server: %s" server.ip_address);
+    post_deploy ?session server payload
+  in
+  match
+    Remote_exec.with_session ~timeout_seconds:deploy_seconds server
+      (fun session -> work ~session ())
+  with
+  | Ok outcome -> outcome
+  | Error _ -> work ()
+
+(* The whole of what this command does to the servers it was given: every one of
+   them is gated, and only then is any one of them deployed to. A refusal that
+   arrived after the first box had been written to would not be a refusal, and
+   the order of these two loops is the only thing that makes it one -- so the
+   reader and the deployer are parameters and the order is observable without a
+   box to run against.
+
+   Every refusal is reported rather than only the first, and so is every failed
+   deploy: an operator who has two boxes to upgrade, or two boxes that refused
+   the payload, should learn that from one run. Every server is still attempted,
+   because a box that has already been deployed to is not made better by
+   abandoning the next -- so the run already holds every outcome by the time it
+   reports, and the terminal these lines are printed to shows all of them. *)
+let deploy_servers ~read_version ~deploy servers_with_jobs =
+  let refusals =
+    List.filter_map
+      (fun ((server : Config_file.server), cron_jobs) ->
+        match
+          version_gate ~read_version:(fun () -> read_version server) cron_jobs
+        with
+        | Ok () -> None
+        | Error message ->
+            Some
+              (Printf.sprintf "Error on server %s: %s" server.ip_address message))
+      servers_with_jobs
+  in
+  match refusals with
+  | _ :: _ -> Error refusals
+  | [] -> (
+      (* Folded left rather than mapped: each of these prints as it goes, and
+         the order they print in is the order the operator's servers are named
+         in, which a map is not obliged to preserve. *)
+      let outcomes =
+        List.rev
+          (List.fold_left
+             (fun taken (server, cron_jobs) -> deploy server cron_jobs :: taken)
+             [] servers_with_jobs)
+      in
+      match
+        List.filter_map
+          (function
+            | Error message -> Some message
+            | Ok () -> None)
+          outcomes
+      with
+      | _ :: _ as failures -> Error failures
+      | [] -> Ok ())
 
 let validate_deployments (config : Config_file.t) deployments :
     ((string * string) list, string) result =
@@ -345,41 +423,6 @@ let run force_traefik_redeploy deployments =
                 deployments ))
           servers
       in
-      (* Before anything is posted: a refusal that arrives after the crontab has
-         been written is not a refusal. Every server is gated first, so a
-         deploy that would fail on the second one does not write to the
-         first. *)
-      let gate_failures =
-        List.filter_map
-          (fun ((server : Config_file.server), cron_jobs) ->
-            match
-              cron_version_gate
-                ~read_version:(fun () -> reported_orchestrator_version server)
-                cron_jobs
-            with
-            | Ok () -> None
-            | Error message ->
-                Some
-                  (Printf.sprintf "Error on server %s: %s" server.ip_address
-                     message))
-          cron_jobs_per_server
-      in
-      (match gate_failures with
-      | [] -> ()
-      | _ :: _ ->
-          List.iter prerr_endline gate_failures;
-          exit 1);
-      (* Read before anything is posted, so what is reported is the state this
-         deploy found rather than the state it just created -- and read after
-         the gate, so a run that is about to refuse does not pay for two reads
-         per server or bury its own refusal under them. *)
-      List.iter
-        (fun ((server : Config_file.server), cron_jobs) ->
-          List.iter print_endline (reported_cron_divergence server cron_jobs))
-        cron_jobs_per_server;
-      Eio_main.run @@ fun env ->
-      let net = Eio.Stdenv.net env in
-      let client = Cohttp_eio.Client.make ~https:None net in
       let tag_of_name name = List.assoc_opt name deployments in
       let is_service_server ip =
         match config.user_service with
@@ -389,96 +432,105 @@ let run force_traefik_redeploy deployments =
               s.servers
         | None -> false
       in
-      let results =
-        List.map
-          (fun ((server : Config_file.server), cron_jobs) ->
-            let ip_address = server.ip_address in
-            (* The decision carries the service and its tag rather than a bool:
-               the payload needs both, and a bool would leave the builder
-               re-deriving them from options the decision has already
-               inspected. *)
-            let service_and_tag =
-              match config.user_service with
+      let payload_for (server : Config_file.server) cron_jobs =
+        let ip_address = server.ip_address in
+        (* The decision carries the service and its tag rather than a bool:
+           the payload needs both, and a bool would leave the builder
+           re-deriving them from options the decision has already
+           inspected. *)
+        let service_and_tag =
+          match config.user_service with
+          | None -> None
+          | Some service -> (
+              match tag_of_name service.name with
               | None -> None
-              | Some service -> (
-                  match tag_of_name service.name with
-                  | None -> None
-                  | Some tag ->
-                      if is_service_server ip_address then Some (service, tag)
-                      else None)
-            in
-            let base_payload =
-              match service_and_tag with
-              | Some ((service : Config_file.user_service), tag) ->
-                  {
-                    service_name = Some service.name;
-                    image = Some (service.image ^ ":" ^ tag);
-                    port = Some service.port;
-                    env_vars = service.env_vars;
-                    traefik_domain_name =
-                      Option.map
-                        (fun (tr : Config_file.traefik) -> tr.domain_name)
-                        config.traefik;
-                    traefik_image =
-                      Option.map
-                        (fun (tr : Config_file.traefik) -> tr.image)
-                        config.traefik;
-                    traefik_acme_email =
-                      Option.map
-                        (fun (tr : Config_file.traefik) -> tr.acme_email)
-                        config.traefik;
-                    registry_user = service.registry_user;
-                    registry_pass = service.registry_pass;
-                    force_traefik_redeploy = Some force_traefik_redeploy;
-                    cron_jobs;
-                    drain_grace_period =
-                      Option.map float_of_int service.drain_grace_period;
-                    deployment_strategy = service.deployment_strategy;
-                    health_timeout =
-                      Option.map float_of_int service.health_timeout;
-                    poll_interval =
-                      Option.map float_of_int service.poll_interval;
-                    logs = service.logs;
-                  }
-              | None ->
-                  {
-                    service_name = None;
-                    image = None;
-                    port = None;
-                    env_vars = [];
-                    traefik_domain_name = None;
-                    traefik_image = None;
-                    traefik_acme_email = None;
-                    registry_user = None;
-                    registry_pass = None;
-                    force_traefik_redeploy = Some force_traefik_redeploy;
-                    cron_jobs;
-                    drain_grace_period = None;
-                    deployment_strategy = None;
-                    health_timeout = None;
-                    poll_interval = None;
-                    logs = None;
-                  }
-            in
-            let port =
-              Option.value ~default:Bondi_common.Defaults.server_port
-                server.port
-            in
-            post_deploy_via_ssh ~client server ~port base_payload)
-          cron_jobs_per_server
+              | Some tag ->
+                  if is_service_server ip_address then Some (service, tag)
+                  else None)
+        in
+        match service_and_tag with
+        | Some ((service : Config_file.user_service), tag) ->
+            {
+              service_name = Some service.name;
+              image = Some (service.image ^ ":" ^ tag);
+              port = Some service.port;
+              env_vars = service.env_vars;
+              traefik_domain_name =
+                Option.map
+                  (fun (tr : Config_file.traefik) -> tr.domain_name)
+                  config.traefik;
+              traefik_image =
+                Option.map
+                  (fun (tr : Config_file.traefik) -> tr.image)
+                  config.traefik;
+              traefik_acme_email =
+                Option.map
+                  (fun (tr : Config_file.traefik) -> tr.acme_email)
+                  config.traefik;
+              registry_user = service.registry_user;
+              registry_pass = service.registry_pass;
+              force_traefik_redeploy = Some force_traefik_redeploy;
+              cron_jobs;
+              drain_grace_period =
+                Option.map float_of_int service.drain_grace_period;
+              deployment_strategy = service.deployment_strategy;
+              health_timeout = Option.map float_of_int service.health_timeout;
+              poll_interval = Option.map float_of_int service.poll_interval;
+              logs = service.logs;
+            }
+        | None ->
+            {
+              service_name = None;
+              image = None;
+              port = None;
+              env_vars = [];
+              traefik_domain_name = None;
+              traefik_image = None;
+              traefik_acme_email = None;
+              registry_user = None;
+              registry_pass = None;
+              force_traefik_redeploy = Some force_traefik_redeploy;
+              cron_jobs;
+              drain_grace_period = None;
+              deployment_strategy = None;
+              health_timeout = None;
+              poll_interval = None;
+              logs = None;
+            }
       in
-      match
-        List.find_opt
-          (function
-            | Error _ -> true
-            | Ok () -> false)
-          results
-      with
-      | Some (Error message) ->
-          prerr_endline message;
+      (* The gate's read is the only thing this server has been asked for when
+         it is made, so a session that could not be staged is the same failure
+         the read itself would have reported, worded by the reader rather than
+         a second time here. The body never ran.
+
+         It is a session of its own and not the one the deploy runs over
+         because every server is gated before any server is deployed to:
+         holding one connection open across both would mean holding every
+         server's key on disk for the length of the run.
+
+         The number it is opened at bounds nothing. [Remote_exec] holds a call
+         to the bound the call names rather than to its session's, and the one
+         call made over this session names [Orchestrator_version]'s. The
+         argument is required so that a session cannot be opened without saying
+         what a call over it that named no bound would wait for, and what such a
+         call would be waiting on here is a read, so the read bound is what is
+         stated. *)
+      let read_version (server : Config_file.server) =
+        match
+          Remote_exec.with_session ~timeout_seconds:read_seconds server
+            (fun session -> reported_orchestrator_version ~session server)
+        with
+        | Ok answer -> answer
+        | Error _ -> reported_orchestrator_version server
+      in
+      let deploy (server : Config_file.server) cron_jobs =
+        deploy_to_server server cron_jobs (payload_for server cron_jobs)
+      in
+      match deploy_servers ~read_version ~deploy cron_jobs_per_server with
+      | Error messages ->
+          List.iter prerr_endline messages;
           exit 1
-      | Some (Ok ())
-      | None ->
+      | Ok () ->
           List.iter
             (fun (server : Config_file.server) ->
               print_endline

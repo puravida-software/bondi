@@ -28,16 +28,6 @@ type row = {
 
 type component = { name : string; observation : observation }
 
-(* The names the setup phase gives the components it installs. The orchestrator's
-   is not spelled here: it is the name the crontab line execs into as well, so it
-   comes from the module both libraries read it from, where a rename cannot reach
-   one caller and leave this one naming a container no host has. It is listed
-   below unconditionally: every configuration has an orchestrator, and a row for
-   it that depended on anything would be missing on the run that needs it most.
-*)
-let traefik_container_name = "bondi-traefik"
-let alloy_container_name = "bondi-alloy"
-
 let service_components (config : Config_file.t) =
   match config.user_service with
   | None -> []
@@ -52,12 +42,12 @@ let cron_job_components (config : Config_file.t) =
 let traefik_components (config : Config_file.t) =
   match config.traefik with
   | None -> []
-  | Some _ -> [ (traefik_container_name, Infrastructure) ]
+  | Some _ -> [ (Bondi_common.Builtin_container.traefik, Infrastructure) ]
 
 let alloy_components (config : Config_file.t) =
   match config.alloy with
   | None -> []
-  | Some _ -> [ (alloy_container_name, Infrastructure) ]
+  | Some _ -> [ (Bondi_common.Builtin_container.alloy, Infrastructure) ]
 
 (* Declared containers are named as the setup phase names them on the box, so
    the two sources and the configuration are all keyed the same way. *)
@@ -71,10 +61,17 @@ let managed_components (config : Config_file.t) =
             Infrastructure ))
         containers
 
+(* The orchestrator is listed unconditionally: every configuration has one, and
+   a row for it that depended on anything would be missing on the run that needs
+   it most. None of the three names is spelled here. They are the names Bondi
+   gives the containers it runs itself, and they come from the module both
+   libraries read them from, where a rename cannot reach one caller and leave
+   this one naming a container no host has. *)
+
 let declared_components config =
   service_components config
   @ cron_job_components config
-  @ [ (Bondi_common.Cron_exec_line.orchestrator_container, Infrastructure) ]
+  @ [ (Bondi_common.Builtin_container.orchestrator, Infrastructure) ]
   @ traefik_components config
   @ alloy_components config
   @ managed_components config

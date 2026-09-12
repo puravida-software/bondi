@@ -73,7 +73,33 @@ val eval_argv :
     configures cron because the container cannot soundly infer that about
     itself. {!eval} binds [Readiness.observe] against this container's own paths
     -- the Docker client's socket, the crontab module's spool and PID 1's stderr
-    -- and nothing below this signature carries a default for any of them. *)
+    -- and nothing below this signature carries a default for any of them.
+
+    {b It sets SIGPIPE to [Signal_ignore] for the rest of the process, before
+       any term is evaluated.} That is a side effect on the process rather than
+    a property of the returned code, and it is stated here because it is the
+    behaviour a caller gets and a test observes. A client that goes away closes
+    the stream its subcommand was writing to; at the default disposition the
+    next write kills the process where it stands, so the work stops halfway, no
+    failure class is chosen, and nothing is left for [bondi status] to recover.
+
+    It is set at this one point rather than left to [Eio_main.run] -- which sets
+    the same disposition and never restores it, in both eio 1.3 backends, read
+    on 2026-09-11 -- because that covers only a path that reaches an
+    environment. [check] builds none, [deploy]'s undecodable-payload arm answers
+    before one is built, [serve]'s own failure is written after [Eio_main.run]
+    has returned, and cmdliner writes [--help], [--version] and its own usage
+    errors before any term runs.
+
+    Ignoring the signal is what makes a vanished reader classifiable; it is not
+    what makes a write harmless, and the distinction is the contract. A write
+    issued {e while work is in flight} is a diagnostic, and [Diagnostics.write]
+    drops it: [observed -- 2026-09-11] against this tree, a [Diagnostics.write]
+    into a pipe whose read end had already been closed returns normally under an
+    ignored SIGPIPE and kills the process with shell status 141 without it. A
+    write issued once there is {e nothing left to report} still fails the
+    subcommand -- see {!classified_status}, where that arm is documented and
+    unchanged. *)
 
 val production_observe :
   observe:
@@ -121,6 +147,21 @@ val classified_status : (unit -> int) -> int
     that follows it, whose [print_string] and [flush] raise on a stdout the
     caller has closed. Neither sits inside any body, so classifying bodies alone
     would leave 125 reachable on every subcommand.
+
+    That write is the response, and it is the one write here that a caller going
+    away is still allowed to fail. [observed -- 2026-09-11] against this tree,
+    with file descriptors 1 and 2 pointed at a pipe whose read end had already
+    been closed, [print_string "{}"; flush stdout] and
+    [prerr_string "boom"; prerr_newline (); flush stderr] each raise
+    [Sys_error "Broken pipe"] under the disposition {!eval_argv} sets, and each
+    kill the process with shell status 141 without it. Both that and the closed
+    descriptor arrive here as a [Sys_error] and leave as
+    {!Handler_error.Orchestrator_failure}, which is the classification this
+    module has always given the final write and the one that does not move: by
+    the time it runs there is nothing left to report, so a report that could not
+    be made is a failure of the subcommand. The opposite arm -- a write issued
+    while the work is still running -- is not this write and is not classified
+    here at all; {!eval_argv} says where it goes.
 
     Propagation is {!classified_result}'s, unchanged: a cancellation and a
     deliberate exit are not exit codes to be chosen here. *)

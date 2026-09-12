@@ -262,13 +262,15 @@ let gather ~client ~net ~clock ~(service_name : string option) : status_context
   in
   let orchestrator_inspection =
     inspect_by_name client ~net ~clock
-      ~container_name:Bondi_common.Cron_exec_line.orchestrator_container
+      ~container_name:Bondi_common.Builtin_container.orchestrator
   in
   let traefik_inspection =
-    inspect_by_name client ~net ~clock ~container_name:"bondi-traefik"
+    inspect_by_name client ~net ~clock
+      ~container_name:Bondi_common.Builtin_container.traefik
   in
   let alloy_inspection =
-    inspect_by_name client ~net ~clock ~container_name:"bondi-alloy"
+    inspect_by_name client ~net ~clock
+      ~container_name:Bondi_common.Builtin_container.alloy
   in
   (* A failed listing is reported rather than rendered as an empty set: the
      client shows anything it does not hear about as "not found", which reads

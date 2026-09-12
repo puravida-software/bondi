@@ -1,7 +1,13 @@
-`bondi status` read the box entirely through the orchestrator's HTTP endpoint, so
-the one failure it was most needed for — an orchestrator that is not running —
-produced a stderr line and an empty table. Docker over SSH is the other source,
-and it answers on exactly that failure.
+`bondi status` read the box entirely through the orchestrator, so the one
+failure it was most needed for — an orchestrator that cannot answer — produced a
+stderr line and an empty table. Docker over SSH is the other source, and it
+answers on exactly that failure.
+
+The orchestrator here cannot answer because the box is five releases below the
+floor for the subcommand this client would ask it with. A binary from before
+there were subcommands does not refuse one: it ignores the arguments and starts
+a second server against a port already bound, so the version is read first and
+the box is refused on what it reported rather than waited out.
 
   $ ROOT="$PWD"
 
@@ -50,16 +56,30 @@ consulted, and a source whose answer could not be read.
   >     echo /etc/bondi/cron/daily-close/run.json
   >     echo /etc/bondi/cron/daily-close/env
   >     echo BONDI_CRON_PAYLOAD_END ;;
+  >   # The orchestrator's image on its own, which is the version the report's
+  >   # orchestrator read holds this box to before running a subcommand inside
+  >   # its container. Without this arm the command falls through to *) and
+  >   # answers nothing, which reads as a box whose version could not be read --
+  >   # the same unavailable source for a reason no fixture chose. The pattern
+  >   # ends the command rather than merely containing it: the probe's own
+  >   # listing asks for {{.State}} and {{.Image}} together, and an arm that
+  >   # matched both would answer the probe with a version.
+  >   *'name=^/bondi-orchestrator$'*"--format '{{.Image}}'") echo 'mlopez1506/bondi-server:0.10.3' ;;
+  >   # This box is below the floor, so its orchestrator is never asked. The arm
+  >   # is here so that a change which stopped asking the version would show up
+  >   # as this line rather than as a silent fall-through to *).
+  >   *'bondi-server status'*) echo 'a box below the floor was asked anyway' >&2; exit 1 ;;
   >   *) : ;;
   > esac
   > STUB
   $ chmod +x "$ROOT/bin/ssh"
   $ export PATH="$ROOT/bin:$PATH"
 
-Port 9 is the discard port and nothing listens on it, so the HTTP source is
-refused immediately rather than waited out. Its message is the operating system's
-own and is normalised here: what this case asserts is that the row is produced,
-not how the kernel words a refusal.
+The orchestrator's refusal names the version the box reported and the one it
+needs, and is normalised away here: what this case asserts is that the row is
+produced, not how the refusal is worded. The `port` the server declares is no
+longer dialled by anything and is kept only because the configuration still
+carries it.
 
   $ cat > bondi.yaml <<'EOF'
   > service:
@@ -78,7 +98,7 @@ not how the kernel words a refusal.
   >   version: "0.10.3"
   > EOF
 
-With the orchestrator unreachable the table is populated from the host alone.
+With the orchestrator unable to answer the table is populated from the host alone.
 Every declared component has a row, the orchestrator's own row says it could not
 be reached rather than going missing, the container nothing declares is present
 and flagged, and the crontab section is counted without any line of it being
@@ -159,7 +179,7 @@ line, never a silence.
   
   Crontab
     bondi section          docker  not read: <detail>
-    which cron jobs on server 127.0.0.1 are scheduled to run could not be read, and neither could which of them still hold their files: command failed (255): Permission denied (publickey).
+    which cron jobs on server 127.0.0.1 are scheduled to run could not be read, and neither could which of them still hold their files: the host was not reached (255): Permission denied (publickey).
 
 
 A host that answered neither cron read says so once under that section, in one

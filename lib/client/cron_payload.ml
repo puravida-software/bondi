@@ -16,7 +16,7 @@ type divergence =
    itself could report every job on a correct host as having lost its files, and
    would go on doing so until somebody read both libraries side by side. *)
 let root = Bondi_common.Cron_exec_line.cron_root
-let container = Bondi_common.Cron_exec_line.orchestrator_container
+let container = Bondi_common.Builtin_container.orchestrator
 
 (* Only meaningful for a name the writer would accept, which is what the section
    reader hands over: a name is taken from a run file's path and the path is

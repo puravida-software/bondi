@@ -24,8 +24,10 @@ module Report = Bondi_client.Status_report
    changes, this file is recaptured the same way — which is an edit somebody
    makes and a reviewer sees, rather than a drift nothing reports.
 
-   What it does not cover is the socket: that Cohttp reaches a server and returns
-   bytes. That is the library's behaviour and every real run exercises it. *)
+   What it does not cover is the transport: that the remote call reaches the box,
+   starts the orchestrator's own status subcommand and brings its bytes back.
+   That is [Remote_exec]'s behaviour, asserted where it lives, and every real run
+   exercises it. *)
 
 let captured_response =
   let path = "fixtures/orchestrator_status_response.json" in

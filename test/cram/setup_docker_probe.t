@@ -75,6 +75,19 @@ only have stopped on the probe that arm broke.
   >   *BONDI_CRON_PAYLOAD_LISTED*)
   >     echo BONDI_CRON_PAYLOAD_LISTED
   >     echo BONDI_CRON_PAYLOAD_END ;;
+  >   # The orchestrator's image on its own, which is the version the report's
+  >   # orchestrator read holds this box to before running a subcommand inside
+  >   # its container. Without this arm the command falls through to *) and
+  >   # answers nothing, which reads as a box whose version could not be read --
+  >   # the same unavailable source for a reason no fixture chose. The pattern
+  >   # ends the command rather than merely containing it: the probe's own
+  >   # listing asks for {{.State}} and {{.Image}} together, and an arm that
+  >   # matched both would answer the probe with a version.
+  >   *'name=^/bondi-orchestrator$'*"--format '{{.Image}}'") echo 'mlopez1506/bondi-server:0.10.1' ;;
+  >   # This box is below the floor, so its orchestrator is never asked. The arm
+  >   # is here so that a change which stopped asking the version would show up
+  >   # as this line rather than as a silent fall-through to *).
+  >   *'bondi-server status'*) echo 'a box below the floor was asked anyway' >&2; exit 1 ;;
   >   *) : ;;
   > esac
   > STUB
@@ -113,7 +126,7 @@ the report's own reads, so every row reads as not found.
   $ sed 's/not reachable: .*/not reachable: <detail>/' out.log
   Setting up the servers...
   Processing server: 127.0.0.1
-  Error: could not read the Docker version, so Docker will not be installed: command failed (255): Connection closed by 10.0.0.1 port 22
+  Error: could not read the Docker version, so Docker will not be installed: the host was not reached (255): Connection closed by 10.0.0.1 port 22
   setup stopped part-way through the Docker phase on server 127.0.0.1, so these phases did not run: network, ACME file, orchestrator, alloy.
   
   Server: 127.0.0.1
@@ -185,7 +198,7 @@ cron is perfectly able to run the line.
   $ bondi-client setup > out.log 2>&1
   [1]
   $ grep -A1 '^Error:' out.log
-  Error: could not read whether cron can find docker on the server, so setup will not act on whether it can run the crontab line: command failed (255): Connection closed by 10.0.0.1 port 22
+  Error: could not read whether cron can find docker on the server, so setup will not act on whether it can run the crontab line: the host was not reached (255): Connection closed by 10.0.0.1 port 22
   setup stopped part-way through the cron docker phase on server 127.0.0.1, so these phases did not run: cron curl, ACME file, orchestrator, alloy.
 
 The affirmative arm is the probe count again: the host was asked what cron
@@ -204,8 +217,8 @@ The curl probe is the same shape. The lines an older bondi wrote use
 version before the
 orchestrator starts — and a read that never happened has no version in it. Its
 text used to be handed to the version comparison as though curl had printed it,
-so the operator was told the host reported "command failed (255): Connection
-closed by 10.0.0.1 port 22" but 7.76.0 is required.
+so the operator was told curl had answered "the host was not reached (255):
+Connection closed by 10.0.0.1 port 22" but 7.76.0 is required.
 
   $ : > "$SSH_ARGV_LOG"
   $ echo 0 > "$DOCKER_PROBES"
@@ -241,7 +254,7 @@ closed by 10.0.0.1 port 22" but 7.76.0 is required.
   $ bondi-client setup > out.log 2>&1
   [1]
   $ grep -A1 '^Error:' out.log
-  Error: could not read the curl version on the server, so setup will not act on whether it can run the crontab command: command failed (255): Connection closed by 10.0.0.1 port 22
+  Error: could not read the curl version on the server, so setup will not act on whether it can run the crontab command: the host was not reached (255): Connection closed by 10.0.0.1 port 22
   setup stopped part-way through the cron curl phase on server 127.0.0.1, so these phases did not run: ACME file, orchestrator, alloy.
 
 The affirmative arm is the probe count again: curl was asked, so the refusal
@@ -282,7 +295,7 @@ chown and chmod against a host that was never asked.
   $ bondi-client setup > out.log 2>&1
   [1]
   $ grep -A1 '^Error:' out.log
-  Error: could not read whether /etc/traefik/acme/acme.json exists on the server, so setup will not act on whether it does: command failed (255): Connection closed by 10.0.0.1 port 22
+  Error: could not read whether /etc/traefik/acme/acme.json exists on the server, so setup will not act on whether it does: the host was not reached (255): Connection closed by 10.0.0.1 port 22
   setup stopped part-way through the ACME file phase on server 127.0.0.1, so these phases did not run: orchestrator, alloy.
 
 Nothing was written. The probe did run, so the absence below is the refusal to
@@ -371,9 +384,12 @@ container terminates TLS for every site on the box.
 
 The affirmative arm is that the listing was asked for at all: the answer above is
 this probe's, read clean, rather than a phase that never ran. Nothing was torn
-down.
+down. The probe's own listing is counted rather than every command naming the
+container, because the report taken afterwards reads the same container's image
+to hold the box to the floor for the orchestrator's subcommands -- a second
+command against the same name, and not this phase.
 
-  $ grep -c 'name=\^/bondi-orchestrator\$' ssh-argv.log
+  $ grep -c 'name=\^/bondi-orchestrator\$ --format .{{.State}}' ssh-argv.log
   1
   $ grep -c 'rm --force bondi-orchestrator' ssh-argv.log
   0

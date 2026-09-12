@@ -465,6 +465,152 @@ let test_production_observe_binds_this_container_s_paths () =
       check string "the sink slot carries the stream diagnostics duplicate to"
         Diagnostics.pid_one_stderr diagnostic_sink
 
+(* Surviving a client that goes away is a statement about a process, not about
+   a value a function returned: a surface that does not survive it is killed
+   outright, and "was killed by SIGPIPE" and "exited 1" are only the same kind
+   of answer at the process boundary. So both cases below run the group in a
+   forked child and read its status. The child leaves through [Unix._exit], never [exit], so that
+   it runs none of Alcotest's teardown and flushes no channel the parent still
+   owns; the parent flushes both of its own streams before forking so that
+   nothing already buffered is written twice. *)
+type child = { status : Unix.process_status; reported : string }
+
+let in_a_child body =
+  let report_read, report_write = Unix.pipe () in
+  flush stdout;
+  flush stderr;
+  match Unix.fork () with
+  | 0 ->
+      Unix.close report_read;
+      Unix._exit (body ~report:report_write)
+  | pid ->
+      Unix.close report_write;
+      let channel = Unix.in_channel_of_descr report_read in
+      let reported = In_channel.input_all channel in
+      In_channel.close channel;
+      let _, status = Unix.waitpid [] pid in
+      { status; reported }
+
+(* The child's evidence comes back on a pipe of its own rather than on either of
+   the streams under test, which is the whole point: the work's outcome has to
+   be observable somewhere the vanished client never had a hold on. A line this
+   short moves in one write, and a partial one would truncate the evidence into
+   something the parent would read as a different answer, so it leaves a code no
+   completed run produces rather than being silently short. *)
+let report_line report line =
+  let payload = line ^ "\n" in
+  match Unix.write_substring report payload 0 (String.length payload) with
+  | written when written = String.length payload -> ()
+  | _ -> Unix._exit 71
+
+(* OCaml numbers signals in a scheme of its own rather than the platform's, so
+   the number a status carries reads as nothing beside the 141 a shell reports.
+   SIGPIPE is the one both cases are about and is named; anything else is left
+   as its number, which is enough to tell it apart from the one that matters. *)
+let signal_named signal =
+  if signal = Sys.sigpipe then "SIGPIPE" else Printf.sprintf "signal %d" signal
+
+(* A [docker exec -i] channel whose client has been killed, reproduced: the read
+   end is closed before the write end is installed, so every write to file
+   descriptor 2 from here on is a write nobody will ever read. *)
+let with_vanished_stderr f =
+  let reader, writer = Unix.pipe () in
+  Unix.close reader;
+  Unix.dup2 writer Unix.stderr;
+  Unix.close writer;
+  f ()
+
+(* The work is put in the serve action because it is the one action a test can
+   fill with arbitrary work without a Docker socket; what is being asserted is
+   the disposition and the write, which every subcommand path shares.
+
+   The second report line is the affirmative arm, and it is not decoration: a
+   fixture whose stderr was quietly still readable would satisfy "the work ran
+   to completion" while proving nothing. It runs after the write under test, as
+   a raw [Unix.write] that disturbs no channel, and says what the descriptor
+   actually was at that moment. *)
+let test_a_write_while_work_is_in_flight_does_not_abort_the_work () =
+  let child =
+    in_a_child (fun ~report ->
+        let serve () =
+          Diagnostics.write "halfway through the work the client asked for";
+          let reached =
+            match Unix.write_substring Unix.stderr "." 0 1 with
+            | _ -> "the stream was still accepting bytes"
+            | exception Unix.Unix_error (Unix.EPIPE, _, _) ->
+                "the stream was a pipe with no reader"
+          in
+          report_line report reached;
+          report_line report "the work ran to completion";
+          Ok ()
+        in
+        with_vanished_stderr (fun () -> evaluate ~serve [| "bondi-server" |]))
+  in
+  (match child.status with
+  | Unix.WEXITED 0 -> ()
+  | Unix.WEXITED code ->
+      fail
+        (Printf.sprintf "the surface exited %d rather than finishing its work"
+           code)
+  | Unix.WSIGNALED signal ->
+      fail
+        (Printf.sprintf
+           "a write to a stream nobody was reading killed the surface with %s"
+           (signal_named signal))
+  | Unix.WSTOPPED signal ->
+      fail (Printf.sprintf "the surface stopped on %s" (signal_named signal)));
+  check bool "the stream the diagnostic went to really had no reader" true
+    (String_utils.contains ~needle:"the stream was a pipe with no reader"
+       child.reported);
+  check bool "the work ran to completion after the write had failed" true
+    (String_utils.contains ~needle:"the work ran to completion" child.reported)
+
+(* The other half of the same contract, and a characterisation rather than a
+   change: once there is nothing left to report, a write that cannot be made is
+   still the orchestrator's failure and still exits 1. [check] is the vehicle
+   because it is the only subcommand whose final write is reachable without a
+   Docker Engine, and the classification it passes through is the one all five
+   share.
+
+   The stream is closed rather than broken. That is deliberate: a closed
+   descriptor is the case [cli.mli] already records an observation for, and it
+   is the one that must not move while the mid-work arm does.
+
+   The message is asserted as well as the code. Any exception at all classifies
+   as an orchestrator failure and exits 1, so the code alone would be satisfied
+   by a run that failed for some entirely different reason; naming the write is
+   what makes this an assertion about the write. *)
+let test_the_final_response_write_keeps_its_classification () =
+  let err_path = Filename.temp_file "bondi_cli_closed_stdout" ".txt" in
+  let err_fd = Unix.openfile err_path [ Unix.O_WRONLY; Unix.O_TRUNC ] 0o600 in
+  let serve () = Ok () in
+  let child =
+    in_a_child (fun ~report:_ ->
+        Unix.dup2 err_fd Unix.stderr;
+        Unix.close Unix.stdout;
+        evaluate
+          ~observe:(fun ~cron_configured:_ -> [])
+          ~serve
+          [| "bondi-server"; "check" |])
+  in
+  Unix.close err_fd;
+  let written_err = read_file err_path in
+  Sys.remove err_path;
+  (match child.status with
+  | Unix.WEXITED 1 -> ()
+  | Unix.WEXITED code ->
+      fail
+        (Printf.sprintf
+           "a write with nothing left to report exited %d rather than 1" code)
+  | Unix.WSIGNALED signal ->
+      fail
+        (Printf.sprintf "the final write killed the surface with %s"
+           (signal_named signal))
+  | Unix.WSTOPPED signal ->
+      fail (Printf.sprintf "the surface stopped on %s" (signal_named signal)));
+  check bool "the failure names the write that could not be made" true
+    (String_utils.contains ~needle:"Bad file descriptor" written_err)
+
 let () =
   run "cli"
     [
@@ -522,5 +668,12 @@ let () =
             test_classified_status_codes_an_escaping_exception_from_its_class;
           test_case "a cancellation propagates through the whole term" `Quick
             test_classified_status_propagates_a_cancellation;
+        ] );
+      ( "a client that goes away",
+        [
+          test_case "a write while work is in flight does not abort the work"
+            `Quick test_a_write_while_work_is_in_flight_does_not_abort_the_work;
+          test_case "the final response write keeps its classification" `Quick
+            test_the_final_response_write_keeps_its_classification;
         ] );
     ]

@@ -45,11 +45,14 @@ Deploy with valid target but no servers.
 
 A cron-declaring deploy reads the box's two cron sources and compares them
 before it posts anything, so what it prints is the state it found rather than
-the state it just created. The stub answers the version gate, the crontab spool
-and the payload listing, dispatching on the remote command string the client
-sends. $CRON_FILES_KEPT is the only thing that differs between the two runs
-below: it makes the payload directory hold the job's two files.
-$ORCHESTRATOR_TAG is what the box reports its orchestrator to be, and the
+the state it just created. The stub answers the version gate, the crontab spool,
+the payload listing and the deploy itself, dispatching on the remote command
+string the client sends. Every one of the four is an arm of its own: a command
+that fell through to the catch-all would come back empty and succeed, and a
+deploy that succeeded because nothing answered it is the one outcome these runs
+must not be able to report. $CRON_FILES_KEPT is the only thing that differs
+between the two runs below: it makes the payload directory hold the job's two
+files. $ORCHESTRATOR_TAG is what the box reports its orchestrator to be, and the
 version the pin expects unless a run says otherwise.
 
   $ ROOT="$PWD"
@@ -74,6 +77,9 @@ version the pin expects unless a run says otherwise.
   >       echo /etc/bondi/cron/nightly-report/env
   >     fi
   >     echo BONDI_CRON_PAYLOAD_END ;;
+  >   'docker exec -i bondi-orchestrator bondi-server deploy')
+  >     echo 'Error: No such container: bondi-orchestrator' >&2
+  >     exit 1 ;;
   >   *) : ;;
   > esac
   > STUB
@@ -108,22 +114,22 @@ rendered: what is printed is a job's name and what the box will do with it.
   $ head -3 out.log
   Deployment process initiated...
   cron job nightly-report on server 127.0.0.1 has neither its run file nor its secret environment file on the box, so it fails at its next fire until it is deployed again
-  Deploying to server: 127.0.0.1 at http://127.0.0.1:9/api/v1/deploy
+  Deploying to server: 127.0.0.1
 
 The same fixture with the files on the box. The two sources agree, so nothing
 new is said -- silence here is the report, which is what makes the loud case
 above legible -- and the exit code is the same as the run that diverged. No cram
-deploy reaches an orchestrator, so both runs end on the refused connection to
-port 9 rather than on a success; the claim these two arms pin is that the
-divergence is not what decides the code, and it is pinned by the two codes being
-equal rather than by either one's value. A divergence that refused, or that set
-its own code, changes exactly one of these two blocks.
+deploy reaches an orchestrator, so both runs end on a box with no container to
+run the command in rather than on a success; the claim these two arms pin is
+that the divergence is not what decides the code, and it is pinned by the two
+codes being equal rather than by either one's value. A divergence that refused,
+or that set its own code, changes exactly one of these two blocks.
 
   $ CRON_FILES_KEPT=1 bondi-client deploy nightly-report:v1 > agreed.log 2>&1
   [1]
   $ head -2 agreed.log
   Deployment process initiated...
-  Deploying to server: 127.0.0.1 at http://127.0.0.1:9/api/v1/deploy
+  Deploying to server: 127.0.0.1
 
 The same box, a version behind what a crontab line needs. The gate refuses and
 the run stops before anything is posted -- and no divergence is printed. The

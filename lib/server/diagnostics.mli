@@ -190,18 +190,27 @@ val write : string -> unit
     offered a result would sooner or later fail a deploy over a log line.
 
     Non-raising under an ignored SIGPIPE, and the condition is not decoration.
-    PID 1's stderr is a pipe in the ordinary case, and a write to a pipe whose
+    PID 1's stderr is a pipe in the ordinary case, and so is this process's own
+    stderr whenever the caller reading it went away; a write to a pipe whose
     reader has gone delivers SIGPIPE, which at its default disposition
-    terminates the process before anything here runs. [Eio_main.run] sets that
-    disposition to ignore for the lifetime of the server -- read in eio 1.3's
-    own sources, where both backends open with
-    [Sys.(set_signal sigpipe Signal_ignore)], not measured here against a broken
-    pipe -- so every caller today is covered; nothing in this module sets or
-    restores it, so a caller outside that scheduler would not be. Setting it per
-    write is not done here because the disposition is process-wide rather than
-    per call -- the client's ssh runner takes that route and documents that it
-    is therefore not re-entrant -- and diagnostics are written from more than
-    one fiber. *)
+    terminates the process before anything here runs.
+
+    [observed -- 2026-09-11] against this tree: with file descriptors 1 and 2
+    pointed at a pipe whose read end had already been closed, {!write} returns
+    normally under [Sys.(set_signal sigpipe Signal_ignore)] and kills the
+    process with shell status 141 -- 128 plus SIGPIPE -- without it. The claim
+    is measured rather than reasoned about, and it is measured against a broken
+    pipe, which an earlier form of this paragraph said it was not.
+
+    Nothing in this module sets or restores the disposition. What sets it is
+    [Cli.eval_argv], once, before any subcommand term is evaluated, so every
+    caller in this binary is covered rather than only those that reach an
+    [Eio_main.run] -- which sets the same disposition and never restores it, in
+    both eio 1.3 backends, read on 2026-09-11. A caller outside this binary
+    still owes itself the disposition. Setting it per write is not done here
+    because the disposition is process-wide rather than per call -- the client's
+    ssh runner takes that route and documents that it is therefore not
+    re-entrant -- and diagnostics are written from more than one fiber. *)
 
 val write_to : sink -> string -> unit
 (** [write_to sink line] is {!write} against a caller-supplied [sink] rather

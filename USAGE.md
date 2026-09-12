@@ -32,13 +32,13 @@ The example service throughout this guide is a web API called `my-api`, publishe
 Before you start, you need:
 
 - **A server** with a public IP address (e.g. a VPS from Hetzner, DigitalOcean, etc.)
-- **SSH access** to the server — Bondi uses SSH to install Docker and run the orchestrator
+- **SSH access** to the server, and an `ssh:` block for every server entry in `bondi.yaml` — Bondi uses SSH to install Docker, to run the orchestrator, and to reach it afterwards. `bondi deploy` and `bondi status` do their work by running a `bondi-server` subcommand inside the orchestrator's container over SSH, so a server entry carrying only an `ip_address` is no longer deployable or readable: `bondi deploy` refuses it by name, and `bondi status` reports its containers as not read. This holds for every server, including a `127.0.0.1` entry for a box Bondi is running on — that case used to bypass SSH and no longer does.
+- **`bondi-server` 0.15.0 or later already running on the server** — `bondi deploy` and `bondi status` refuse against an older orchestrator, because the subcommands they run arrived in 0.15.0 and an older image ignores the arguments and starts a second server instead. The refusal names both versions and the fix: set `bondi_server.version` in `bondi.yaml` to `0.15.0` or later, run `bondi setup`, then try again. Cron jobs are held to a higher floor still — see the cron-jobs bullet below.
 - **A Docker image** for your service, pushed to a registry (Docker Hub, GHCR, etc.)
 - **DNS records** — an `A` (or `AAAA`) record pointing your domain to the server IP
 - **Firewall rules** — inbound ports `80/tcp` and `443/tcp` must be open (Traefik handles TLS)
-- **If you use [cron jobs](#3-cron-jobs)**, four more things about the server:
+- **If you use [cron jobs](#3-cron-jobs)**, three more things about the server:
   - **`bondi-server` 0.16.0 or later must already be running on it.** The crontab line Bondi writes is a `docker exec` into the orchestrator that runs the server binary's `run` subcommand. That subcommand arrived in 0.15.0, but 0.15.0's own crontab writer still emits the older `curl` line and writes no run file — and the deploy that rewrites a box's crontab runs on the box, so an orchestrator below 0.16.0 answers a cron deploy with success and changes nothing. `bondi deploy` reads the orchestrator's version off the box and refuses a cron-declaring deploy against an older one, naming both versions. Run `bondi setup` first, with the version you want pinned under `bondi_server:`.
-  - **The server must be reachable over SSH from wherever you run `bondi deploy`.** That version check is a read of the box, and a box that cannot be consulted is refused rather than assumed good — so a cron job's `server:` block needs a working `ssh:` section, not just an `ip_address`.
   - **`docker` must be on the `PATH` cron runs jobs with** — `/usr/bin:/bin` on Debian and Ubuntu. The line invokes `docker exec` by name, and cron gives a job a minimal environment rather than a login one, so a Docker installed under `/usr/local/bin` answers over SSH and still fails every scheduled run. `bondi setup` asks the server what an empty environment resolves and stops if the answer is nothing. The apt install `get.docker.com` performs — which is what Bondi installs — puts it at `/usr/bin/docker`.
   - **`curl` 7.76 or later**, only if the server still holds cron lines written by an older Bondi. Those lines are `curl` invocations using `--fail-with-body`, which an older curl rejects as an unknown option; they keep firing on their schedule until each job is deployed again. `bondi setup` checks the version and stops with what it found. Debian 12 and Ubuntu 22.04 or later are fine; Debian 11 and Ubuntu 20.04 are not.
 
@@ -94,6 +94,7 @@ Key fields:
 | `traefik.domain_name` | Your domain. Traefik will request a TLS certificate from Let's Encrypt and route traffic for both `my-api.example.com` and `www.my-api.example.com`. |
 | `traefik.acme_email` | Email for Let's Encrypt certificate notifications. |
 | `bondi_server.version` | Version of the bondi-orchestrator image to run on the server. |
+| `servers[].port` | Accepted and ignored — setting it changes nothing. No Bondi command dials the orchestrator's port any more; `bondi deploy` and `bondi status` run the server's subcommands inside its container over SSH. The port the orchestrator is published on is fixed at `3030` by `bondi setup`, not read from here. The field is still accepted so that a `bondi.yaml` written before that change keeps parsing. Not to be confused with `service.port` above. |
 
 ### SSH configuration
 
@@ -275,7 +276,7 @@ After deploying, verify everything is running:
 bondi status
 ```
 
-This shows a table with your service, cron jobs, infrastructure components (orchestrator, Traefik), and their current state — read from the server over SSH and from the orchestrator over HTTP, with each source's account kept separate. See [Checking status](#checking-status) for the columns.
+This shows a table with your service, cron jobs, infrastructure components (orchestrator, Traefik), and their current state — read from the server over SSH, and from the orchestrator over that same connection by running its own `status` subcommand inside its container, with each source's account kept separate. See [Checking status](#checking-status) for the columns.
 
 ---
 
@@ -731,7 +732,7 @@ Managed containers appear in the Infrastructure section, discovered on the serve
 The table is read from two places and they are never blended into one answer:
 
 - **`docker`** — the containers on the server, read over SSH. This is ground truth about the box.
-- **`orch`** — the orchestrator's own report, fetched over HTTP. It holds what only the orchestrator knows, such as whether a cron job's last run `completed`.
+- **`orch`** — the orchestrator's own report, read over SSH by running its `status` subcommand inside its container. It holds what only the orchestrator knows, such as whether a cron job's last run `completed`.
 - **`both`** — the two agree on image, tag and status, so they share one line. The restart count is not compared: a count read a second later legitimately differs.
 
 Where the two disagree, the component gets one line per source and the row is flagged `[disagreement]`. That is the report's finding, not a defect in it — the two sources drifting apart is a state nothing else detects, so nothing is reconciled behind your back.

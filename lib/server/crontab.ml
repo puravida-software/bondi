@@ -113,7 +113,7 @@ let string_of_lines lines = String.concat "\n" lines ^ "\n"
    non-zero line and cron mails it. That is what the curl flags used to buy. *)
 let entry_of_cron_job (c : Strategy.Simple.cron_job) =
   Printf.sprintf "%s docker exec %s sh -c '%s%s'" c.schedule
-    Bondi_common.Cron_exec_line.orchestrator_container
+    Bondi_common.Builtin_container.orchestrator
     Bondi_common.Cron_exec_line.exec_marker
     (Cron_secrets.run_file_of c.name)
 

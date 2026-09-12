@@ -7,6 +7,24 @@ module Remote_exec = Bondi_client.Remote_exec
 module Config_file = Bondi_client.Config_file
 module Cron_payload = Bondi_client.Cron_payload
 module Cron_exec_line = Bondi_common.Cron_exec_line
+module Status_cmd = Bondi_client.Cmd.Status
+module Container_health = Bondi_client.Container_health
+
+(* Every arm named, so a seventh verdict is a compile error here rather than a
+   case this suite renders as some other one. *)
+let pp_verdict fmt (verdict : Container_health.verdict) =
+  match verdict with
+  | Container_health.Healthy -> Format.fprintf fmt "Healthy"
+  | Container_health.Unhealthy detail ->
+      Format.fprintf fmt "Unhealthy %S" detail
+  | Container_health.No_healthcheck -> Format.fprintf fmt "No_healthcheck"
+  | Container_health.Timed_out { seconds } ->
+      Format.fprintf fmt "Timed_out { seconds = %d }" seconds
+  | Container_health.Gone -> Format.fprintf fmt "Gone"
+  | Container_health.Unreadable detail ->
+      Format.fprintf fmt "Unreadable %S" detail
+
+let verdicts = list (pair string (testable pp_verdict ( = )))
 
 (* Both constructors named, so a third is a compile error here rather than a
    silently unrendered failure. *)
@@ -253,7 +271,7 @@ let test_gather_reading_from_neither () =
     [ "my-service"; "bondi-orchestrator" ]
     (List.map (fun (row : Report.row) -> row.name) rows);
   check string "the host says why it could not answer"
-    "command failed (255): Permission denied (publickey)."
+    "the host was not reached (255): Permission denied (publickey)."
     (unavailable_of ~source:"docker"
        (row_named "bondi-orchestrator" rows).docker);
   check string "and so does the orchestrator" "connection refused"
@@ -380,7 +398,8 @@ let test_gather_payload_read_that_failed_is_a_value () =
       ()
   in
   check string "the failure is carried in the transport's own words"
-    "unlisted: command failed (255): Connection closed by 10.0.0.1 port 22"
+    "unlisted: the host was not reached (255): Connection closed by 10.0.0.1 \
+     port 22"
     (payloads_name reading.payloads);
   check (list string) "and the host's containers were not abandoned for it"
     [ "my-service"; "bondi-orchestrator" ]
@@ -400,6 +419,123 @@ let test_report_carries_the_payload_listing () =
     ^ " "
     ^ Cron_exec_line.env_file_of payload_job)
     (payloads_name (report_of (reading ())).payloads)
+
+(* An unroutable address, RFC 5737 TEST-NET-1, behind a stub [ssh]: were the
+   stub ever to stop being resolved the operator's own client would run, spend
+   its connect timeout and answer nothing, and the counts below would fail
+   loudly rather than pass quietly. *)
+let unroutable_server : Config_file.server =
+  {
+    ip_address = "192.0.2.1";
+    ssh =
+      Some
+        { user = "deploy"; private_key_contents = "KEY"; private_key_pass = "" };
+    port = None;
+  }
+
+(* [reading_of_reads] is checked above against plain data and the runner is
+   checked in its own suite; neither says that the five reads this module makes
+   are made over one staged key. The composition is where that is decided, so it
+   is driven here, over a real spawn.
+
+   The wait's inventory is built from the fixtures rather than from what the stub
+   answered, because the stub answers nothing: what this case counts is how many
+   keys the reads were handed, and a wait that had nothing to wait for would drop
+   the fifth read and leave the count passing for the wrong reason. *)
+let test_a_reading_is_gathered_inside_one_session () =
+  let (), staged =
+    Client_fixtures.staged_keys_during (fun () ->
+        match
+          Remote_exec.with_session ~timeout_seconds:60 unroutable_server
+            (fun session ->
+              let reading =
+                Gather.gather ~session ~timeout_seconds:60
+                  ~fetch:(fun _ ->
+                    Error (Report.Not_consulted "no orchestrator read here"))
+                  unroutable_server
+              in
+              (match reading.Gather.orchestrator with
+              | Error (Report.Not_consulted message) ->
+                  check string "the fetch's answer reaches the reading"
+                    "no orchestrator read here" message
+              | Error (Report.Not_understood message) ->
+                  failf "the fetch was not asked, got unreadable: %s" message
+              | Ok _ -> fail "the fetch answered that it was not consulted");
+              let waits =
+                Gather.health_waits ~session ~timeout_seconds:1
+                  unroutable_server
+                  (Inventory.of_reads ~listing:(Ok listing_output)
+                     ~inspection:(Ok inspection_output))
+              in
+              check int "the inventory had one container to wait on" 1
+                (List.length waits))
+        with
+        | Ok () -> ()
+        | Error failure ->
+            failf "the key can be staged here: %s" (Remote_exec.message failure))
+  in
+  check int "every read was made" 5 (List.length staged);
+  check int "over one staged key" 1
+    (List.length (List.sort_uniq String.compare staged))
+
+(* [health_waits] is the one read whose invocation bound is not the caller's to
+   choose: it adds slack over the wait the host is asked to perform, because a
+   bound at the wait's own length reports a container that used its whole budget
+   as a call that was given up on. That addition is worth nothing if the session
+   the wait runs inside overrides it, and every caller of this function is on
+   its way into one.
+
+   The session here is opened at a second, below the wait itself and far below
+   the wait plus its slack, so a runner that held the call to the session's
+   number would cut the stub off before it answers and the verdict would be
+   [Unreadable]. The stub sleeps past that and then answers healthy: a container
+   that passes late in its budget, which is the case the slack exists for. *)
+let test_a_health_wait_is_not_cut_off_by_the_session_it_runs_in () =
+  Client_fixtures.with_ssh_stub
+    "#!/bin/sh\nsleep 3\necho BONDI_CONTAINER_HEALTHY\n" (fun () ->
+      match
+        Remote_exec.with_session ~timeout_seconds:1 unroutable_server
+          (fun session ->
+            Gather.health_waits ~session ~timeout_seconds:1 unroutable_server
+              (Inventory.of_reads ~listing:(Ok listing_output)
+                 ~inspection:(Ok inspection_output)))
+      with
+      | Error failure ->
+          failf "the key can be staged here: %s" (Remote_exec.message failure)
+      | Ok waits ->
+          check verdicts "the wait ran for its own bound and its slack"
+            [ ("my-service", Container_health.Healthy) ]
+            waits)
+
+(* The orchestrator's account used to arrive over HTTP through a forwarded
+   port, so a box that could not be reached produced a sentence about a socket
+   this client had opened. It arrives from a command run on the box now, and
+   what an unreachable box produces is the runner's own account of not having
+   reached it -- which is the sentence that sends an operator to their key and
+   the network rather than to the orchestrator.
+
+   The needles are the transport's words rather than merely "some failure": an
+   HTTP fetch against an address nothing listens on also fails, and a case that
+   only asserted failure would pass against the transport this feature
+   removes. *)
+let test_the_orchestrator_read_is_a_remote_exec_outcome () =
+  Client_fixtures.with_ssh_stub
+    "#!/bin/sh\necho 'Permission denied (publickey).' >&2\nexit 255\n"
+    (fun () ->
+      match
+        Status_cmd.orchestrator_reading ~service_name:None unroutable_server
+      with
+      | Ok _ -> fail "a host that was never reached has no reading to give"
+      | Error (Report.Not_understood message) ->
+          failf "the box said nothing, so nothing of its was misread: %s"
+            message
+      | Error (Report.Not_consulted message) ->
+          check bool "the transport's own account of not reaching the host" true
+            (Test_helpers.contains message
+               ~needle:"the host was not reached (255)");
+          check bool "carrying what ssh said while failing" true
+            (Test_helpers.contains message
+               ~needle:"Permission denied (publickey)."))
 
 let () =
   run "status gather"
@@ -423,5 +559,14 @@ let () =
             test_gather_payload_read_that_failed_is_a_value;
           test_case "the report carries the payload listing" `Quick
             test_report_carries_the_payload_listing;
+        ] );
+      ( "taking the reading",
+        [
+          test_case "a reading is gathered inside one session" `Quick
+            test_a_reading_is_gathered_inside_one_session;
+          test_case "a health wait is not cut off by the session it runs in"
+            `Quick test_a_health_wait_is_not_cut_off_by_the_session_it_runs_in;
+          test_case "the orchestrator read is a remote-exec outcome" `Quick
+            test_the_orchestrator_read_is_a_remote_exec_outcome;
         ] );
     ]

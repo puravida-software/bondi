@@ -68,13 +68,19 @@ let classified_result body =
 
    That the write can raise at all is [observed -- 2026-09-07] against OCaml
    5.3.0: [print_string] followed by [flush stdout] with file descriptor 1
-   closed raises [Sys_error "Bad file descriptor"], and the same pair writing
-   into a pipe whose reader has gone raises [Sys_error "Broken pipe"] when
-   SIGPIPE is ignored -- the disposition [Eio_main.run] sets, and therefore the
-   one the three subcommands that build an environment write under. At SIGPIPE's
-   default disposition the signal killed the process before anything was raised,
-   so a reader that goes away is not a code this classification gets to choose;
-   a closed descriptor is.
+   closed raises [Sys_error "Bad file descriptor"].
+
+   A reader that goes away used to be a different matter, and no longer is.
+   [observed -- 2026-09-11] against this tree, with file descriptors 1 and 2
+   pointed at a pipe whose read end had already been closed:
+   [print_string "{}"; flush stdout] and
+   [prerr_string "boom"; prerr_newline (); flush stderr] each raise
+   [Sys_error "Broken pipe"] under [Sys.(set_signal sigpipe Signal_ignore)], and
+   each kill the process with shell status 141 -- 128 plus SIGPIPE -- without
+   it. The earlier account of this stopped at the second half and concluded that
+   a vanished reader was not a code this classification gets to choose. It is
+   one now, on every path, because [eval_argv] sets the disposition itself
+   rather than inheriting whichever one the action happened to run under.
 
    The failure is written and its code taken by [Cmd_io.status_of], which is
    where the failure table is already read. The encoder it is given can never be
@@ -261,7 +267,42 @@ let group ~serve ~observe =
   Cmdliner.Cmd.group info ~default:(serve_term ~serve)
     [ serve_cmd ~serve; deploy_cmd; run_cmd; status_cmd; check_cmd ~observe ]
 
+(* The signal disposition every subcommand path runs under, set here because
+   here is the single point all of them pass through.
+
+   A client that goes away closes the stream its subcommand was writing to, and
+   at SIGPIPE's default disposition the next write kills the process outright:
+   the deploy stops wherever it had got to, no failure class is chosen, and
+   nothing is left for [bondi status] to recover. Ignoring the signal converts
+   that death into a raised [Sys_error] -- which the classification above can
+   answer, and which [Diagnostics.write] already swallows. It does not by itself
+   make a write harmless, and the two halves are deliberately different: a write
+   issued while work is in flight is a diagnostic and is dropped, and the write
+   that carries the answer still fails the subcommand, because by then there is
+   nothing left to report.
+
+   [observed -- 2026-09-11] against this tree: [Diagnostics.write] into a pipe
+   whose read end had already been closed returns normally under
+   [Sys.(set_signal sigpipe Signal_ignore)] and kills the process with shell
+   status 141 without it. So the disposition, not the writer, was what stood
+   between a mid-work diagnostic and a dead process.
+
+   It is not left to [Eio_main.run], which sets the same disposition and never
+   restores it -- eio 1.3 does it in both backends, at
+   [_opam/lib/eio_posix/eio_posix.ml] line 23 and
+   [_opam/lib/eio_linux/eio_linux.ml] line 556, read on 2026-09-11 -- because
+   that covers only a path that reaches an environment. [check] builds none;
+   [deploy]'s undecodable-payload arm answers before one is built; [serve]'s own
+   failure is written after [Eio_main.run] has returned; and cmdliner writes
+   [--help], [--version] and its own usage errors before any term is evaluated
+   at all.
+
+   Ignored rather than handled, and process-wide rather than set around each
+   write, for the reason [diagnostics.mli] gives about itself: the disposition
+   is a property of the process, not of a call, and this binary writes from more
+   than one fiber. *)
 let eval_argv ~serve ~observe ~argv =
+  Sys.set_signal Sys.sigpipe Sys.Signal_ignore;
   Cmdliner.Cmd.eval' ~argv (group ~serve ~observe)
 
 (* The paths the container the server runs in actually uses. Each is the one the

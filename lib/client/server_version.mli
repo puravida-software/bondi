@@ -1,5 +1,15 @@
-(** Whether the orchestrator a box is running can write the command Bondi puts
-    into its crontab, and execute it.
+(** Whether the orchestrator a box is running is new enough for what the client
+    is about to ask of it.
+
+    There are two floors here, not one, because there are two capabilities and
+    they arrived a release apart. Reading them as one number refuses boxes that
+    work, or accepts boxes that answer with silence; both have happened.
+    {!answers_command_surface} names the earlier and weaker one -- a binary with
+    subcommands, which is what a command reaching the box over [docker exec]
+    needs. {!writes_exec_lines} names the later and stronger one -- a server
+    that writes the exec-shaped cron line and the run file beside it. A box can
+    satisfy the first and not the second, and that is the normal case for one
+    release, not a corner.
 
     A generated cron line runs [bondi-server run] inside the orchestrator
     container. That subcommand arrived in 0.15.0; an older image ignores its
@@ -59,3 +69,30 @@ val writes_exec_lines : string -> (unit, string) result
     -- is a refusal rather than a pass: an unreadable answer is not evidence of
     an image that can run the line, and the error quotes what the box actually
     said. *)
+
+val minimum_for_command_surface : string
+(** The oldest orchestrator release whose server binary carries subcommands.
+
+    Distinct from {!minimum_for_exec_lines}, and lower: writing an exec line is
+    the later and stronger capability, and a box that answers a deploy or a
+    status perfectly well would be refused by that floor. Named for the same
+    reason the other floor is -- so the caller reporting the requirement and the
+    caller deciding against it cannot drift apart. *)
+
+val answers_command_surface : string -> (unit, string) result
+(** [answers_command_surface version] decides whether an orchestrator reporting
+    [version] is one whose binary has subcommands to answer with, which is what
+    a client reaching it by running a command inside its container requires.
+
+    Refuses in the same shape as {!writes_exec_lines}: what the box reported,
+    what is required, and the command that fixes it. The comparison is the same
+    ordering against the same reading of a version, so the two gates cannot
+    disagree about an answer neither can read: an empty answer from a box with
+    no orchestrator running, a [latest] tag, or a fork's image name is a refusal
+    rather than a pass, because an unreadable answer is not evidence of a binary
+    that has the subcommand.
+
+    A box below this floor does not fail loudly on its own: its binary ignores
+    the arguments and starts serving, so the caller waits on a command that was
+    never going to answer. That is what this gate is taken before the call to
+    avoid. *)

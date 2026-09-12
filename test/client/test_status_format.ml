@@ -5,6 +5,7 @@ module Inventory = Bondi_client.Host_inventory
 module Crontab = Bondi_client.Crontab_listing
 module Payload = Bondi_client.Cron_payload
 module Config_file = Bondi_client.Config_file
+module Status_cmd = Bondi_client.Cmd.Status
 
 (* --- Test helpers ---
 
@@ -440,6 +441,102 @@ let test_status_renders_declared_not_running_as_missing () =
   check bool "found container still rendered" true
     (section_has infrastructure ~needle:"10.48.1e")
 
+(* --- The floor for the command surface ---
+
+   A status read runs the orchestrator's own [status] subcommand inside its
+   container. A binary from before there were subcommands has none: it ignores
+   the arguments and starts a second server against a port already bound, so a
+   client that asked anyway would wait out its bound on a command that was never
+   going to answer. The version the box reports is read first and held to the
+   floor, and a box below it is a cell in the report rather than an exit --
+   this command reports on every configured server, and refusing the run would
+   lose the account of the boxes that are fine.
+
+   Both cases drive a real spawn against a stub [ssh], because what is being
+   checked is the composition: which command was sent, what was done with its
+   answer, and what an operator reads at the end of it. *)
+
+let gated_server : Config_file.server =
+  {
+    ip_address = "192.0.2.1";
+    ssh =
+      Some
+        { user = "deploy"; private_key_contents = "KEY"; private_key_pass = "" };
+    port = None;
+  }
+
+let gated_config = mk_config ~user_service:(mk_service "myapp") ()
+
+let rendered_unavailability unavailability =
+  Report.render_table
+    [
+      {
+        Report.address = gated_server.ip_address;
+        rows =
+          Report.rows ~config:gated_config ~docker:(Inventory.Observed [])
+            ~orchestrator:(Error unavailability) ~waits:[];
+        crontab = Crontab.No_section;
+        payloads = Payload.Payloads { files = [] };
+        warnings = [];
+      };
+    ]
+
+let test_a_box_below_the_floor_is_reported_as_such () =
+  Client_fixtures.with_ssh_stub
+    {|#!/bin/sh
+printf 'mlopez1506/bondi-server:0.10.3\n'
+|} (fun () ->
+      match Status_cmd.orchestrator_reading ~service_name:None gated_server with
+      | Ok _ ->
+          fail
+            "a box whose binary has no subcommands cannot have answered a \
+             subcommand"
+      | Error (Report.Not_understood message) ->
+          failf
+            "the orchestrator was never asked, so nothing of its was misread: \
+             %s"
+            message
+      | Error (Report.Not_consulted message) ->
+          let table = rendered_unavailability (Report.Not_consulted message) in
+          check bool "the report names the version the box reported" true
+            (contains table ~needle:"0.10.3");
+          check bool "and the version it needs" true
+            (contains table ~needle:"0.15.0");
+          check bool "and the command that fixes it" true
+            (contains table ~needle:"run bondi setup"))
+
+(* The accepting arm, on the same harness. Without it a gate that refused every
+   box would satisfy the case above, and the command the box is actually sent
+   would be pinned by nothing at all -- so the stub answers with the command it
+   was given, which is how the contract with the box is read back here. *)
+let test_a_box_at_the_floor_is_read_with_the_command_it_answers () =
+  Client_fixtures.with_ssh_stub
+    {|#!/bin/sh
+while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done
+shift
+case "$1" in
+  *'bondi-server status'*)
+    printf '{"cron_jobs":[],"infrastructure":{},"errors":["%s"]}\n' "$1" ;;
+  *) printf 'mlopez1506/bondi-server:0.15.0\n' ;;
+esac
+|}
+    (fun () ->
+      match
+        Status_cmd.orchestrator_reading ~service_name:(Some "myapp")
+          gated_server
+      with
+      | Error (Report.Not_consulted message)
+      | Error (Report.Not_understood message) ->
+          failf "a box at the floor answers its own status subcommand: %s"
+            message
+      | Ok reading ->
+          check (list string) "the command the box was asked to run"
+            [
+              "docker exec -i bondi-orchestrator bondi-server status --service \
+               'myapp'";
+            ]
+            reading.warnings)
+
 let () =
   run "Status_format"
     [
@@ -459,4 +556,11 @@ let () =
             test_status_renders_declared_not_running_as_missing;
         ] );
       ("format_json", [ test_case "json structure" `Quick test_format_json ]);
+      ( "the command surface's floor",
+        [
+          test_case "a box below the floor is reported as such" `Quick
+            test_a_box_below_the_floor_is_reported_as_such;
+          test_case "a box at the floor is read" `Quick
+            test_a_box_at_the_floor_is_read_with_the_command_it_answers;
+        ] );
     ]
