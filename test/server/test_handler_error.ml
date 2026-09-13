@@ -21,14 +21,6 @@ let arm_name = function
 
 let all_arms = [ invalid; orchestrator; not_ready ]
 
-let test_http_status_per_class () =
-  check int "a request that was wrong as written answers 400" 400
-    (Dream.status_to_int (Handler_error.http_status invalid));
-  check int "a fault on Bondi's side answers 500" 500
-    (Dream.status_to_int (Handler_error.http_status orchestrator));
-  check int "a box that is not ready to serve answers 503" 503
-    (Dream.status_to_int (Handler_error.http_status not_ready))
-
 let test_exit_code_per_class () =
   check int "a request that was wrong as written exits 2" 2
     (Handler_error.exit_code invalid);
@@ -113,8 +105,6 @@ let () =
     [
       ( "handler error",
         [
-          test_case "http status is chosen per class" `Quick
-            test_http_status_per_class;
           test_case "exit code is chosen per class" `Quick
             test_exit_code_per_class;
           test_case "exit code never collides with ssh's own or with a signal"

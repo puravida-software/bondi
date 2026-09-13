@@ -54,7 +54,6 @@ runs below, so the exit code can only have followed from it.
   >   *BONDI_CRON_PAYLOAD_LISTED*)
   >     echo BONDI_CRON_PAYLOAD_LISTED
   >     echo BONDI_CRON_PAYLOAD_END ;;
-  >   *'PortBindings'*) echo '127.0.0.1' ;;
   >   # The host's applied restart policy. Without this arm the command falls
   >   # through to *) and answers nothing, which setup reads as a refusal to
   >   # report rather than as agreement.
@@ -80,9 +79,9 @@ runs below, so the exit code can only have followed from it.
   $ chmod +x "$ROOT/bin/ssh"
   $ export PATH="$ROOT/bin:$PATH"
 
-Port 9 is the discard port and nothing listens on it, so the orchestrator's HTTP
-source is refused immediately rather than waited out. Its message is the
-operating system's own and is normalised below.
+Port 9 is the discard port and nothing listens on it, so a connection to it is
+refused immediately rather than waited out. Its message is the operating
+system's own and is normalised below.
 
   $ export SSH_ARGV_LOG="$PWD/ssh-argv.log"
   $ cat > bondi.yaml <<'EOF'

@@ -33,3 +33,15 @@ examples each show it.
 
   $ grep -c '^#     network: bondi-network' bondi.yaml
   2
+
+The template declares only the fields Bondi still acts on, so the very first
+setup run against a generated config warns about nothing the template wrote.
+The version line is read from the same file to show the greps are looking at
+real generated content.
+
+  $ grep -c '^  version:' bondi.yaml
+  1
+  $ grep -c bind_address bondi.yaml || true
+  0
+  $ grep -c api_token bondi.yaml || true
+  0

@@ -281,10 +281,10 @@ let test_a_cron_divergence_is_a_fault_and_agreement_is_silence () =
 
 (* Two entries the writer could not have made, and one it could. The names in
    this directory come from [readdir] and go straight into a sentence that
-   reaches an operator's terminal, an HTTP response and the container log, so
-   what a caller may be told about is held to what the writer is able to create:
-   a name the job-name rule accepts, under a directory holding at least one of
-   the job's own files.
+   reaches an operator's terminal, the caller's own error stream and the
+   container log, so what a caller may be told about is held to what the writer
+   is able to create: a name the job-name rule accepts, under a directory
+   holding at least one of the job's own files.
 
    [not a job] is the first filter -- a name with spaces in it, which no
    deployment could have produced -- and [archive] made bare is the second, the

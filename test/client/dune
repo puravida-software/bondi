@@ -20,7 +20,8 @@
   test_orchestrator_bind
   test_alloy_commands
   test_ssh_multiplex
-  test_remote_exec)
+  test_remote_exec
+  test_deprecations)
  (deps
   (glob_files fixtures/*.json))
  (libraries alcotest bondi.client bondi.common test_helpers unix yojson))

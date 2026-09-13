@@ -9,16 +9,24 @@
     [--fail-with-body], so that a failed run exits non-zero {i and} carries the
     server's explanation into cron's mail. A deploy replaces only the lines for
     the jobs it names, so those lines survive on a host until each job is
-    deployed again -- and they keep firing on their schedule meanwhile. That is
-    what this check now guards, and the only thing it guards.
+    deployed again -- and they keep firing on their schedule meanwhile.
+
+    What they can no longer do is succeed. A current image serves nothing, and
+    no orchestrator [setup] creates publishes a port, so on a host carrying a
+    current orchestrator every surviving line fails at the connection rather
+    than at the curl option -- at any curl version, a new one included. This
+    check therefore no longer separates a host whose legacy lines run from one
+    whose legacy lines do not: on such a host neither runs, and only
+    re-deploying each job replaces its line.
 
     [--fail-with-body] arrived in curl 7.76.0; an older curl rejects it as
-    unknown and exits before issuing the request, which would break every such
-    job on the host at once. The check outlives the shape that motivated it
-    because the lines do: it is kept on the whole cron path rather than narrowed
-    to hosts observed to hold one, since [setup] does not read the crontab and a
-    gate on its way out is not worth a new read. When the reader for those lines
-    is deleted, this check is deleted with it.
+    unknown and exits before issuing the request. What the check is left doing
+    is stopping [setup] on a host with an older curl -- and [setup] is the
+    command that puts the current image on the box, so it is the step before the
+    deploy that would replace those lines. It is kept on the whole cron path
+    rather than narrowed to hosts observed to hold one, since [setup] does not
+    read the crontab and a gate on its way out is not worth a new read. When the
+    reader for those lines is deleted, this check is deleted with it.
 
     This module exists so that the check is a pure, tested decision made against
     the host's own [curl --version] output, run once at setup time rather than

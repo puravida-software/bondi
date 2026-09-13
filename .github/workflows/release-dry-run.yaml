@@ -65,7 +65,7 @@ jobs:
       - uses: extractions/setup-just@v3
         with:
           just-version: "1.46.0"
-      - uses: Homebrew/actions/setup-homebrew@master
+      - uses: Homebrew/actions/setup-homebrew@1e34f2e2acaa766b7efacb8c26352e6abbb023f9 # 2026.09.13.1
       - name: Install Commitizen
         run: brew install commitizen
 
@@ -97,6 +97,11 @@ jobs:
       # runner is Docker Engine, which is the only engine the check accepts: a
       # rootless one reinterprets the group and user flags it exercises.
       - name: Check the image's command surface
+        # As on the publishing path: the outbound-TLS assertion is opt-in in the
+        # script, and the dry run turns it on so that it asserts what the real
+        # release asserts rather than a subset of it.
+        env:
+          BONDI_CHECK_TLS_HANDSHAKE: "1"
         run: just check-server-image latest
 
   update-homebrew-tap-dry-run:
@@ -122,7 +127,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/tap/Formula"
           cp "packaging/homebrew/bondi.rb" "$RUNNER_TEMP/tap/Formula/bondi.rb"
 
-      - uses: Homebrew/actions/setup-homebrew@master
+      - uses: Homebrew/actions/setup-homebrew@1e34f2e2acaa766b7efacb8c26352e6abbb023f9 # 2026.09.13.1
       - name: Install Commitizen
         run: |
           brew install commitizen

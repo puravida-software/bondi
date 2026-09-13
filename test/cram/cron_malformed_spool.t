@@ -70,7 +70,6 @@ redden if the orchestrator's wording changes.
   >     echo BONDI_CRONTAB_CONTENTS
   >     cat "$SPOOL"
   >     echo BONDI_CRONTAB_END ;;
-  >   *'PortBindings'*) echo '127.0.0.1' ;;
   >   *'docker cp'*) : ;;
   >   *'RestartPolicy'*) echo unless-stopped ;;
   >   *BONDI_CRON_PAYLOAD_LISTED*)

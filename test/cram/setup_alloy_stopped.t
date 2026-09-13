@@ -49,7 +49,6 @@ the declared version, so the run reduces to the alloy phase.
   >   *BONDI_CRON_PAYLOAD_LISTED*)
   >     echo BONDI_CRON_PAYLOAD_LISTED
   >     echo BONDI_CRON_PAYLOAD_END ;;
-  >   *'PortBindings'*) echo '127.0.0.1' ;;
   >   # The host's applied restart policy. Without this arm the command falls
   >   # through to *) and answers nothing, which setup reads as a refusal to
   >   # report rather than as agreement.

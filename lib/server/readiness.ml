@@ -4,7 +4,8 @@ type verdict = Ready | Not_ready of observation list
 
 (* The reason an operator reads: the path that was probed and the system's own
    word for what happened to it. It carries no value taken from a payload --
-   these lines reach a terminal, an HTTP response and the container log. *)
+   these lines reach a terminal, the caller's own error stream and the container
+   log. *)
 let unix_reason path error =
   Printf.sprintf "%s: %s" path (Unix.error_message error)
 
@@ -197,10 +198,10 @@ let holds_a_payload_file dir name =
 
    Every name is passed through the rule the writer creates a job's directory
    under before it can be reported. These names come from [readdir] and go
-   straight into a sentence that reaches an operator's terminal, an HTTP
-   response and the container log, and nothing between here and there inspects
-   them; the filter is what keeps this module's promise that a reason names
-   paths and conditions and never a value some other party chose. *)
+   straight into a sentence that reaches an operator's terminal, the caller's
+   own error stream and the container log, and nothing between here and there
+   inspects them; the filter is what keeps this module's promise that a reason
+   names paths and conditions and never a value some other party chose. *)
 let payload_jobs dir =
   match Unix.stat dir with
   | exception Unix.Unix_error (Unix.ENOENT, _, _) -> Some []

@@ -7,21 +7,19 @@
   bondi.common
   eio
   eio_main
-  lwt
-  lwt_eio
   cohttp
   cohttp-eio
   tls-eio
   tls
   ca-certs
+  mirage-crypto-rng.unix
   domain-name
   base64
   yojson
   uri
   unix
   cmdliner
-  dream
   ppx_deriving.show
   ppx_deriving_yojson)
  (preprocess
-  (pps lwt_ppx ppx_deriving.eq ppx_deriving.show ppx_deriving_yojson)))
+  (pps ppx_deriving.eq ppx_deriving.show ppx_deriving_yojson)))

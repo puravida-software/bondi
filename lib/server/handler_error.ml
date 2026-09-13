@@ -9,18 +9,6 @@ let message = function
   | Not_ready msg ->
       msg
 
-(* The failure class alone picks the status, so no handler carries a decision of
-   its own. [Invalid_request] is a value the caller wrote that failed a
-   precondition and answers 400; [Orchestrator_failure] is a fault on Bondi's
-   side of the call and answers 500. Neither answers 404, which described
-   neither. [Not_ready] is neither of those: the box cannot serve at all, which
-   is 503. No route returns it today, and the status is still chosen here
-   rather than left to whichever handler returns it first. *)
-let http_status : t -> Dream.status = function
-  | Invalid_request _ -> `Bad_Request
-  | Orchestrator_failure _ -> `Internal_Server_Error
-  | Not_ready _ -> `Service_Unavailable
-
 (* The shell's numbering: 2 for a request that was wrong as written, 1 for a
    general failure. Both are clear of what the client already reads as something
    else -- 255 as ssh's own failure, 128 plus n as a signal, each measured and

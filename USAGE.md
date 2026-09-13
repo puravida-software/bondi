@@ -40,7 +40,7 @@ Before you start, you need:
 - **If you use [cron jobs](#3-cron-jobs)**, three more things about the server:
   - **`bondi-server` 0.16.0 or later must already be running on it.** The crontab line Bondi writes is a `docker exec` into the orchestrator that runs the server binary's `run` subcommand. That subcommand arrived in 0.15.0, but 0.15.0's own crontab writer still emits the older `curl` line and writes no run file — and the deploy that rewrites a box's crontab runs on the box, so an orchestrator below 0.16.0 answers a cron deploy with success and changes nothing. `bondi deploy` reads the orchestrator's version off the box and refuses a cron-declaring deploy against an older one, naming both versions. Run `bondi setup` first, with the version you want pinned under `bondi_server:`.
   - **`docker` must be on the `PATH` cron runs jobs with** — `/usr/bin:/bin` on Debian and Ubuntu. The line invokes `docker exec` by name, and cron gives a job a minimal environment rather than a login one, so a Docker installed under `/usr/local/bin` answers over SSH and still fails every scheduled run. `bondi setup` asks the server what an empty environment resolves and stops if the answer is nothing. The apt install `get.docker.com` performs — which is what Bondi installs — puts it at `/usr/bin/docker`.
-  - **`curl` 7.76 or later**, only if the server still holds cron lines written by an older Bondi. Those lines are `curl` invocations using `--fail-with-body`, which an older curl rejects as an unknown option; they keep firing on their schedule until each job is deployed again. `bondi setup` checks the version and stops with what it found. Debian 12 and Ubuntu 22.04 or later are fine; Debian 11 and Ubuntu 20.04 are not.
+  - **`curl` 7.76 or later**, only if the server still holds cron lines written by an older Bondi. Those lines are `curl` invocations using `--fail-with-body`, which an older curl rejects as an unknown option, and they keep firing on their schedule until each job is deployed again. What they can no longer do is succeed: a current image serves nothing, and no orchestrator `bondi setup` creates publishes a port, so on a box running a current orchestrator every such line fails at the connection whatever curl the host has. `bondi setup` still checks the version and stops with what it found; the fix that actually retires those lines is to deploy each cron job once. Debian 12 and Ubuntu 22.04 or later are fine; Debian 11 and Ubuntu 20.04 are not.
 
 Install the CLI:
 
@@ -94,7 +94,9 @@ Key fields:
 | `traefik.domain_name` | Your domain. Traefik will request a TLS certificate from Let's Encrypt and route traffic for both `my-api.example.com` and `www.my-api.example.com`. |
 | `traefik.acme_email` | Email for Let's Encrypt certificate notifications. |
 | `bondi_server.version` | Version of the bondi-orchestrator image to run on the server. |
-| `servers[].port` | Accepted and ignored — setting it changes nothing. No Bondi command dials the orchestrator's port any more; `bondi deploy` and `bondi status` run the server's subcommands inside its container over SSH. The port the orchestrator is published on is fixed at `3030` by `bondi setup`, not read from here. The field is still accepted so that a `bondi.yaml` written before that change keeps parsing. Not to be confused with `service.port` above. |
+| `servers[].port` | Accepted and ignored — setting it changes nothing. Nothing dials the orchestrator any more; `bondi deploy` and `bondi status` run the server's subcommands inside its container over SSH, and `bondi setup` publishes no host port for any orchestrator it creates — a container an older Bondi created may still publish one until a version bump makes `bondi setup` replace it. The field is still accepted so that a `bondi.yaml` written before that change keeps parsing. Not to be confused with `service.port` above. |
+| `bondi_server.bind_address` | Accepted and ignored — setting it changes nothing, and `bondi setup` and `bondi deploy` each print a line saying so. The orchestrator serves no HTTP, so there is no socket to bind. The field is still accepted so that a `bondi.yaml` written before that change keeps parsing; removal is planned, so remove it from your `bondi.yaml`. |
+| `bondi_server.api_token` | Accepted and ignored — setting it changes nothing, and `bondi setup` and `bondi deploy` each print a line saying so. The orchestrator serves no HTTP, so there is no request to authenticate. The field is still accepted so that a `bondi.yaml` written before that change keeps parsing; removal is planned. Remove it from your `bondi.yaml`, and rotate it if it was ever a real secret — a credential that sat in a configuration file is compromised whether or not anything still reads it. |
 
 ### SSH configuration
 
@@ -464,7 +466,7 @@ The second channel is alerting, below, which needs sinks configured and fires on
 
 Bondi keeps its cron entries between a `BEGIN`/`END` marker pair in the server's crontab. Everything between those markers is Bondi's, and Bondi does not throw any of it away: a line in there that Bondi did not write is carried through every deploy that rewrites the section, verbatim.
 
-It is also reported, on every `bondi status`. The `Crontab` row counts the entry and locates it — `2 jobs (daily-close, entry 2 could not be read)` — where positions count entries from the first one inside the markers. The line itself is never printed, in the table or in `--output json`: an entry in that section may carry a credential, and status output is returned over HTTP and shipped off the box with the logs.
+It is also reported, on every `bondi status`. The `Crontab` row counts the entry and locates it — `2 jobs (daily-close, entry 2 could not be read)` — where positions count entries from the first one inside the markers. The line itself is never printed, in the table or in `--output json`: an entry in that section may carry a credential, and status output leaves the box and is shipped off it with the logs.
 
 Nothing clears that report except removing the line. There is no Bondi command that does it, because a line Bondi cannot read is a line Bondi cannot safely decide about — so edit the crontab on the server by hand:
 
@@ -540,7 +542,7 @@ cron_jobs:
 
 Bondi POSTs one generic JSON payload per alert, carrying the job name, severity, exit code, and timestamp — nothing sink-specific and no secret material. A consumer that needs a different shape adapts on its own ingest side.
 
-Delivery is best-effort and runs after the run's outcome is recorded: a sink that is down, slow, or erroring never changes that outcome or crashes the orchestrator. Each attempt is bounded by a short timeout, so a slow sink can at most delay the run's HTTP acknowledgement. Every delivery failure — a transport error, a timeout, or a non-2xx response from the sink — is logged (by host only, so a credential-bearing URL is not written to the logs).
+Delivery is best-effort and runs after the run's outcome is recorded: a sink that is down, slow, or erroring never changes that outcome or crashes the orchestrator. Each attempt is bounded by a short timeout, so a slow sink can at most delay the moment the run's own exit code is reported. Every delivery failure — a transport error, a timeout, or a non-2xx response from the sink — is logged (by host only, so a credential-bearing URL is not written to the logs).
 
 Both fields ride in the job's run payload alongside `env_vars` — the file the crontab line points at, written at deploy time — so run `bondi setup` after adding them (the orchestrator picks up the new config), then deploy the cron job as usual.
 
@@ -741,7 +743,7 @@ A source that could not be consulted says so in its own words rather than report
 
 ```
   my-api                 docker  not read: Missing ssh configuration for server 203.0.113.10
-                         orch    not reachable: Error calling status endpoint on server 203.0.113.10
+                         orch    not reachable: Missing ssh configuration for server 203.0.113.10
 ```
 
 `not read` and `not reachable` mean the question was never answered — different from `not found`, which is a source answering that it does not have the component. A row where SSH could not be read but the orchestrator could is flagged `[unverified]`: it is the orchestrator's account with nothing to check it against.
@@ -769,7 +771,7 @@ Bondi never adds a healthcheck of its own — it reports whichever one the image
 
 `setup` writes the cron entries it manages into a marked section of the server's crontab, and that file is a different fact from the `cron_jobs` you declared. The `Crontab` row reports what is actually in the section: a job count and the job names (`1 jobs (daily-close)`), `0 jobs`, `no Bondi section on the host`, `markers malformed: …` where the `BEGIN`/`END` markers are unbalanced, or `not read: …`.
 
-Only counts, names and positions are ever printed. Crontab lines are never shown, in the table or in the JSON — each one carries the orchestrator API secret in plaintext.
+Only counts, names and positions are ever printed. Crontab lines are never shown, in the table or in the JSON — a line written by an older Bondi carries the job's whole payload, environment variables and all, and status output leaves the box and is shipped off it with the logs.
 
 `markers malformed: …` is not only a status row. A `bondi deploy` of a job that declares cron jobs against that server fails:
 

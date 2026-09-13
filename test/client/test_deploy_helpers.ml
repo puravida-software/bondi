@@ -2,6 +2,7 @@ open Alcotest
 module Deploy = Bondi_client.Cmd.Deploy
 module Config_file = Bondi_client.Config_file
 module Alert = Bondi_common.Alert
+module Deprecations = Bondi_client.Deprecations
 
 let result_testable ok_t =
   testable
@@ -765,6 +766,28 @@ let test_every_gated_server_is_deployed_to_in_order () =
         [ "deployed to 10.0.0.1"; "deployed to 10.0.0.2" ]
         messages
 
+(* The same property this client's [setup] cases state, owed a second time here:
+   [deploy] is the other command that acts on the configuration, and two commands
+   wired from one module are two call sites either of which can be the one nobody
+   wrote. The wording is pinned once, at the surface, by this command's cram
+   session.
+
+   [api_token] rather than [bind_address] because the two messages are not
+   interchangeable -- one is a stale knob and the other a credential that has to
+   be rotated -- and a deploy that said the wrong one of them would pass a case
+   that only counted lines. *)
+let test_a_declared_api_token_reaches_deploys_output () =
+  let declared : Config_file.t =
+    Client_fixtures.mk_config ~api_token:"not-a-real-token" ()
+  in
+  check bool "the fixture declares something to say" true
+    (Deprecations.messages declared.bondi_server <> []);
+  check (list string) "what deploy says is what the declared fields say"
+    (Deprecations.messages declared.bondi_server)
+    (Deploy.deprecation_notices declared);
+  check (list string) "a configuration declaring neither says nothing" []
+    (Deploy.deprecation_notices (Client_fixtures.mk_config ()))
+
 let () =
   run "Deploy_helpers"
     [
@@ -844,6 +867,11 @@ let () =
         [
           test_case "includes logs flag" `Quick
             test_deploy_payload_includes_logs_flag;
+        ] );
+      ( "deprecation notices",
+        [
+          test_case "a declared api_token reaches deploy's output" `Quick
+            test_a_declared_api_token_reaches_deploys_output;
         ] );
       ( "the exec a deploy runs",
         [

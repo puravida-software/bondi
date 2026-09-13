@@ -11,7 +11,15 @@
 # gets pushed, not a local rebuild of the same Dockerfile:
 #
 #   1. the binary resolves every shared library it links
-#   2. a container from it answers its health endpoint
+#   2. the packaged binary runs: `bondi-server check`, entered into a container
+#      started from the image, writes its readiness document to stdout
+#
+# The second assertion asks liveness and not readiness, and the difference is
+# the whole of why it reads the document rather than the exit status. No Docker
+# socket is mounted here, so the socket probe fails and `check` exits the
+# not-ready code on a perfectly good image. What a broken image cannot do is
+# produce the document at all: a binary the musl loader stops before main writes
+# nothing, which is the defect this script exists to catch.
 #
 # Usage: scripts/verify-server-image.sh IMAGE[:TAG]
 
@@ -25,13 +33,12 @@ fi
 image="$1"
 binary=/usr/local/bin/bondi-server
 container="bondi-server-verify-$$"
-host_port="${BONDI_VERIFY_PORT:-33030}"
-container_port=3030
-health_path=/api/v1/health
 attempts=30
+work="$(mktemp -d)"
 
 cleanup() {
     docker rm --force "$container" > /dev/null 2>&1 || true
+    rm -rf "$work"
 }
 trap cleanup EXIT
 
@@ -51,18 +58,26 @@ fi
 echo "$ldd_output"
 
 echo "==> $image: starting a container"
-docker run -d --name "$container" -p "127.0.0.1:$host_port:$container_port" \
-    "$image" > /dev/null
+# No published port: nothing this script asks of the container is asked over a
+# socket, and a port bound on the host is a collision waiting for two releases
+# built at once.
+docker run -d --name "$container" "$image" > /dev/null
 
-echo "==> $image: waiting for GET $health_path"
+echo "==> $image: running $binary check inside it"
 attempt=0
+ran=false
 while [ "$attempt" -lt "$attempts" ]; do
-    if curl -fsS -o /dev/null "http://127.0.0.1:$host_port$health_path"; then
-        echo "ok: $image answered $health_path"
-        exit 0
+    # The exit status is not the question -- a passing `check` exits 0 and a
+    # socket-less one exits the not-ready code, and both mean the binary ran --
+    # so it is discarded here and the document is what is looked at. Retried
+    # because `docker run -d` returns before the container is necessarily
+    # accepting execs, and only while the container is still up.
+    docker exec "$container" "$binary" check \
+        > "$work/stdout" 2> "$work/stderr" || true
+    if [ -s "$work/stdout" ]; then
+        ran=true
+        break
     fi
-    # A container that has already exited will not start answering. Reporting
-    # that in a second beats waiting out the full timeout to say the same thing.
     if [ "$(docker inspect -f '{{.State.Running}}' "$container" 2> /dev/null)" != "true" ]; then
         break
     fi
@@ -70,12 +85,34 @@ while [ "$attempt" -lt "$attempts" ]; do
     sleep 1
 done
 
-{
-    echo "error: a container from $image did not answer $health_path"
-    docker inspect \
-        --format 'status={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{.State.Error}}' \
-        "$container" 2>&1 || true
-    echo "--- container logs ---"
-    docker logs "$container" 2>&1 || true
-} >&2
-exit 1
+report_failure() {
+    {
+        echo "error: $1"
+        echo "--- check stdout ---"
+        cat "$work/stdout" 2>&1 || true
+        echo "--- check stderr ---"
+        cat "$work/stderr" 2>&1 || true
+        docker inspect \
+            --format 'status={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{.State.Error}}' \
+            "$container" 2>&1 || true
+        echo "--- container logs ---"
+        docker logs "$container" 2>&1 || true
+    } >&2
+    exit 1
+}
+
+if [ "$ran" != true ]; then
+    report_failure "$binary check wrote nothing in a container from $image"
+fi
+
+# A non-empty stdout is not on its own the document: the assertion is held to
+# naming a probe the binary actually took, so a subcommand reduced to printing
+# anything at all does not satisfy it.
+if ! grep -qF -- '"probes"' "$work/stdout"; then
+    report_failure "$binary check wrote no readiness document in a container from $image"
+fi
+if ! grep -qF -- '"docker_socket"' "$work/stdout"; then
+    report_failure "$binary check took no docker_socket probe in a container from $image"
+fi
+
+echo "ok: $image ran $binary check and it reported its probes"

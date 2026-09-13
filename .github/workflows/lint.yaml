@@ -21,17 +21,26 @@ jobs:
     if: "!github.event.pull_request.draft"
 
     steps:
-      - name: Checkout tree
-        uses: actions/checkout@v6
-      - name: Set-up OCaml
-        uses: ocaml/setup-ocaml@v3
+      - uses: actions/checkout@v6
+      - uses: extractions/setup-just@v3
         with:
-          ocaml-compiler: 5.3.0
-          dune-cache: true
-          cache-prefix: v1
+          just-version: '1.46.0'
+      - uses: ./.github/actions/ocaml-deps
+      # ocaml-deps, not a bare setup-ocaml: `just lint-doc` builds `@doc-new`,
+      # which compiles every module in the tree, so the project's own
+      # dependencies have to be in the switch. [observed -- 2026-09-13, dune
+      # 3.20.2: the build produced an .odoc for every module of every local
+      # library under _build/default/_doc_new/odoc/local/bondi; that those
+      # modules cannot compile with their dependencies absent is assumed.]
+      # The floor on odoc is the `@doc-new` alias: it is the odoc-3 driver
+      # and does not exist under odoc 2.
       - name: Install dependencies
-        run: opam install -y odoc
-      - uses: ocaml/setup-ocaml/lint-doc@v3
+        run: opam install -y "odoc>=3.1.0"
+      # The recipe, not ocaml/setup-ocaml/lint-doc: that action runs `dune build
+      # @doc`, which on this dune/odoc pair reports no unresolved reference at
+      # all. Running the recipe keeps CI and the local gate the same gate.
+      - name: Check documentation references resolve
+        run: just lint-doc
 
   lint-fmt:
     runs-on: ubuntu-latest

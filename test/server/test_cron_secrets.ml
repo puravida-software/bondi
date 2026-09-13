@@ -86,8 +86,9 @@ let test_run_file_is_env_sibling () =
 
 (* The name check runs before any I/O, which is why the rejection arm needs no
    filesystem. The second assertion is the one that matters for a secret: the
-   error names a path and never the payload, because this text is returned over
-   HTTP and mailed by cron, and the payload is what the file exists to hide. *)
+   error names a path and never the payload, because this text is returned to
+   whoever ran the subcommand and mailed by cron, and the payload is what the
+   file exists to hide. *)
 let test_write_run_file_refuses_unsafe_name () =
   match
     Cron_secrets.write_run_file ~name:"../../etc/cron.d/evil"

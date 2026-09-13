@@ -142,8 +142,9 @@ let managed_containers_of (containers : Docker.Client.container list) =
 
    The report names how many entries could not be read and where they sit, and
    never the entries themselves. A legacy line is the job's whole payload,
-   credentials included, and this text is returned over HTTP, mailed by cron and
-   shipped off the box with the diagnostics stream; a position is enough to go
+   credentials included, and this text is returned to whoever ran the
+   subcommand, mailed by cron and shipped off the box with the diagnostics
+   stream; a position is enough to go
    and look. *)
 let cron_state_of_listing (entries : Crontab.listed_job list) :
     Crontab.scheduled_job list * string option =
@@ -338,23 +339,20 @@ let gather ~client ~net ~clock ~(service_name : string option) : status_context
     managed_error;
   }
 
-(* The whole of what the endpoint decides, with no transport named. Ported
-   from the route body: gather, plan, and narrate the per-subsystem warnings
-   the plan collected.
+(* The whole decision, with no transport named: gather, plan, and narrate the
+   per-subsystem warnings the plan collected.
 
-   The catch-all is the route's former [Lwt.catch], moved here so the caller is
-   handed a value instead of an escaping exception. It stays a catch-all rather
-   than filtering [Stdlib.Exit]: nothing on this path calls [exit], and
-   narrowing it would answer a raised [Exit] differently than this endpoint
-   answers it today. [Eio.Cancel.Cancelled] is different, and it is the
-   boundary move that makes it so: the old catch sat outside
-   [Lwt_eio.run_eio], where a cancelled fiber had already been converted before
-   it could be seen, while this one runs inside that fiber. Absorbing it there
-   would let a cancelled status report return normally and break structured
-   concurrency, so it is re-raised rather than classified. A subsystem that merely failed does not come through here
-   at all -- those are collected as values into [errors] and returned with
-   whatever else could be read, because a status that reports nothing is worse
-   than a status that reports what it could not reach. *)
+   The catch-all is here so the caller is handed a value instead of an escaping
+   exception. It stays a catch-all rather than filtering [Stdlib.Exit]: nothing
+   on this path calls [exit], and narrowing it would answer a raised [Exit]
+   differently than this function answers it today. [Eio.Cancel.Cancelled] is
+   different, because this catch runs inside the fiber that would be cancelled:
+   absorbing it would let a cancelled status report return normally and break
+   structured concurrency, so it is re-raised rather than classified. A
+   subsystem that merely failed does not come through here at all -- those are
+   collected as values into [errors] and returned with whatever else could be
+   read, because a status that reports nothing is worse than a status that
+   reports what it could not reach. *)
 let report ~client ~net ~clock ~(service_name : string option) :
     (comprehensive_status, Handler_error.t) result =
   try
@@ -367,19 +365,3 @@ let report ~client ~net ~clock ~(service_name : string option) :
   with
   | Eio.Cancel.Cancelled _ as cancelled -> raise cancelled
   | exn -> Error (Handler_error.Orchestrator_failure (Printexc.to_string exn))
-
-let route ~client ~net ~clock =
-  Dream.get "/status" @@ fun req ->
-  let open Lwt.Infix in
-  let service_name = Dream.query req "service" in
-  (Lwt_eio.run_eio @@ fun () -> report ~client ~net ~clock ~service_name)
-  >>= function
-  | Ok status ->
-      status
-      |> comprehensive_status_to_yojson
-      |> Yojson.Safe.to_string
-      |> Dream.json
-  | Error err ->
-      Dream.respond
-        ~status:(Handler_error.http_status err)
-        (Handler_error.message err)

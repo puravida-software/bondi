@@ -40,10 +40,10 @@ type observation = { probe : probe; outcome : (unit, string) result }
 (** One probe and what it saw.
 
     The [Error] payload is the reason, phrased by whoever ran the probe. It
-    reaches the operator's terminal, an HTTP response and the container log, so
-    it names paths and conditions and never a value taken from a payload --
-    payloads carry environment variables and sink URLs that may embed
-    credentials. *)
+    reaches the operator's terminal, the caller's own error stream and the
+    container log, so it names paths and conditions and never a value taken from
+    a payload -- payloads carry environment variables and sink URLs that may
+    embed credentials. *)
 
 (** The decision drawn from a set of observations.
 

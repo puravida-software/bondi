@@ -9,10 +9,14 @@
 # rejects it.
 #
 # The wrapper leaves every other path alone, and in particular leaves the
-# no-argument path serving HTTP. That is deliberate: an image that failed to
-# start would be rejected by the first assertion, which the sibling script
-# already covers, and would say nothing about whether the per-subcommand
-# assertions can fail.
+# no-argument path idling, so the container the sibling check starts still comes
+# up and every one of its assertions is still reached. That is deliberate: an
+# image that failed to start would be refused before any per-subcommand
+# assertion ran -- by the barrier `start_container` waits on, and then by
+# assertion 1, `status` -- and whether the packaged binary starts at all is the
+# question `verify-server-image.sh` already asks. Neither would say anything
+# about whether the per-subcommand assertions can fail, which is this script's
+# only question.
 #
 # Usage: scripts/check-server-image-negative.sh IMAGE[:TAG]
 

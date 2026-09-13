@@ -21,7 +21,6 @@ listing.
   >     echo 'Connection closed by 10.0.0.1 port 22' >&2
   >     exit 255 ;;
   >   *'/var/spool/cron/crontabs/root'*) echo BONDI_CRONTAB_ABSENT ;;
-  >   *'PortBindings'*) echo '127.0.0.1' ;;
   >   # The payload directory the crontab section is compared against. Without
   >   # this arm the command falls through to *) and answers nothing, which is a
   >   # listing that never happened rather than a directory that is empty -- and

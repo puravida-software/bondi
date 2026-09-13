@@ -65,7 +65,7 @@ val severity_of_exit_code : severity_map -> int -> severity
 
 val severity_of_outcome : severity_map -> outcome -> severity
 (** Classify a run outcome. [Start_failed] is always [Failure] and ignores the
-    map (FR-2); [Exited n] consults {!severity_of_exit_code}. *)
+    map; [Exited n] consults {!severity_of_exit_code}. *)
 
 type sink
 (** A validated https POST target. Abstract: built only through
@@ -113,7 +113,7 @@ type payload
 (** The generic, consumer-agnostic alert body. Abstract: built only by {!plan},
     so every payload reflects a real dispatch decision. Encodes the job name,
     severity, exit code and timestamp — nothing sink-specific and no secret
-    material (FR-7). *)
+    material. *)
 
 val payload_to_yojson : payload -> Yojson.Safe.t
 (** Encode the alert payload as JSON, ready to POST. *)
@@ -131,6 +131,6 @@ val plan :
 (** Plan the alert for a run outcome. Returns [None] when the severity is
     [Success] or when the matched alerting severity has no configured sinks, so
     a severity with no sink emits nothing rather than falling back to an implied
-    target (NFR-2). Otherwise returns the sinks for the matched severity and a
-    payload carrying [job], the severity, the exit code (absent for
-    [Start_failed]) and [timestamp]. *)
+    target. Otherwise returns the sinks for the matched severity and a payload
+    carrying [job], the severity, the exit code (absent for [Start_failed]) and
+    [timestamp]. *)

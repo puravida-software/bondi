@@ -36,7 +36,6 @@ succeed, so the run reaches the install rather than stopping earlier.
   >   # which setup reads as a host that could not be asked, and the run stops
   >   # in the ACME phase -- before the convergence this file now asserts.
   >   *BONDI_ACME_PRESENT*) echo BONDI_ACME_PRESENT ;;
-  >   *'PortBindings'*) echo '127.0.0.1' ;;
   >   # The restart-policy reading the run takes after it has started the
   >   # container. This box reports the policy setup asked for, so the reading
   >   # is the whole of the convergence: nothing is corrected, and the count

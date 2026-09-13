@@ -46,7 +46,6 @@ consulted, and a source whose answer could not be read.
   >     echo "0 6 * * * curl -s -X POST -d '{\"job\":\"daily-close\",\"secret\":\"s3cr3t\"}' http://127.0.0.1:3030/api/v1/run"
   >     echo '# END BONDI CRON'
   >     echo BONDI_CRONTAB_END ;;
-  >   *'PortBindings'*) echo '127.0.0.1' ;;
   >   # The payload directory, holding daily-close's two files. The section above
   >   # names no job -- its one entry is a shape the reader no longer understands
   >   # -- so this is a job whose files are on the box with no line firing them,

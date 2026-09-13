@@ -15,9 +15,10 @@
     alone: {!status_of}. [check] answers a diagnosis of the box, whose failing
     form is the one a program acts on, so it writes its document on both arms:
     {!diagnostic_of}. Both leave a failure through {!fail}, which is where the
-    message, the stream it lands on and the code it returns are decided once --
-    and is why [serve], which has no document of any kind, needs no copy of that
-    write of its own.
+    message, the stream it lands on and the code it returns are decided once. It
+    is exported because it is that shared decision and is asserted directly as
+    one: a change to the message, the terminator, the stream or the code is then
+    a change in one place rather than a change per arm that one arm misses.
 
     The streams are this process's own, not parameters. The caller is a shell
     reading file descriptors 1 and 2, so a signature taking streams would be a
@@ -39,10 +40,9 @@ val emit : Yojson.Safe.t -> unit
 (** Write one JSON value to standard output and flush it.
 
     Exactly the bytes [Yojson.Safe.to_string] produces, with nothing appended --
-    no trailing newline. A subcommand's stdout is the same bytes the
-    corresponding route puts in its response body, produced by the same encoder,
-    because two callers of one decision that disagree on its representation are
-    two decisions. *)
+    no trailing newline. The encoder is the one the body's own answer type
+    carries, never a second rendering written here, because two callers of one
+    decision that disagree on its representation are two decisions. *)
 
 val fail : Handler_error.t -> int
 (** [fail error] writes {!Handler_error.message} of [error] and a newline to
@@ -50,20 +50,19 @@ val fail : Handler_error.t -> int
     same value.
 
     It writes standard error and nothing else, which is what lets a caller with
-    no JSON answer use it: serving successfully produces no document, and a
-    failure path that went through {!status_of} would have to invent an encoder
-    for a value that does not exist. Every failing subcommand -- and the serve
-    action, which is not one -- leaves its message through this one function, so
-    a prefix, a severity marker or a change of terminator is one change rather
-    than a change per caller that one caller misses.
+    no JSON answer use it: a failure path that went through {!status_of} would
+    have to invent an encoder for a value that does not exist. Both arms that
+    can fail -- {!status_of}'s and {!diagnostic_of}'s -- leave their message
+    through this one function, so a prefix, a severity marker or a change of
+    terminator is one change rather than a change per caller that one caller
+    misses.
 
     No mapping of its own is introduced here: the code is
-    {!Handler_error.exit_code} applied to the class that also chose the HTTP
-    status. {!Handler_error.message}'s contract holds unchanged -- the text
-    never echoes a value taken from the rejected payload -- and writing it to a
-    local stream rather than an HTTP response does not relax that, since the
-    stream is read by whoever ran the subcommand and, for a cron line, mailed.
-*)
+    {!Handler_error.exit_code} applied to the class the body returned.
+    {!Handler_error.message}'s contract holds unchanged: the text never echoes a
+    value taken from the rejected payload. The stream is read by whoever ran the
+    subcommand and, for a cron line, mailed, so that contract is what keeps a
+    credential out of an operator's scrollback and out of the mail. *)
 
 val status_of :
   ('a, Handler_error.t) result -> encode:('a -> Yojson.Safe.t) -> int
@@ -72,11 +71,11 @@ val status_of :
     or the failure's {!Handler_error.message} on standard error and
     {!Handler_error.exit_code} for an [Error].
 
-    The code comes from {!Handler_error.exit_code} applied to the same variant
-    that chose the HTTP status, and this function introduces no mapping of its
-    own. That is the whole mechanism: a failure class added to the variant makes
-    both answers get picked together instead of one of them being defaulted
-    inside whichever caller returned it first.
+    The code comes from {!Handler_error.exit_code} applied to the class the body
+    returned, and this function introduces no mapping of its own. That is the
+    whole mechanism: a failure class added to the variant is given its number
+    where the variant is, instead of having one defaulted inside whichever
+    caller returned it first.
 
     It returns the code rather than calling [exit], and the distinction is not
     stylistic: [Stdlib.exit] terminates the process where it stands, so an exit
@@ -97,9 +96,8 @@ val status_of :
 
     The two streams are never both written, so nothing here can interleave them.
     {!Handler_error.message}'s contract holds unchanged: the text never echoes a
-    value taken from the rejected payload, and writing it to a local stream
-    rather than an HTTP response does not relax that -- the stream is read by
-    whoever ran the subcommand and, for a cron line, mailed. *)
+    value taken from the rejected payload -- the stream is read by whoever ran
+    the subcommand and, for a cron line, mailed. *)
 
 val diagnostic_of :
   (unit, Handler_error.t) result -> document:Yojson.Safe.t -> int

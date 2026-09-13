@@ -19,12 +19,9 @@
   test_traefik_config
   test_restart_policy
   test_alert_delivery
-  test_auth
-  test_server_config
   test_cron_secrets
   test_handler_error
   test_diagnostics
-  test_health
   test_readiness
   test_readiness_probes
   test_cmd_io
@@ -42,12 +39,9 @@
   test_traefik_config
   test_restart_policy
   test_alert_delivery
-  test_auth
-  test_server_config
   test_cron_secrets
   test_handler_error
   test_diagnostics
-  test_health
   test_readiness
   test_readiness_probes
   test_cmd_io
@@ -57,9 +51,9 @@
   bondi.client
   bondi.common
   bondi.server
-  dream
   eio
   eio.mock
+  mirage-crypto-rng
   server_test_helpers
   test_helpers
   unix

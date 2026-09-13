@@ -11,9 +11,9 @@ Dead simple deployment tool for Dockerized services.
 Bondi is both a server and a CLI.
 
 The server:
-- runs the deployments the CLI sends it over SSH, and listens for deployments on its API
+- runs the deployments the CLI sends it over SSH
 - pulls the Docker image and runs it
-- exposes a web UI for managing the server
+- manages Traefik for TLS and routing, the host's cron entries, and an optional log-shipping sidecar
 
 The CLI:
 - installs Docker on the server if the server reports it is not installed — a
@@ -95,7 +95,7 @@ A cron job can classify each run's exit code into a `success`, `failure`, or `cr
 
 Server images `0.8.2`, `0.9.0`, `0.10.0` and `0.10.1` cannot start. The binary they package links `libzstd.so.1`, which those images do not ship, so the loader aborts before the server runs and the container exits `127`. `latest` pointed at a broken image until the first release after this fix; if you installed it before then, treat it as broken too.
 
-The symptom is a host with nothing listening on port `3030`. Scheduled jobs are the loudest casualty: every crontab line Bondi writes goes through the orchestrator — the current shape `docker exec`s into it, and the legacy shape still in the estate POSTs to it — so none of them can run.
+The symptom is a host with no orchestrator container running: it exits `127` the moment it is started, and a `bondi setup` against such an image fails instead of reporting success. Scheduled jobs are the loudest casualty: every crontab line Bondi writes goes through the orchestrator — the current shape `docker exec`s into it, and the legacy shape still in the estate POSTs to it, which on a box running a current orchestrator fails at the connection whatever curl the host has, because a current image serves nothing and no orchestrator `bondi setup` creates publishes a port — so none of them can run.
 
 Check what a server is running:
 
@@ -110,7 +110,7 @@ sed -i 's/^  version: .*/  version: 0.8.1/' bondi.yaml
 bondi setup
 ```
 
-`bondi setup` now verifies that the orchestrator can actually serve before reporting success: it waits for the container to reach a running state, runs `bondi-server check` inside it, and requires the marker that check writes to come back out of the container's log stream. A version that cannot start fails the command with the container's exit code and logs instead of printing success.
+`bondi setup` now verifies that the orchestrator is actually ready before reporting success: it waits for the container to reach a running state, runs `bondi-server check` inside it, and requires the marker that check writes to come back out of the container's log stream. A version that cannot start fails the command with the container's exit code and logs instead of printing success.
 
 ## Available Commands
 
@@ -122,16 +122,16 @@ bondi setup
 ## Server Commands
 
 The orchestrator image's entrypoint is the `bondi-server` binary, and that binary
-is a command group. Run with no command it serves the HTTP API — which is what
-`bondi setup` starts on your server — and the other subcommands answer the same
-questions without an HTTP request. `bondi deploy` and `bondi status` reach a box
-through them over SSH, and so can an operator who is already on it:
+is a command group. Run with no command — which is how `bondi setup` starts it on
+your server — it idles, so the container stays up and there is something for the
+subcommands to run inside. Every question Bondi answers about a box it answers
+through one of them: `bondi deploy` and `bondi status` run them over SSH, and so
+can an operator who is already on it:
 
 ```bash
 ssh YOUR_USER@YOUR_SERVER -- 'docker exec -i bondi-orchestrator bondi-server status'
 ```
 
-- `bondi-server serve` - Serve the HTTP API. Also what running the binary with no command does.
 - `bondi-server deploy` - Deploy the payload read on standard input, and write its cron jobs.
 - `bondi-server run` - Run the one cron job described by the payload on standard input.
 - `bondi-server status [--service=NAME]` - Report what this box is running, as JSON on standard output.
@@ -143,13 +143,13 @@ carry registry credentials and the service's environment variables. `status`
 takes a service selector and `check` takes whether the deployment configures
 cron; neither is a credential, so both are ordinary flags.
 
-`status` writes the same bytes the `GET /api/v1/status` route writes, produced by
-the same encoder — the subcommands are a second caller of the server's decisions,
-not a second implementation of them.
+`status` writes the document `bondi status` renders its table from, produced by
+the server's own encoder — one implementation of the question and one encoding of
+its answer, whether you ask from your laptop or from the box itself.
 
-`check` is the readiness question the `health` endpoint was standing in for. It
-connects to the Docker socket, creates and removes a file in the crontab spool
-when `--cron-configured` is given, writes a marker line to the diagnostic sink,
+`check` is how you ask a box whether it is ready. It connects to the Docker
+socket, creates and removes a file in the crontab spool when
+`--cron-configured` is given, writes a marker line to the diagnostic sink,
 and — again only with `--cron-configured` — compares the Bondi section of the
 host's crontab against the cron payload directory, reporting a line that fires a
 job whose payload files are gone or a job whose files no line fires. It then

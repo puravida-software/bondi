@@ -26,14 +26,10 @@
    (>= 3.10.0))
   (ppx_deriving
    (>= 6.1.1))
-  (lwt_ppx
-   (>= 5.9.3))
   (alcotest
    (and
     (>= 1.9.1)
     :with-test))
-  (dream
-   (>= 1.0.0~alpha8))
   (cohttp
    (>= 6.2.1))
   (cohttp-eio
@@ -44,16 +40,14 @@
    (>= 2.1.1))
   (ca-certs
    (>= 1.0.3))
+  (mirage-crypto-rng
+   (>= 1.2.0))
   (domain-name
    (>= 0.5.0))
   (eio
    (>= 1.3))
   (eio_main
    (>= 1.3))
-  (lwt
-   (>= 5.9.2))
-  (lwt_eio
-   (>= 0.5.1))
   (mustache
    (>= 3.3.0))
   (yaml

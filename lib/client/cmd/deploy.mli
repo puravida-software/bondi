@@ -224,5 +224,16 @@ val deploy_servers :
     them. Every server is still attempted, because a box that has already been
     deployed to is not made better by abandoning the next. *)
 
+val deprecation_notices : Config_file.t -> string list
+(** [deprecation_notices config] is what this command says about fields [config]
+    declares that Bondi still parses and no longer acts on.
+
+    A value rather than a print inside the command's own body, for the reason
+    {!cron_divergence_report} is one: which commands say this is a property of
+    the call sites, and [run] reads a file from the working directory and exits,
+    so nothing about it can be asked what it would have said. The sentences
+    themselves are {!Deprecations}'s; what is decided here is only that this
+    command asks, and asks about the configuration it was handed. *)
+
 val cmd : unit Cmdliner.Cmd.t
 (** The command as [bondi deploy]. *)

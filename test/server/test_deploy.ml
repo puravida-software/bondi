@@ -261,24 +261,25 @@ let test_cron_plan_rejects_every_unknown_network () =
     [ "backup"; "bondi-netwrok"; "report"; "reporting-net" ]
 
 (* A network name bondi does not manage is a value the operator wrote, so the
-   endpoint answers 400 rather than reporting the operator's typo as a bondi
-   fault. This is the classification the sibling /run endpoint already uses. *)
-let test_deploy_status_for_invalid_request () =
+   failure is classified as the caller's mistake rather than as a bondi fault.
+   The exit code is where an operator meets that classification, so it is what
+   the classification is asserted through. This is the classification the
+   sibling run command already uses. *)
+let test_deploy_exit_code_for_invalid_request () =
   let cron =
     cron_job_on_network ~name:"backup" ~network:(Some "bondi-netwrok")
   in
   let input = { minimal_input with cron_jobs = Some [ cron ] } in
   let err = plan_error ~context:"job on an unmanaged network" input in
-  Alcotest.check Alcotest.int "declared-network rejection answers 400" 400
-    (Dream.status_to_int (Handler_error.http_status err))
+  Alcotest.check Alcotest.int "declared-network rejection exits 2" 2
+    (Handler_error.exit_code err)
 
-(* The affirmative arm for the test above: without it, a classifier that
-   answered 400 for everything would pass. *)
-let test_deploy_status_for_orchestrator_failure () =
-  Alcotest.check Alcotest.int "an orchestrator fault answers 500" 500
-    (Dream.status_to_int
-       (Handler_error.http_status
-          (Handler_error.Orchestrator_failure "docker daemon unreachable")))
+(* The affirmative arm for the test above: without it, a classifier that called
+   every failure the caller's mistake would pass. *)
+let test_deploy_exit_code_for_orchestrator_failure () =
+  Alcotest.check Alcotest.int "an orchestrator fault exits 1" 1
+    (Handler_error.exit_code
+       (Handler_error.Orchestrator_failure "docker daemon unreachable"))
 
 (* The affirmative arm above with the network field removed — a job declaring
    none plans exactly what it planned before the network check existed. *)
@@ -314,8 +315,8 @@ let test_cron_plan_refuses_an_unsafe_job_name () =
     }
   in
   let err = plan_error ~context:"a job named out of its directory" input in
-  Alcotest.check Alcotest.int "an unsafe job name answers 400" 400
-    (Dream.status_to_int (Handler_error.http_status err));
+  Alcotest.check Alcotest.int "an unsafe job name exits 2" 2
+    (Handler_error.exit_code err);
   let msg = Handler_error.message err in
   Alcotest.check Alcotest.bool
     ("error names the offending job: " ^ msg)
@@ -788,12 +789,12 @@ let () =
           Alcotest.test_case "upsert carries every declared job" `Quick
             test_cron_plan_upsert_carries_every_declared_job;
         ] );
-      ( "failure status",
+      ( "failure classification",
         [
           Alcotest.test_case "invalid request" `Quick
-            test_deploy_status_for_invalid_request;
+            test_deploy_exit_code_for_invalid_request;
           Alcotest.test_case "orchestrator failure" `Quick
-            test_deploy_status_for_orchestrator_failure;
+            test_deploy_exit_code_for_orchestrator_failure;
         ] );
       ( "cron job wire shape",
         [

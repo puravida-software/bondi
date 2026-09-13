@@ -56,7 +56,7 @@ let test_severity_unmapped_nonzero_failure () =
     (A.severity_of_exit_code critical_42 99)
 
 let test_severity_start_failure_failure () =
-  (* FR-2: an orchestrator start failure has no exit code and is failure
+  (* An orchestrator start failure has no exit code and is failure
      regardless of the per-job map. *)
   check severity "start failure is failure under the default map" A.Failure
     (A.severity_of_outcome A.default_severity_map (A.Start_failed "pull failed"));

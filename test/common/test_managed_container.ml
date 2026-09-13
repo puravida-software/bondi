@@ -440,7 +440,7 @@ let test_run_args_omits_absent_options () =
     [ "--network"; "-p"; "--env-file" ]
 
 let test_run_args_never_carries_a_secret_value () =
-  (* FR-2: a credential reaching argv is visible in ps on the server. *)
+  (* A credential reaching argv is visible in ps on the server. *)
   List.iter
     (fun arg ->
       check bool

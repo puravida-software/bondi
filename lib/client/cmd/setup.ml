@@ -170,96 +170,50 @@ let orchestrator_ps_command =
 (* Orchestrator run command (pure, testable)                                  *)
 (* ------------------------------------------------------------------------- *)
 
-(* The publish address is the security boundary for this API, and nothing else
-   is. The orchestrator mounts the host Docker socket, so reaching it is
-   equivalent to root on the box; -p 3030:3030 published that to the internet
-   on every host bondi has ever set up.
+(* The orchestrator publishes no port. It serves nothing over the network: every
+   Bondi command reaches it by running its subcommands inside its container over
+   SSH, and cron reaches it the same way, through `docker exec` from the host's
+   crontab. A published port would be a socket nobody listens on, and the
+   address it was published on used to be this container's whole security
+   boundary -- the socket it mounts is equivalent to root on the box.
 
-   Default 127.0.0.1. Cron is unaffected -- lib/server/crontab.ml calls
-   http://localhost:3030 from the host, which is the published mapping. Bondi's
-   own commands do not use the port at all: they run the orchestrator's
-   subcommands inside its container over SSH, so no client needs this address
-   to be reachable from anywhere but the box.
-
-   Non-loopback is allowed but not unauthenticated: without api_token the API
-   is open, and an open API on a public address is remote root. Refusing here
-   is the point -- a warning would be scrolled past and the box would sit
-   exposed, which is exactly how this shipped. *)
-let orchestrator_bind_address (config : Config_file.t) =
-  Option.value config.bondi_server.bind_address ~default:"127.0.0.1"
-
+   `bondi_server.bind_address` and `bondi_server.api_token` are still parsed, so
+   that a box declaring either can still be read, and neither reaches this
+   command. Declaring one is reported to the operator where the configuration is
+   acted on; see Deprecations. *)
 let orchestrator_run_command ~cron_payload_needed (config : Config_file.t) :
-    (string, string) result =
-  let bind = orchestrator_bind_address config in
-  if
-    (not (Bondi_common.Net.is_loopback bind))
-    && config.bondi_server.api_token = None
-  then
-    Error
-      (Printf.sprintf
-         "bondi_server.bind_address is %s, which is reachable from outside \
-          this host, and bondi_server.api_token is not set. The orchestrator \
-          mounts the host Docker socket, so an unauthenticated public bind is \
-          remote root on this machine. Either remove bind_address (defaults to \
-          127.0.0.1 and is reached with: ssh -N -L 3030:127.0.0.1:3030 \
-          root@<box>), or set api_token."
-         bind)
-  else
-    let volume_mounts, user_flag =
-      (* The payload directory is mounted from the host because a job's
-         definition has to outlive the container. A version bump stops, removes
-         and re-runs the orchestrator by design, and in the writable layer that
-         deletes every job's run.json while its exec line stays in the crontab —
-         every job on the box then fails at its next fire. Both sides name the
-         same path so the mount and Cron_secrets agree on where a job's files
-         are.
+    string =
+  let volume_mounts, user_flag =
+    (* The payload directory is mounted from the host because a job's
+       definition has to outlive the container. A version bump stops, removes
+       and re-runs the orchestrator by design, and in the writable layer that
+       deletes every job's run.json while its exec line stays in the crontab —
+       every job on the box then fails at its next fire. Both sides name the
+       same path so the mount and Cron_secrets agree on where a job's files are.
 
-         Whether this host needs the directory is [cron_payload_needed]'s
-         answer, and it is the same answer that plans the copy out of the old
-         container. Read from the configuration here and from the host's crontab
-         there, the two disagreed on exactly the box the copy exists for: the
-         files landed on a host the replacement container could not see, and the
-         listing — which reads the host — reported every job as holding its
-         own. *)
-      if cron_payload_needed then
-        ( " -v /var/spool/cron/crontabs:/var/spool/cron/crontabs -v \
-           /etc/bondi/cron:/etc/bondi/cron",
-          " --user root" )
-      else ("", "")
-    in
-    let token_env =
-      match config.bondi_server.api_token with
-      | Some t -> " -e BONDI_API_TOKEN=" ^ Filename.quote t
-      | None -> ""
-    in
-    let image = "mlopez1506/bondi-server:" ^ config.bondi_server.version in
-    (* No --rm: a container that dies on startup erases itself under it, leaving
-       no container, no logs and no error for either the operator or the
-       readiness check. *)
-    Ok
-      (Printf.sprintf
-         "docker run -d --name %s --restart %s -p %s:3030:3030 -v \
-          /var/run/docker.sock:/var/run/docker.sock%s%s%s --group-add $(stat \
-          -c %%g /var/run/docker.sock) --label bondi.managed=true --label \
-          bondi.type=infrastructure --label bondi.logs=true %s"
-         Builtin_container.orchestrator
-         Bondi_common.Defaults.bondi_restart_policy bind volume_mounts user_flag
-         token_env image)
-
-(* What the host reports its published binding as, so setup can check that what
-   it asked for is what it got rather than assuming the run command took. *)
-let orchestrator_port_command =
+       Whether this host needs the directory is [cron_payload_needed]'s answer,
+       and it is the same answer that plans the copy out of the old container.
+       Read from the configuration here and from the host's crontab there, the
+       two disagreed on exactly the box the copy exists for: the files landed on
+       a host the replacement container could not see, and the listing — which
+       reads the host — reported every job as holding its own. *)
+    if cron_payload_needed then
+      ( " -v /var/spool/cron/crontabs:/var/spool/cron/crontabs -v \
+         /etc/bondi/cron:/etc/bondi/cron",
+        " --user root" )
+    else ("", "")
+  in
+  let image = "mlopez1506/bondi-server:" ^ config.bondi_server.version in
+  (* No --rm: a container that dies on startup erases itself under it, leaving
+     no container, no logs and no error for either the operator or the readiness
+     check. *)
   Printf.sprintf
-    "docker inspect %s -f '{{range $p, $c := .HostConfig.PortBindings}}{{range \
-     $c}}{{.HostIp}}{{end}}{{end}}'"
-    Builtin_container.orchestrator
-
-let published_binding_matches ~expected output =
-  let got = String.trim output in
-  (* Docker normalises an empty HostIp to "all interfaces". Treat it as 0.0.0.0
-     rather than as agreement with whatever was asked for. *)
-  let got = if got = "" then "0.0.0.0" else got in
-  if got = expected then Ok () else Error got
+    "docker run -d --name %s --restart %s -v \
+     /var/run/docker.sock:/var/run/docker.sock%s%s --group-add $(stat -c %%g \
+     /var/run/docker.sock) --label bondi.managed=true --label \
+     bondi.type=infrastructure --label bondi.logs=true %s"
+    Builtin_container.orchestrator Bondi_common.Defaults.bondi_restart_policy
+    volume_mounts user_flag image
 
 (* What the host reports the orchestrator's applied restart policy as. Docker's
    default is `no`, so a container created before this flag existed, one whose
@@ -754,10 +708,15 @@ let docker_install_verdict_of_probe probe =
    curl invocations using --fail-with-body, they keep firing until each job is
    deployed again, and an older curl rejects that option as unknown. So the
    version is read once at setup time rather than discovered by a job at 3am.
-   The check is deliberately kept on the whole cron path rather than narrowed to
-   hosts observed to hold such a line: setup does not read the crontab, and a
-   gate on its way out does not earn a new read. It goes when the reader for
-   those lines goes.
+
+   What that reading no longer settles is whether those lines run. A current
+   image serves nothing, and no orchestrator this command creates publishes a
+   port, so on a host carrying a current orchestrator a surviving legacy line
+   fails at the connection whatever curl is installed; the version separates nothing, and only re-deploying each job
+   replaces its line. The check is deliberately kept on the whole cron path
+   rather than narrowed to hosts observed to hold such a line: setup does not
+   read the crontab, and a gate on its way out does not earn a new read. It goes
+   when the reader for those lines goes.
 
    That reading is a version string, and a command that never ran has no version
    string in it. Folding the transport's own error into curl's output tells the
@@ -1097,8 +1056,12 @@ let plan (config : Config_file.t) ~(specs : Managed_container.t list)
      starts -- not for the line this bondi writes, which uses no curl, but for
      the lines an older one wrote: those use --fail-with-body, an older curl
      rejects it as unknown, and they go on firing until each job is deployed
-     again. Failing here once beats failing every surviving legacy job at its
-     next tick. *)
+     again. What that check no longer establishes is whether those jobs run. A
+     current image serves nothing, and no orchestrator this command creates
+     publishes a port, so on a host carrying a current orchestrator a surviving
+     legacy line fails at the connection at its next tick whatever curl is
+     installed, and only re-deploying each job replaces its line. The gate is kept unnarrowed for the reason its own module gives,
+     and it goes when the reader for those lines goes. *)
   let cron_curl =
     match config.cron_jobs with
     | Some (_ :: _) -> [ RequireCronCurl ]
@@ -1497,32 +1460,10 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
         Ok ()
     | RunServer ->
         let image = "mlopez1506/bondi-server:" ^ config.bondi_server.version in
-        let* run_cmd = orchestrator_run_command ~cron_payload_needed config in
+        let run_cmd = orchestrator_run_command ~cron_payload_needed config in
         let* _ =
           Remote_exec.command_output_text ?session
             ~timeout_seconds:host_command_seconds ~command:run_cmd server
-        in
-        (* Assert the posture rather than assume the run command took. This is
-           the step whose absence let an undeclared loopback binding be reverted
-           silently on 2026-08-29: the container came back healthy on 0.0.0.0
-           and nothing said the exposure had changed. A readiness probe answers
-           "is it up", which is a different question. *)
-        let expected = orchestrator_bind_address config in
-        let* published =
-          Remote_exec.command_output_text ?session
-            ~timeout_seconds:host_command_seconds
-            ~command:orchestrator_port_command server
-        in
-        let* () =
-          match published_binding_matches ~expected published with
-          | Ok () -> Ok ()
-          | Error got ->
-              Error
-                (Printf.sprintf
-                   "orchestrator published on %s but bondi.yaml asks for %s -- \
-                    refusing to report success on a posture that was not \
-                    applied"
-                   got expected)
         in
         (* [docker run -d] reports that the container was created, which is not
            the same fact as the server being up. Each reading's verdict is a
@@ -2057,12 +1998,27 @@ let setup_and_report ~fetch config (server : Config_file.server) =
         reading;
   }
 
+(** [deprecation_notices config] is what this run says about fields [config]
+    declares that Bondi still parses and no longer acts on.
+
+    A value rather than a call inside [run], so that which commands say this is
+    a property a test can hold: [run] reads a file from the working directory,
+    prints and exits, and nothing about it can be asked what it would have said.
+    The sentences themselves are {!Deprecations}'s. *)
+let deprecation_notices (config : Config_file.t) =
+  Deprecations.messages config.bondi_server
+
 let run () =
   match Config_file.read () with
   | Error message ->
       prerr_endline ("Error reading configuration: " ^ message);
       exit 1
   | Ok config -> (
+      (* Said before the servers are looked at, because it is the file that is
+         being reported on and not the estate: a bondi.yaml that declares a dead
+         field and no server has two things wrong with it and an operator is
+         owed both. *)
+      List.iter print_endline (deprecation_notices config);
       let servers = Config_file.servers config in
       if servers = [] then (
         prerr_endline

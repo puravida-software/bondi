@@ -39,7 +39,7 @@ let capture f =
   Sys.remove err_path;
   (value, written_out, written_err)
 
-(* A stand-in for a route's response encoder. It is a real [Yojson.Safe.t]
+(* A stand-in for a subcommand's answer encoder. It is a real [Yojson.Safe.t]
    producer rather than a constant so that the bytes on stdout are asserted
    against a literal below, not against another call to the same encoder. *)
 let encode service = `Assoc [ ("service", `String service) ]
@@ -86,9 +86,8 @@ let test_a_readiness_failure_exits_with_its_own_code () =
    arms above are its affirmative arm on the same harness: they show the same
    capture producing non-empty stderr, so an implementation that never wrote
    there at all could not pass both. On stdout it is the trailing byte that is
-   pinned: a subcommand writes the same bytes the corresponding route writes in
-   its response body, and a newline the route does not send is a byte the
-   subcommand must not add. *)
+   pinned: a subcommand writes exactly the bytes its encoder produced, and a
+   trailing newline is a byte it must not add. *)
 let test_a_success_writes_the_encoded_value_and_nothing_else () =
   let code, written_out, written_err = status_of (Ok "web") in
   check int "a success exits zero" 0 code;

@@ -121,6 +121,12 @@ jobs:
       # here and not only on the pull request because this is the path that
       # publishes; the estate rolls back to this image.
       - name: Check the image's command surface
+        # The outbound-TLS assertion is opt-in in the script because it reaches
+        # a host this project does not control, and a publish must not fail on
+        # somebody else's network without that being a deliberate choice. This
+        # is the deliberate choice: on the path that publishes, the arm runs.
+        env:
+          BONDI_CHECK_TLS_HANDSHAKE: "1"
         run: just check-server-image "$VERSION"
 
       - name: Push server image

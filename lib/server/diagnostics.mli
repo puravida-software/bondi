@@ -219,19 +219,19 @@ val write_to : sink -> string -> unit
     The duplicate is opened non-blocking, and a write that would have blocked
     drops the line down the same degradation path a refused open takes. The
     hazard that answers is the pipe again: every caller of {!write} in this
-    library is inside a Dream handler or inside [Lwt_eio.run_eio] on the one
-    domain that serves every request -- read at the call sites, all eight of
-    them -- so a blocking write to a sink whose reader (the engine's log driver,
-    or the shipper behind it) has stalled would suspend not just the caller but
-    the server. That last step is reasoned from the call sites and from the
-    single-domain scheduler; no stalled reader was produced to watch it happen,
-    which is why the resolution is the cheap one rather than a measured one.
-    Draining from a domain of its own would keep the line and was not chosen:
-    this module's contract is that a diagnostic is never the operation's
-    outcome, and a write that can stop the server is that outcome under another
-    name, so extending the degradation path already here costs less than a
-    second concept. The line is not lost in any case -- it is on this process's
-    own stderr before the duplicate is attempted.
+    library runs on the one domain the process has -- read at the call sites,
+    all eight of them -- so a blocking write to a sink whose reader (the
+    engine's log driver, or the shipper behind it) has stalled would suspend not
+    just the caller but everything the process had left to do. That last step is
+    reasoned from the call sites and from the single-domain scheduler; no
+    stalled reader was produced to watch it happen, which is why the resolution
+    is the cheap one rather than a measured one. Draining from a domain of its
+    own would keep the line and was not chosen: this module's contract is that a
+    diagnostic is never the operation's outcome, and a write that can stall the
+    process is that outcome under another name, so extending the degradation
+    path already here costs less than a second concept. The line is not lost in
+    any case -- it is on this process's own stderr before the duplicate is
+    attempted.
 
     What no test pins is the flag itself. Producing a sink that would block
     means a fifo whose read end is held open and never drained, and a regression

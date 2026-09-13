@@ -140,8 +140,12 @@ wherever your own repo documents its deployment procedure. At minimum, finish
 every run with:
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3030/api/v1/health   # 204
+ssh YOUR_USER@YOUR_SERVER -- 'docker exec -i bondi-orchestrator bondi-server check'   # exit 0
 ```
 
-Not `/health`, which is 404 — routes live under `Dream.scope "api"` / `"v1"`, and
-the obvious probe reads a live server as dead.
+Read the exit code, not the output: `0` is ready and `3` is not, and the JSON
+verdict is written either way, because the document that names which probe
+failed is the one worth having. The reasons go to standard error beside it. Add
+`--cron-configured` on a host whose deployment declares cron jobs — that is what
+makes `check` also compare the crontab against the payload directory — and leave
+it off otherwise, so the box is not asked about a divergence it cannot have.

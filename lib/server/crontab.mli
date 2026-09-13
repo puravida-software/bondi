@@ -69,11 +69,11 @@ val crontab_spool_dir : string
     cron. *)
 
 val run_payload_of_cron_job : Strategy.Simple.cron_job -> Yojson.Safe.t
-(** The job as the run endpoint's request body: exactly the contents of the file
-    {!entry_of_cron_job}'s line points at, and nothing else. Encoded from the
-    same record the endpoint decodes, so the file cannot carry a field that
-    decoder would reject. The job's [secret_env_vars] are not part of it; those
-    have their own file, written by {!Cron_secrets.write_env_file}. *)
+(** The job as the [run] subcommand's standard input: exactly the contents of
+    the file {!entry_of_cron_job}'s line points at, and nothing else. Encoded
+    from the same record the subcommand decodes, so the file cannot carry a
+    field that decoder would reject. The job's [secret_env_vars] are not part of
+    it; those have their own file, written by {!Cron_secrets.write_env_file}. *)
 
 val entry_of_cron_job : Strategy.Simple.cron_job -> string
 (** Render one cron job as a single crontab line: the job's schedule, then a

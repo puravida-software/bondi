@@ -12,7 +12,9 @@ let test_failure_message_carries_the_diagnostics () =
   let message =
     Probe.failure_message ~ip_address:"46.225.53.162"
       ~image:"mlopez1506/bondi-server:0.10.1"
-      ~reason:"the container did not answer GET /api/v1/health"
+      ~reason:
+        "the box reported it is not in a state to serve: the Docker socket is \
+         not readable"
       ~diagnostics:
         "exited exit=127\n\
          Error loading shared library libzstd.so.1: No such file or directory"

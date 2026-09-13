@@ -1,23 +1,22 @@
-(** [POST /api/v1/deploy] -- move the box to a new image, and write its cron
+(** The [deploy] subcommand -- move the box to a new image, and write its cron
     jobs.
 
-    This is the endpoint that acts on a [bondi.yaml]. It plans the cron half of
-    the request, chooses a deployment strategy, pulls what that strategy needs,
-    converges the reverse proxy's restart policy, rolls the workload forward,
-    and then writes each job's files and the crontab. A request that names no
-    service is a cron-only deploy: it plans, writes the cron half, and touches
-    no workload.
+    This is what acts on a [bondi.yaml]. It plans the cron half of the request,
+    chooses a deployment strategy, pulls what that strategy needs, converges the
+    reverse proxy's restart policy, rolls the workload forward, and then writes
+    each job's files and the crontab. A request that names no service is a
+    cron-only deploy: it plans, writes the cron half, and touches no workload.
 
     The order is not incidental. The cron plan is pure and is refused first, so
     a job declaring a network Bondi does not manage is rejected before the
     service has moved to a new tag; the crontab is written last, so a box whose
     deploy failed is not left firing jobs against an image that is not there.
 
-    Everything below {!route} is exposed for one of two reasons -- it is part of
-    the wire contract, or it is a pure seam the tests reach because the code
-    around it needs a Docker client and an Eio net that a unit test has no
-    business constructing. Nothing here is intended for another module to call
-    in production. *)
+    Everything here besides {!deploy} is exposed for one of two reasons -- it is
+    part of the answer the caller reads, or it is a pure seam the tests reach
+    because the code around it needs a Docker client and an Eio net that a unit
+    test has no business constructing. Nothing here is intended for another
+    module to call in production. *)
 
 type deploy_response = {
   status : string;
@@ -48,8 +47,8 @@ val string_of_deployment_strategy : deployment_strategy -> string
     response reports and what a request declares, so the two cannot drift. *)
 
 val deployment_strategy_of_string : string -> deployment_strategy option
-(** Read the strategy a request declared. [None] for anything else, which the
-    endpoint reports to the caller rather than resolving to a default: a
+(** Read the strategy a request declared. [None] for anything else, which
+    {!deploy} reports to the caller rather than resolving to a default: a
     misspelled strategy must not silently deploy by the other one. *)
 
 val serveraddress_from_image : string -> (string, string) result
@@ -152,10 +151,9 @@ val decode_input :
     naming which it was, so an operator can tell a malformed file from a
     misdeclared one.
 
-    Refusals are [Invalid_request], so this decision carries a status and an
-    exit code like every other the endpoint makes, and a caller holding no HTTP
-    request reaches it. It is separate from {!deploy} rather than folded into it
-    because the two failures answer with different wording on the wire, and a
+    Refusals are [Invalid_request], so this decision carries an exit code like
+    every other one this module makes. It is separate from {!deploy} rather than
+    folded into it because the two failures answer with different wording, and a
     caller that has already decoded must not be made to re-encode. *)
 
 val deploy :
@@ -163,9 +161,9 @@ val deploy :
   net:_ Eio.Net.t ->
   Strategy.Simple.deploy_input ->
   (deploy_response, Handler_error.t) result
-(** What the endpoint decides, naming no transport, so a caller holding no HTTP
-    request can reach it. The Docker client is built here rather than passed in
-    because the registry credentials it carries come out of the request.
+(** The whole decision, naming no transport. The Docker client is built here
+    rather than passed in because the registry credentials it carries come out
+    of the request.
 
     Only the cron plan can answer [Invalid_request]: it is the one step that
     fails on what the caller wrote. Everything after it is Bondi acting on the
@@ -176,15 +174,9 @@ val deploy :
     cancelled fiber that returned a value would break structured concurrency.
 
     Precondition: it drives Docker through Eio -- [Cohttp_eio] under an
-    [Eio.Switch] -- so it must be called from inside an Eio fiber, which in this
-    process means under [Lwt_eio.with_event_loop]. {!route} supplies one with
-    [Lwt_eio.run_eio]; a caller holding no HTTP request supplies its own, with
-    [Eio_main.run] or the same wrapper. *)
-
-val route : clock:_ Eio.Time.clock -> net:_ Eio.Net.t -> Dream.route
-(** The [POST /api/v1/deploy] route. It decodes the request body, dispatches to
-    {!deploy}, and encodes the answer as JSON or as the failure's own status and
-    message. A body that does not decode is answered by {!decode_input}'s own
-    status and never reaches {!deploy}; the two are worded differently on the
-    wire -- a decode failure reads ["Bad request: "] and everything else reads
-    ["Error deploying: "] -- which is why the decode is a step of its own. *)
+    [Eio.Switch] -- so it must be called from inside an Eio fiber, and [~clock]
+    and [~net] must be that fiber's own. Both are what
+    {!Environment.with_environment} hands its callback, which is the one place
+    this process enters the Eio runtime; a caller that passes capabilities from
+    anywhere else is passing them across a runtime boundary they do not belong
+    to. *)
