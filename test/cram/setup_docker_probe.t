@@ -63,7 +63,7 @@ only have stopped on the probe that arm broke.
   >     echo 'Docker version 29.2.1, build deadbeef' ;;
   >   *'name=^/bondi-orchestrator$'*'{{.State}}'*)
   >     if [ -n "$NOISY_SUCCESS" ]; then
-  >       printf 'running\tmlopez1506/bondi-server:0.10.1\n'
+  >       printf 'running\tmlopez1506/bondi-server:0.15.0\n'
   >     fi ;;
   >   *'RestartPolicy'*) echo unless-stopped ;;
   >   *'/var/spool/cron/crontabs/root'*) echo BONDI_CRONTAB_ABSENT ;;
@@ -83,11 +83,23 @@ only have stopped on the probe that arm broke.
   >   # ends the command rather than merely containing it: the probe's own
   >   # listing asks for {{.State}} and {{.Image}} together, and an arm that
   >   # matched both would answer the probe with a version.
-  >   *'name=^/bondi-orchestrator$'*"--format '{{.Image}}'") echo 'mlopez1506/bondi-server:0.10.1' ;;
-  >   # This box is below the floor, so its orchestrator is never asked. The arm
-  >   # is here so that a change which stopped asking the version would show up
-  >   # as this line rather than as a silent fall-through to *).
-  >   *'bondi-server status'*) echo 'a box below the floor was asked anyway' >&2; exit 1 ;;
+  >   *'name=^/bondi-orchestrator$'*"--format '{{.Image}}'") echo 'mlopez1506/bondi-server:0.15.0' ;;
+  >   # The three readings setup takes off the box once it has started the
+  >   # container: the wait for a running state, the server's own check inside
+  >   # it, and a read of the container's log stream for the line the check
+  >   # writes to its diagnostic sink. The check writes a document and the log
+  >   # read carries the marker because an answer that says nothing is a
+  >   # rejection rather than a pass, so a command falling through to the
+  >   # catch-all below would fail this run for a reason no fixture here chose.
+  >   'attempt=0; while'*) : ;;
+  >   *'bondi-server check'*) echo '{"ready":true,"observations":[]}' ;;
+  >   'docker logs --tail'*) echo 'bondi check: diagnostic sink is writable' ;;
+  >   # The closing report's own reading, which is a different question from the
+  >   # one setup takes and is answered here so that a fall-through to *) cannot
+  >   # stand in for it. This box clears the floor, so the report does ask; what
+  >   # it is told is a refusal, and every report line this file prints is
+  >   # normalised, so the wording is not the subject.
+  >   *'bondi-server status'*) echo 'this fixture does not answer the report' >&2; exit 1 ;;
   >   *) : ;;
   > esac
   > STUB
@@ -113,7 +125,7 @@ only have stopped on the probe that arm broke.
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
   > bondi_server:
-  >   version: "0.10.1"
+  >   version: "0.15.0"
   > EOF
 
 The run stops and reports the transport error, naming the server and the phases
@@ -182,7 +194,7 @@ cron is perfectly able to run the line.
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
   > bondi_server:
-  >   version: "0.10.1"
+  >   version: "0.15.0"
   > cron_jobs:
   >   - name: daily-close
   >     image: example.com/daily-close
@@ -238,7 +250,7 @@ Connection closed by 10.0.0.1 port 22" but 7.76.0 is required.
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
   > bondi_server:
-  >   version: "0.10.1"
+  >   version: "0.15.0"
   > cron_jobs:
   >   - name: daily-close
   >     image: example.com/daily-close
@@ -290,7 +302,7 @@ chown and chmod against a host that was never asked.
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
   > bondi_server:
-  >   version: "0.10.1"
+  >   version: "0.15.0"
   > EOF
   $ bondi-client setup > out.log 2>&1
   [1]
@@ -361,7 +373,7 @@ container terminates TLS for every site on the box.
   $ sed 's/not reachable: .*/not reachable: <detail>/' out.log
   Setting up the servers...
   Processing server: 127.0.0.1
-  bondi-orchestrator container is already running on server 127.0.0.1: 0.10.1, skipping...
+  bondi-orchestrator container is already running on server 127.0.0.1: 0.15.0, skipping...
   Docker is already installed on server 127.0.0.1: Docker version 29.2.1, build deadbeef
   Network bondi-network is present on server 127.0.0.1
   ACME file permissions updated on server 127.0.0.1: /etc/traefik/acme/acme.json

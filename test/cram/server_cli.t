@@ -6,6 +6,7 @@ directory a previous run has already written to.
 
   $ rm -f wrong-shape.json not-json.txt run-payload.json refusal.txt argv.err
   $ rm -f run-refusal.txt help.txt help-flat.txt
+  $ rm -f check.json check.err cron-check.json cron-check.err
 
 A deploy payload that is JSON of the wrong shape is refused as written. The
 message names the field that failed and never the value it carried: a payload
@@ -55,6 +56,42 @@ command-line library's own and changes with its version.
   refused
   $ if grep -q 'invalid deploy payload' argv.err; then echo "the argv payload was decoded"; else echo "the argv payload was not decoded"; fi
   the argv payload was not decoded
+
+The check subcommand answers on the built binary, and what it finds is the box
+the suite happens to run on: a developer machine has a Docker socket and a CI
+runner may not, and neither has a readable PID 1. So the verdict is not what is
+asserted -- the exit status is captured into a variable and only its class is
+pinned, which is a real claim all the same. It says the binary classified what
+it found rather than dying on it: 125 is cmdliner's internal error, 1 is an
+exception that escaped, and either would mean `check` never reached a verdict on
+this box at all.
+
+Unpiped, for the reason this file opens with. The status is taken by an
+assignment rather than by a pipeline, so the command's own status is what lands
+in the variable.
+
+  $ bondi-server check > check.json 2> check.err; status=$?
+  $ case "$status" in 0|3) echo "the status is a class check chose";; *) echo "unclassified: $status";; esac
+  the status is a class check chose
+  $ grep -c '"name":"docker_socket"' check.json
+  1
+  $ grep -c '"name":"diagnostic_sink"' check.json
+  1
+
+A deployment that configures no cron is asked about neither the spool nor the
+divergence, and the affirmative arm is the same binary on the same box with the
+flag set. Without it, a probe that had stopped being taken at all would satisfy
+both absences below and this file would go on passing.
+
+  $ if grep -q '"name":"cron_divergence"' check.json; then echo "asked"; else echo "not asked"; fi
+  not asked
+  $ bondi-server check --cron-configured > cron-check.json 2> cron-check.err; status=$?
+  $ case "$status" in 0|3) echo "the status is a class check chose";; *) echo "unclassified: $status";; esac
+  the status is a class check chose
+  $ if grep -q '"name":"cron_divergence"' cron-check.json; then echo "asked"; else echo "not asked"; fi
+  asked
+  $ if grep -q '"name":"crontab_spool"' cron-check.json; then echo "asked"; else echo "not asked"; fi
+  asked
 
 The manual carries this binary's own exit codes. Cmdliner documents three of its
 own and no others unless it is handed a list, and those three are the ones a

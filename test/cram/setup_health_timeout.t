@@ -22,7 +22,16 @@ runs below, so the exit code can only have followed from it.
   > case "$1" in
   >   *BONDI_ACME_PRESENT*) echo BONDI_ACME_PRESENT ;;
   >   'docker --version') echo 'Docker version 27.0.0, build deadbeef' ;;
-  >   *BONDI_ORCHESTRATOR_SERVING*) echo BONDI_ORCHESTRATOR_SERVING ;;
+  >   # The three readings setup takes off the box once it has started the
+  >   # container: the wait for a running state, the server's own check inside
+  >   # it, and a read of the container's log stream for the line the check
+  >   # writes to its diagnostic sink. The check writes a document and the log
+  >   # read carries the marker because an answer that says nothing is a
+  >   # rejection rather than a pass, so a command falling through to the
+  >   # catch-all below would fail this run for a reason no fixture here chose.
+  >   'attempt=0; while'*) : ;;
+  >   *'bondi-server check'*) echo '{"ready":true,"observations":[]}' ;;
+  >   'docker logs --tail'*) echo 'bondi check: diagnostic sink is writable' ;;
   >   *"'--name' 'bondi-gateway'"*) echo 'a1b2c3d4e5f6' ;;
   >   deadline=*)
   >     case "$1" in
@@ -31,7 +40,7 @@ runs below, so the exit code can only have followed from it.
   >     esac ;;
   >   'docker ps -a --format'*)
   >     printf 'my-service\tacme/app:1.4.0\trunning\n'
-  >     printf 'bondi-orchestrator\tmlopez1506/bondi-server:0.10.3\trunning\n'
+  >     printf 'bondi-orchestrator\tmlopez1506/bondi-server:0.15.0\trunning\n'
   >     printf 'bondi-gateway\texample.com/ib-gateway:10.48.1e\trunning\n' ;;
   >   'docker ps -aq | while read -r id'*)
   >     printf '/my-service\tdeclared\tstarting\t0\t2026-08-01T10:00:00.111111111Z\n'
@@ -58,11 +67,13 @@ runs below, so the exit code can only have followed from it.
   >   # ends the command rather than merely containing it: the probe's own
   >   # listing asks for {{.State}} and {{.Image}} together, and an arm that
   >   # matched both would answer the probe with a version.
-  >   *'name=^/bondi-orchestrator$'*"--format '{{.Image}}'") echo 'mlopez1506/bondi-server:0.10.3' ;;
-  >   # This box is below the floor, so its orchestrator is never asked. The arm
-  >   # is here so that a change which stopped asking the version would show up
-  >   # as this line rather than as a silent fall-through to *).
-  >   *'bondi-server status'*) echo 'a box below the floor was asked anyway' >&2; exit 1 ;;
+  >   *'name=^/bondi-orchestrator$'*"--format '{{.Image}}'") echo 'mlopez1506/bondi-server:0.15.0' ;;
+  >   # The closing report's own reading, which is a different question from the
+  >   # one setup takes and is answered here so that a fall-through to *) cannot
+  >   # stand in for it. This box clears the floor, so the report does ask; what
+  >   # it is told is a refusal, and every report line this file prints is
+  >   # normalised, so the wording is not the subject.
+  >   *'bondi-server status'*) echo 'this fixture does not answer the report' >&2; exit 1 ;;
   >   *) : ;;
   > esac
   > STUB
@@ -88,7 +99,7 @@ operating system's own and is normalised below.
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
   > bondi_server:
-  >   version: "0.10.3"
+  >   version: "0.15.0"
   > managed_containers:
   >   - name: gateway
   >     image: example.com/ib-gateway

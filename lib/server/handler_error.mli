@@ -48,7 +48,13 @@ val exit_code : t -> int
     error, which would report a machine fault as a mistyped command; and 0 would
     report a failure as a success.
 
-    Distinct per class, so that the code alone answers which class occurred. *)
+    Distinct per class, so that the code alone answers which class occurred.
+
+    The readiness class's number is the only one a reader outside this library
+    also has to know -- a client running a subcommand over a transport receives
+    a bare status and nothing else -- so that arm answers with the shared
+    library's value rather than a second spelling of the same number. The choice
+    is still made here; what moved is where the digit is written. *)
 
 val exit_documentation : (int * string) list
 (** Every code {!exit_code} can leave behind, each paired with the sentence an

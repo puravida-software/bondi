@@ -56,7 +56,16 @@ redden if the orchestrator's wording changes.
   >   'docker --version') echo 'Docker version 27.0.0, build deadbeef' ;;
   >   *BONDI_CRON_DOCKER_PRESENT*) echo 'BONDI_CRON_DOCKER_PRESENT /usr/bin/docker' ;;
   >   'curl --version') echo 'curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0' ;;
-  >   *BONDI_ORCHESTRATOR_SERVING*) echo BONDI_ORCHESTRATOR_SERVING ;;
+  >   # The three readings setup takes off the box after it starts the
+  >   # container: the wait for a running state, the server's own check inside
+  >   # it, and a read of the container's log stream for the line the check
+  >   # writes to its diagnostic sink. The check writes a document and the log
+  >   # read carries the marker because an empty answer is a rejection rather
+  >   # than a pass, and a rejection here would stop the run before the payload
+  >   # copy this file is about.
+  >   'attempt=0; while'*) : ;;
+  >   *'bondi-server check'*) echo '{"ready":true,"observations":[]}' ;;
+  >   'docker logs --tail'*) echo 'bondi check: diagnostic sink is writable' ;;
   >   *'/var/spool/cron/crontabs/root'*)
   >     echo BONDI_CRONTAB_CONTENTS
   >     cat "$SPOOL"
@@ -145,6 +154,15 @@ rewritten.
   $ : > ssh-argv.log
   $ bondi-client setup > setup.log 2>&1
   $ grep -c 'Preserved the cron payload directory on server 127.0.0.1' setup.log
+  1
+
+This configuration does declare a cron job, and the reading setup takes says so.
+The crontab spool has to be writable for a box that schedules anything and is
+beside the point for one that does not, and the container cannot tell which it
+is on -- so the answer travels from bondi.yaml, in the command, and the box is
+probed for exactly what it is meant to have.
+
+  $ grep -c -- 'bondi-server check --cron-configured' ssh-argv.log
   1
 
 And the spool is still byte-identical: proceeding is copying files, not writing

@@ -20,7 +20,7 @@ the declared version, so the run reduces to the alloy phase.
   >   *BONDI_ACME_PRESENT*) echo BONDI_ACME_PRESENT ;;
   >   'docker --version') echo 'Docker version 27.0.0, build deadbeef' ;;
   >   *'name=^/bondi-orchestrator$'*'{{.State}}'*)
-  >     printf 'running\tmlopez1506/bondi-server:0.10.1\n' ;;
+  >     printf 'running\tmlopez1506/bondi-server:0.15.0\n' ;;
   >   *'ps -a --filter name=^/bondi-alloy$'*'{{.State}}'*)
   >     printf 'exited\tgrafana/alloy:v1.8.0\n' ;;
   >   # The mode the host reports for the config file after it was written,
@@ -62,11 +62,23 @@ the declared version, so the run reduces to the alloy phase.
   >   # ends the command rather than merely containing it: the probe's own
   >   # listing asks for {{.State}} and {{.Image}} together, and an arm that
   >   # matched both would answer the probe with a version.
-  >   *'name=^/bondi-orchestrator$'*"--format '{{.Image}}'") echo 'mlopez1506/bondi-server:0.10.1' ;;
-  >   # This box is below the floor, so its orchestrator is never asked. The arm
-  >   # is here so that a change which stopped asking the version would show up
-  >   # as this line rather than as a silent fall-through to *).
-  >   *'bondi-server status'*) echo 'a box below the floor was asked anyway' >&2; exit 1 ;;
+  >   *'name=^/bondi-orchestrator$'*"--format '{{.Image}}'") echo 'mlopez1506/bondi-server:0.15.0' ;;
+  >   # The three readings setup takes off the box once it has started the
+  >   # container: the wait for a running state, the server's own check inside
+  >   # it, and a read of the container's log stream for the line the check
+  >   # writes to its diagnostic sink. The check writes a document and the log
+  >   # read carries the marker because an answer that says nothing is a
+  >   # rejection rather than a pass, so a command falling through to the
+  >   # catch-all below would fail this run for a reason no fixture here chose.
+  >   'attempt=0; while'*) : ;;
+  >   *'bondi-server check'*) echo '{"ready":true,"observations":[]}' ;;
+  >   'docker logs --tail'*) echo 'bondi check: diagnostic sink is writable' ;;
+  >   # The closing report's own reading, which is a different question from the
+  >   # one setup takes and is answered here so that a fall-through to *) cannot
+  >   # stand in for it. This box clears the floor, so the report does ask; what
+  >   # it is told is a refusal, and every report line this file prints is
+  >   # normalised, so the wording is not the subject.
+  >   *'bondi-server status'*) echo 'this fixture does not answer the report' >&2; exit 1 ;;
   >   *) : ;;
   > esac
   > STUB
@@ -96,7 +108,7 @@ host rather than merely to have gone missing.
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
   > bondi_server:
-  >   version: "0.10.1"
+  >   version: "0.15.0"
   > alloy:
   >   grafana_cloud:
   >     instance_id: "123456"
@@ -118,7 +130,7 @@ wrote leaves the status this line asserts belonging to `bondi-client`.
   $ head -11 out.log
   Setting up the servers...
   Processing server: 127.0.0.1
-  bondi-orchestrator container is already running on server 127.0.0.1: 0.10.1, skipping...
+  bondi-orchestrator container is already running on server 127.0.0.1: 0.15.0, skipping...
   Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 127.0.0.1
   ACME file permissions updated on server 127.0.0.1: /etc/traefik/acme/acme.json

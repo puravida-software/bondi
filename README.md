@@ -110,7 +110,7 @@ sed -i 's/^  version: .*/  version: 0.8.1/' bondi.yaml
 bondi setup
 ```
 
-`bondi setup` now verifies that the orchestrator answers its health endpoint before reporting success, so a version that cannot start fails the command with the container's exit code and logs instead of printing success.
+`bondi setup` now verifies that the orchestrator can actually serve before reporting success: it waits for the container to reach a running state, runs `bondi-server check` inside it, and requires the marker that check writes to come back out of the container's log stream. A version that cannot start fails the command with the container's exit code and logs instead of printing success.
 
 ## Available Commands
 
@@ -149,9 +149,12 @@ not a second implementation of them.
 
 `check` is the readiness question the `health` endpoint was standing in for. It
 connects to the Docker socket, creates and removes a file in the crontab spool
-when `--cron-configured` is given, and writes a marker line to the diagnostic
-sink, then reports **every** probe that failed rather than the first — a box with
-two faults that reports one costs a second trip to it. The JSON verdict goes to
+when `--cron-configured` is given, writes a marker line to the diagnostic sink,
+and — again only with `--cron-configured` — compares the Bondi section of the
+host's crontab against the cron payload directory, reporting a line that fires a
+job whose payload files are gone or a job whose files no line fires. It then
+reports **every** probe that failed rather than the first — a box with two
+faults that reports one costs a second trip to it. The JSON verdict goes to
 standard output whether or not the box is ready, since the failing document is
 the one that names what is wrong; the reasons go to standard error beside it.
 
@@ -159,8 +162,9 @@ Taking that reading is not free, which matters if you are thinking of wiring it
 into a `HEALTHCHECK` or a polling loop: the marker line lands in the container's
 log stream on every invocation, and `--cron-configured` bumps the spool
 directory's mtime, which is the signal cron watches for a changed database and so
-makes the host's cron reload. Both are unremarkable for a one-shot gate. Ask
-once, not on a timer.
+makes the host's cron reload. Those two are the whole cost: the Docker socket and
+the crontab-versus-payload comparison write nothing. Both are unremarkable for a
+one-shot gate. Ask once, not on a timer.
 
 Every subcommand leaves behind one of these:
 

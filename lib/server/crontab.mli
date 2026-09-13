@@ -55,6 +55,12 @@ type listed_job =
 val equal_listed_job : listed_job -> listed_job -> bool
 (** Structural equality on {!listed_job}. *)
 
+val crontab_path : string
+(** The system crontab this module owns a section of, inside the server
+    container. It is exported because a caller that reports on the section --
+    rather than writing it -- must name the file an operator has to open, and a
+    second spelling of the path is a value nobody can detect the drift of. *)
+
 val crontab_spool_dir : string
 (** Directory holding the system crontab this module writes, inside the server
     container. Cron notices a change by the directory's mtime, not the file's,
@@ -154,6 +160,33 @@ val parse_listed_jobs :
     are none to be had; it is a parameter so that a missing or malformed run
     file is a value rather than a filesystem. Blank lines inside the section are
     skipped and do not take a position. *)
+
+val section_job_names : crontab_path:string -> string list option
+(** The jobs the Bondi section of the crontab at [crontab_path] fires, by name,
+    in the order the section names them; [None] for a section that could not be
+    read at all.
+
+    The path is a parameter rather than {!crontab_path} so that both answers are
+    reachable from a test that made the file, and so that a caller reporting on
+    a host names the file it actually read.
+
+    [None] and [Some []] are opposite answers and the distinction is the whole
+    of what a comparison can rest on. [None] is a crontab that is there and
+    would not open, or one whose markers do not balance: nothing is known about
+    what this host fires. [Some []] is an answer -- a crontab that is not there
+    at all, or one holding no Bondi section -- and it says the host fires none
+    of Bondi's jobs, which is a fact a caller may act on.
+
+    Only the shape {!entry_of_cron_job} writes is named. A legacy [curl] line
+    carries its whole job on the line and has no files anywhere, so a reader
+    that named it would report a line that works as a job whose payload is gone.
+    {!job_name_from_exec_line} is also the reader the client runs over a host's
+    spool file, so a name this answers and a name the client answers are
+    produced by one definition.
+
+    An entry no reader can name contributes no name rather than a placeholder.
+    It is still on the host and still fires; what it is not is something a
+    comparison by name can say anything about. *)
 
 val list_scheduled_jobs : unit -> (listed_job list, string) result
 (** Read the system crontab and return every Bondi-managed entry in it. A

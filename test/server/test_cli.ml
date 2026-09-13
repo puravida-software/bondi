@@ -6,6 +6,7 @@ module Docker_client = Bondi_server__Docker__Client
 module Handler_error = Bondi_server__Handler_error
 module Readiness = Bondi_server__Readiness
 module Server_config = Bondi_server__Server_config
+module Readiness_exit_code = Bondi_common.Readiness_exit_code
 module String_utils = Bondi_common.String_utils
 
 (* The command group is exercised with an explicit argv, an explicit serve
@@ -237,6 +238,51 @@ let test_check_reports_every_failing_probe_and_exits_three () =
   check bool "the sink failure is named too" true
     (String_utils.contains ~needle:"/proc/1/fd/2: Permission denied" written_err)
 
+(* The probe the box can take and the client cannot. What is asserted is that it
+   reaches both of the channels [check] answers on: the document a program
+   compares, under its own key, and the exit code.
+
+   The code is compared against [Readiness_exit_code.not_ready] rather than
+   against the number, and that is the point of the case. The client reads the
+   remote status to classify the reading, and a second table here -- even one
+   holding the same number today -- is a table that can come to disagree with
+   the one the client reads. There is one, and this is the arm that says so.
+
+   The reason is a sentence [Bondi_common.Cron_divergence] writes, which is
+   where its wording is pinned; here it is carried through unaltered, so a
+   handler that summarised it would be caught. *)
+let test_check_reports_the_divergence_in_its_document_and_its_code () =
+  let reason =
+    Bondi_common.Cron_divergence.remedy
+      ~crontab_path:"/var/spool/cron/crontabs/root"
+      ~payload_dir:"/etc/bondi/cron"
+      (Bondi_common.Cron_divergence.Files_without_a_line { job = "backup" })
+  in
+  let observe ~cron_configured:_ =
+    [
+      passing Readiness.Docker_socket;
+      passing Readiness.Crontab_spool;
+      failing Readiness.Cron_divergence reason;
+      passing Readiness.Diagnostic_sink;
+    ]
+  in
+  let code, written_out, written_err =
+    run_cli ~observe ~stdin_contents:""
+      [| "bondi-server"; "check"; "--cron-configured" |]
+  in
+  check int
+    "the code is the readiness class's, from the one table that holds it"
+    Readiness_exit_code.not_ready code;
+  check string
+    "the document names the probe under its own key and carries its reason"
+    (Printf.sprintf
+       {|{"ready":false,"probes":[{"name":"docker_socket","ok":true},{"name":"crontab_spool","ok":true},{"name":"cron_divergence","ok":false,"reason":%s},{"name":"diagnostic_sink","ok":true}]}|}
+       (Yojson.Safe.to_string (`String reason)))
+    written_out;
+  check bool "the operator is told what closes it, in the probe's own words"
+    true
+    (String_utils.contains ~needle:reason written_err)
+
 (* A distinct heap value rather than a nullary exception, so that a propagation
    assertion below can say the exact value came back: a constructor with no
    argument is a shared atom and [==] against it is true even of a value the
@@ -446,8 +492,16 @@ let test_the_group_reports_the_version_the_image_baked () =
    that owns the path, which is the assertion a transposition fails. *)
 let test_production_observe_binds_this_container_s_paths () =
   let recorded = ref None in
-  let observe ~cron_configured ~docker_socket ~spool_dir ~diagnostic_sink =
-    recorded := Some (cron_configured, docker_socket, spool_dir, diagnostic_sink);
+  let observe ~cron_configured ~docker_socket ~spool_dir ~diagnostic_sink
+      ~crontab_path ~payload_dir =
+    recorded :=
+      Some
+        ( cron_configured,
+          docker_socket,
+          spool_dir,
+          diagnostic_sink,
+          crontab_path,
+          payload_dir );
     []
   in
   let observations = Cli.production_observe ~observe ~cron_configured:true in
@@ -455,7 +509,13 @@ let test_production_observe_binds_this_container_s_paths () =
     (List.length observations);
   match !recorded with
   | None -> fail "the production gather never reached the readiness gather"
-  | Some (cron_configured, docker_socket, spool_dir, diagnostic_sink) ->
+  | Some
+      ( cron_configured,
+        docker_socket,
+        spool_dir,
+        diagnostic_sink,
+        crontab_path,
+        payload_dir ) ->
       check bool "whether cron is configured reaches the gather" true
         cron_configured;
       check string "the socket slot carries the Docker client's own socket"
@@ -463,7 +523,11 @@ let test_production_observe_binds_this_container_s_paths () =
       check string "the spool slot carries the crontab module's own spool"
         Crontab.crontab_spool_dir spool_dir;
       check string "the sink slot carries the stream diagnostics duplicate to"
-        Diagnostics.pid_one_stderr diagnostic_sink
+        Diagnostics.pid_one_stderr diagnostic_sink;
+      check string "the crontab slot carries the crontab module's own file"
+        Crontab.crontab_path crontab_path;
+      check string "the payload slot carries the directory the writer uses"
+        Bondi_common.Cron_exec_line.cron_root payload_dir
 
 (* Surviving a client that goes away is a statement about a process, not about
    a value a function returned: a surface that does not survive it is killed
@@ -649,6 +713,9 @@ let () =
             `Quick test_check_takes_whether_cron_is_configured_as_an_argument;
           test_case "check reports every failing probe and exits three" `Quick
             test_check_reports_every_failing_probe_and_exits_three;
+          test_case "check reports the divergence in its document and its code"
+            `Quick
+            test_check_reports_the_divergence_in_its_document_and_its_code;
         ] );
       ( "failure classification",
         [

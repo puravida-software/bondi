@@ -10,5 +10,7 @@
   test_cron_section
   test_cron_legacy_line
   test_alert
+  test_check_marker
+  test_cron_divergence
   test_test_helpers)
  (libraries alcotest bondi.common test_helpers unix))

@@ -831,6 +831,294 @@ let test_plan_fresh_install_runs_server () =
     (List.mem Setup.StopOrchestrator actions)
     false
 
+(* ------------------------------------------------------------------------- *)
+(* The readings the orchestrator phase takes                                 *)
+(* ------------------------------------------------------------------------- *)
+
+let contains ~needle haystack =
+  Bondi_common.String_utils.contains ~needle haystack
+
+(* The commands the orchestrator phase actually sends, built the way the
+   interpreter builds them: the production list of readings, mapped through the
+   production command for each. A list spelled here instead would assert the
+   order of a fixture rather than the order the box is asked in. *)
+let reading_commands ~cron_configured =
+  List.map
+    (Setup.orchestrator_reading_command ~cron_configured)
+    Setup.orchestrator_readings
+
+(* Waiting and reading are one ordered pair, and both halves of the order
+   matter. A reading taken before the container is running answers for a
+   container that has not started, which is the failure the wait exists to
+   remove; and a second reading is not free -- the check writes to the
+   container's log stream and, where cron is configured, touches the spool the
+   host's cron daemon watches, so a phase that reads twice pays those costs
+   twice. *)
+let test_the_orchestrator_phase_waits_for_running_then_reads_once () =
+  let commands = reading_commands ~cron_configured:false in
+  (match commands with
+  | [ wait; reading; _ ] ->
+      check bool "the wait on a running state comes first" true
+        (contains ~needle:"{{.State.Status}}" wait);
+      check bool "the reading follows it" true
+        (contains ~needle:"bondi-server check" reading)
+  | []
+  | [ _ ]
+  | [ _; _ ]
+  | _ :: _ :: _ :: _ :: _ ->
+      failf
+        "the orchestrator phase takes the wait, one reading and the log-stream \
+         read, not %d commands"
+        (List.length commands));
+  check int "exactly one reading is taken" 1
+    (List.length (List.filter (contains ~needle:"bondi-server check") commands))
+
+(* The line the log-stream read looks for is one the check writes, so a read
+   taken ahead of the check answers for a stream the check had not written to
+   yet -- and every orchestrator would be reported as one whose diagnostics
+   never arrive, including the ones whose diagnostics do. The order is asserted
+   over the production list mapped through the production commands, because
+   that list is the thing that decides it; a list spelled here would agree with
+   itself. *)
+let test_the_log_stream_is_read_after_the_reading_not_before () =
+  let commands = reading_commands ~cron_configured:false in
+  match commands with
+  | [ _; reading; log_read ] ->
+      check bool "the reading is taken second" true
+        (contains ~needle:"bondi-server check" reading);
+      check bool "the log stream is read after it" true
+        (contains ~needle:"docker logs" log_read);
+      check bool "the read is bounded rather than the container's whole history"
+        true
+        (contains ~needle:"--tail" log_read)
+  | []
+  | [ _ ]
+  | [ _; _ ]
+  | _ :: _ :: _ :: _ :: _ ->
+      failf
+        "the orchestrator phase takes the wait, one reading and the log-stream \
+         read, not %d commands"
+        (List.length commands)
+
+(* Each reading is the single place a host's answer collapses into "the phase
+   may go on" or "the phase stops, and this is the sentence". Both arms of both
+   collapses are pinned here rather than only through a host fixture: a
+   boundary owns its contract, and a regression in one should fail at the
+   boundary rather than in whichever cram file happened to exercise it. *)
+let test_each_reading_collapses_to_go_on_or_stop_with_a_sentence () =
+  let waited_out =
+    Remote_exec.Command_failed
+      {
+        code = 1;
+        output =
+          "container bondi-orchestrator did not reach a running state after 30 \
+           attempts";
+      }
+  in
+  let named_its_faults =
+    Remote_exec.Command_failed
+      {
+        code = Bondi_common.Readiness_exit_code.not_ready;
+        output = "the Docker socket is not readable";
+      }
+  in
+  let could_not_read =
+    Remote_exec.Command_failed
+      { code = 1; output = "Error: No such container: bondi-orchestrator" }
+  in
+  (match Setup.orchestrator_reading_verdict Setup.Wait_running (Ok "") with
+  | Ok () -> ()
+  | Error reason ->
+      failf "a wait that came back is not a container that never started: %s"
+        reason);
+  (match
+     Setup.orchestrator_reading_verdict Setup.Wait_running (Error waited_out)
+   with
+  | Ok () -> fail "a wait that gave up is not a container that reached running"
+  | Error reason ->
+      check bool "the host's own sentence survives the collapse" true
+        (contains ~needle:"did not reach a running state" reason));
+  (match
+     Setup.orchestrator_reading_verdict Setup.Take_check (Ok "{\"ready\":true}")
+   with
+  | Ok () -> ()
+  | Error reason -> failf "a box that answered is not a rejection: %s" reason);
+  (match
+     Setup.orchestrator_reading_verdict Setup.Take_check
+       (Error named_its_faults)
+   with
+  | Ok () -> fail "a box that named its faults is not a box that can serve"
+  | Error reason ->
+      check bool "the box's own account survives the collapse" true
+        (contains ~needle:"the Docker socket is not readable" reason));
+  (match
+     Setup.orchestrator_reading_verdict Setup.Read_log_stream
+       (Ok
+          ("2026-09-12T09:00:00Z " ^ Bondi_common.Check_marker.diagnostic_sink
+         ^ "\n"))
+   with
+  | Ok () -> ()
+  | Error reason ->
+      failf "a stream carrying the line is not a container nobody can see: %s"
+        reason);
+  (match
+     Setup.orchestrator_reading_verdict Setup.Read_log_stream
+       (Ok "2026-09-12T09:00:00Z listening on 0.0.0.0:3030\n")
+   with
+  | Ok () ->
+      fail
+        "a container whose diagnostics never reach its log stream is not one \
+         that came up"
+  | Error reason ->
+      check bool "the sentence says the line was written and did not arrive"
+        true
+        (contains ~needle:"diagnostic sink" reason));
+  match
+    Setup.orchestrator_reading_verdict Setup.Read_log_stream
+      (Error could_not_read)
+  with
+  | Ok () ->
+      fail "a stream that could not be read is not a stream found carrying"
+  | Error reason ->
+      check bool "a read that never happened is not reported as a silent stream"
+        true
+        (contains ~needle:"the log stream read" reason)
+
+(* ------------------------------------------------------------------------- *)
+(* The floor the configured orchestrator image is held to                    *)
+(* ------------------------------------------------------------------------- *)
+
+(* An image whose binary has no subcommands does not refuse the reading: it
+   ignores the arguments and serves, so the command never answers and the box
+   is reported as one that could not be reached. Refusing the configuration is
+   what turns that into a sentence naming the two versions. *)
+let test_an_image_below_the_command_surface_floor_is_refused () =
+  let config =
+    make_config ~user_service:None ~cron_jobs:None ~version:"0.14.9" ()
+  in
+  let context =
+    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_probe:docker_present ()
+  in
+  match Setup.plan_for_config config context with
+  | Ok actions ->
+      failf "a configuration below the floor was planned: %s"
+        (String.concat ", " (List.map action_string actions))
+  | Error message ->
+      check bool "names the version found" true
+        (contains ~needle:"0.14.9" message);
+      check bool "names the version needed" true
+        (contains
+           ~needle:Bondi_client.Server_version.minimum_for_command_surface
+           message)
+
+(* The affirmative half of the refusal above, on the same fixture: only the
+   declared version moves. Without it the refusal could be a plan that fails
+   for any other reason, and the assertion that no container is started would
+   hold on a fixture that starts none whatever the version says. *)
+let test_an_image_at_the_command_surface_floor_still_runs_the_server () =
+  let config =
+    make_config ~user_service:None ~cron_jobs:None
+      ~version:Bondi_client.Server_version.minimum_for_command_surface ()
+  in
+  let context =
+    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_probe:docker_present ()
+  in
+  match Setup.plan_for_config config context with
+  | Error message -> failf "the floor itself was refused: %s" message
+  | Ok actions ->
+      check bool "the server is planned at the floor" true
+        (List.mem Setup.RunServer actions)
+
+(* ------------------------------------------------------------------------- *)
+(* What a rejected reading is reported as                                    *)
+(* ------------------------------------------------------------------------- *)
+
+(* Every action the plan still had ahead of the one that failed. Derived from
+   the plan rather than spelled, so a phase added after the orchestrator is
+   carried into the report by the same route production carries it. *)
+let actions_after actions ~failed =
+  let rec drop = function
+    | [] -> []
+    | action :: rest -> if action = failed then rest else drop rest
+  in
+  drop actions
+
+(* The whole sentence an operator is left with when the box rejects the
+   reading, composed the way production composes it: the verdict decides the
+   reason, the orchestrator report quotes the container's own account beside
+   it, and the phase report says what the run did not reach. Each of the three
+   is tested on its own elsewhere; what nothing covers is that the operator
+   gets all three at once -- and the container's account, the half that cost a
+   day of an outage to obtain by hand, is the one a composition can silently
+   drop. *)
+let test_a_rejected_reading_reports_the_account_and_the_phases_left_unrun () =
+  (* Every field is set, including the ones whose absence is what the phase
+     does with them: a record built from a default and edited would leave the
+     phases this report names resting on a value nothing here chose. *)
+  let alloy =
+    {
+      Config_file.image = None;
+      Config_file.grafana_cloud =
+        {
+          Config_file.instance_id = "123456";
+          Config_file.api_key = "glc_secret";
+          Config_file.endpoint =
+            "https://logs-prod.grafana.net/loki/api/v1/push";
+        };
+      Config_file.collect = None;
+      Config_file.labels = None;
+    }
+  in
+  let config =
+    make_config ~alloy:(Some alloy) ~user_service:None ~cron_jobs:None
+      ~version:"1.0.0" ()
+  in
+  let specs = specs_of_entries [ managed_entry ~name:"gateway" () ] in
+  let context =
+    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_probe:docker_present ()
+  in
+  let actions = plan ~specs config context in
+  check bool "the fixture plans the run that is rejected" true
+    (List.mem Setup.RunServer actions);
+  let rejected =
+    Remote_exec.Command_failed
+      {
+        code = Bondi_common.Readiness_exit_code.not_ready;
+        output = "docker socket is not readable";
+      }
+  in
+  let reason =
+    match
+      Bondi_client.Orchestrator_probe.verdict_of_output (Error rejected)
+    with
+    | Bondi_client.Orchestrator_probe.Serving ->
+        fail "the readiness exit code read as a box that can serve"
+    | Bondi_client.Orchestrator_probe.Not_ready reason
+    | Bondi_client.Orchestrator_probe.Unreachable reason ->
+        reason
+  in
+  let report =
+    Setup.action_failure_report ~server:"1.2.3.4" ~failed:Setup.RunServer
+      ~remaining:(actions_after actions ~failed:Setup.RunServer)
+      ~reason:
+        (Bondi_client.Orchestrator_probe.failure_message ~ip_address:"1.2.3.4"
+           ~image:"mlopez1506/bondi-server:1.0.0" ~reason
+           ~diagnostics:
+             "status=exited exit=127 oom=false error=\n\
+              --- last 50 log lines ---\n\
+              Error loading shared library libzstd.so.1")
+  in
+  check bool "the box's own reason is carried" true
+    (contains ~needle:"docker socket is not readable" report);
+  check bool "the container's final state is quoted" true
+    (contains ~needle:"status=exited" report);
+  check bool "the container's exit code is quoted" true
+    (contains ~needle:"exit=127" report);
+  check bool "the container's last log lines are quoted" true
+    (contains ~needle:"Error loading shared library libzstd.so.1" report);
+  check bool "the phases that did not run are named" true
+    (contains ~needle:"alloy, managed containers" report)
+
 (* The orchestrator phase, in the order the plan emits it. Filtering by the
    production mapping rather than by a list spelled here keeps the assertion
    about ordering within the phase and independent of everything the plan does
@@ -1002,6 +1290,42 @@ let test_run_command_omits_the_payload_mount_without_cron () =
   | Ok command ->
       check bool "no payload mount" false
         (Bondi_common.String_utils.contains ~needle:"/etc/bondi/cron" command)
+
+(* The reading is asked about the same cron this run planned the mounts from,
+   which on this box is not what the configuration declares. A host declaring no
+   job and holding a Bondi section all the same is the shape the payload phase
+   exists for, and the shape likeliest to be holding a line for a job nothing
+   declares any more -- so it is the box whose spool and whose divergence most
+   want looking at, on a container this run has just given the mounts to answer
+   with. Asked what the configuration declares, it is the one box never probed
+   about either.
+
+   The negative arm is the same configuration on a host that answered it holds
+   no section: nothing is converged there, and the reading says so. That the
+   interpreter passes this planned value and not a second predicate of its own
+   is pinned on the commands that reach a host, in
+   test/cram/setup_orchestrator.t. *)
+let test_the_reading_asks_about_cron_wherever_the_run_converges_it () =
+  let config =
+    make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
+  in
+  let context crontab =
+    ctx
+      ~orchestrator:(Setup.Orchestrator_running { version = "0.9.0" })
+      ~crontab ~docker_probe:docker_present ()
+  in
+  let asks_about_cron crontab =
+    List.exists
+      (contains ~needle:"bondi-server check --cron-configured")
+      (reading_commands
+         ~cron_configured:(Setup.cron_payload_needed config (context crontab)))
+  in
+  check bool "the configuration declares no cron job" false
+    (Setup.has_cron_jobs config);
+  check bool "a host holding a section is asked about its crontab" true
+    (asks_about_cron section_with_one_named_job);
+  check bool "and a host holding none is not" false
+    (asks_about_cron Crontab_listing.No_section)
 
 let test_plan_version_mismatch_stops_and_runs () =
   let config =
@@ -2152,6 +2476,60 @@ let test_a_servers_report_shares_one_staged_key () =
   check int "over one staged key for the run and one for the report" 2
     (List.length (List.sort_uniq String.compare staged))
 
+(* A stub that answers every command by exiting zero and saying nothing, which
+   is what a host reports for a container it does not hold. It is the same
+   answer for both cases below, so what separates them is whether the phase
+   asked at all: a phase that read the policy reports that it could not be
+   read, and a phase that skipped the reading reports nothing. Without that
+   asymmetry the [Ok] case would be green against a phase which had stopped
+   reading entirely, which is the whole of what these two cases are about.
+
+   The stub drains its standard input before exiting: the runner writes the
+   command there, and a stub that exits without reading leaves the writer
+   holding a closed pipe. *)
+let silent_ssh_stub = "#!/bin/sh\ncat > /dev/null\nexit 0\n"
+
+(* The `--restart` flag on the `docker run` this tool issues is a request. What
+   the daemon applied is only ever visible from an inspect -- which is the same
+   reasoning the convergence itself already rests on, where three containers
+   created with the flag were found at `no` on a live box. So the run that
+   creates the container is not exempt from the reading; it is the run whose
+   policy nobody has ever inspected, and it used to be the only run that never
+   asked. *)
+let test_restart_policy_converges_where_docker_was_not_installed () =
+  Client_fixtures.with_ssh_stub silent_ssh_stub (fun () ->
+      match
+        Setup.converge_restart_policy unroutable_server
+          ~docker_status:
+            (Setup.Docker_not_installed "bash: docker: command not found")
+      with
+      | Ok () ->
+          Alcotest.fail
+            "the run that installed Docker returned without reading the \
+             orchestrator's restart policy"
+      | Error message ->
+          check bool "the failure names the reading that was taken" true
+            (contains ~needle:"restart policy" message))
+
+(* A Docker state nobody could read is not a state to act on. An inspect issued
+   here would be issued against a host whose version probe never answered, so
+   it would fail on the transport and report that as a policy the run could not
+   converge -- a second failure describing the first one badly. The case above
+   shares this fixture and does report a failure, so this [Ok] is the reading
+   being skipped rather than the phase having stopped reading altogether. *)
+let test_restart_policy_is_not_read_where_docker_was_undetermined () =
+  Client_fixtures.with_ssh_stub silent_ssh_stub (fun () ->
+      match
+        Setup.converge_restart_policy unroutable_server
+          ~docker_status:(Setup.Docker_undetermined "connection timed out")
+      with
+      | Ok () -> ()
+      | Error message ->
+          Alcotest.fail
+            (Printf.sprintf
+               "a Docker state that could not be read was acted on anyway: %s"
+               message))
+
 let () =
   run "Setup.plan"
     [
@@ -2223,6 +2601,9 @@ let () =
             test_run_command_mounts_the_payload_directory_for_a_held_section;
           test_case "no payload mount without a section or a declared job"
             `Quick test_run_command_omits_the_payload_mount_without_cron;
+          test_case "the reading asks about cron wherever the run converges it"
+            `Quick
+            test_the_reading_asks_about_cron_wherever_the_run_converges_it;
         ] );
       ( "orchestrator observation",
         [
@@ -2293,6 +2674,23 @@ let () =
             test_acme_probe_without_a_marker_is_undetermined;
           test_case "the command asks for both answers" `Quick
             test_acme_probe_command_asks_for_both_answers;
+        ] );
+      ( "orchestrator readiness",
+        [
+          test_case "the phase waits for running and then reads once" `Quick
+            test_the_orchestrator_phase_waits_for_running_then_reads_once;
+          test_case "the log stream is read after the reading, not before"
+            `Quick test_the_log_stream_is_read_after_the_reading_not_before;
+          test_case "each reading collapses to go on or stop with a sentence"
+            `Quick test_each_reading_collapses_to_go_on_or_stop_with_a_sentence;
+          test_case "an image below the command-surface floor is refused" `Quick
+            test_an_image_below_the_command_surface_floor_is_refused;
+          test_case "an image at the floor still runs the server" `Quick
+            test_an_image_at_the_command_surface_floor_still_runs_the_server;
+          test_case
+            "a rejected reading reports the account and the skipped phases"
+            `Quick
+            test_a_rejected_reading_reports_the_account_and_the_phases_left_unrun;
         ] );
       ( "network",
         [
@@ -2376,6 +2774,15 @@ let () =
             test_a_servers_setup_run_stages_the_key_once;
           test_case "a server's report shares one staged key" `Quick
             test_a_servers_report_shares_one_staged_key;
+        ] );
+      ( "restart policy",
+        [
+          test_case
+            "the restart policy converges on a host where Docker was not \
+             installed"
+            `Quick test_restart_policy_converges_where_docker_was_not_installed;
+          test_case "a Docker state that could not be read is not acted on"
+            `Quick test_restart_policy_is_not_read_where_docker_was_undetermined;
         ] );
       ( "alloy_river_config",
         [

@@ -64,7 +64,7 @@ listing.
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
   > bondi_server:
-  >   version: "0.10.1"
+  >   version: "0.15.0"
   > EOF
 
 The run stops and reports which listing failed and what it said. A run refused
