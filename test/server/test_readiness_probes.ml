@@ -1,6 +1,7 @@
 open Alcotest
 module Readiness = Bondi_server__Readiness
 module String_utils = Bondi_common.String_utils
+module Check_marker = Bondi_common.Check_marker
 
 (* Named arm by arm rather than derived, so that a probe added to the variant
    later makes this [function] inexhaustive here — the same guard
@@ -10,6 +11,7 @@ let probe_name = function
   | Readiness.Docker_socket -> "docker socket"
   | Readiness.Crontab_spool -> "crontab spool"
   | Readiness.Diagnostic_sink -> "diagnostic sink"
+  | Readiness.Cron_divergence -> "cron divergence"
 
 let probe_names observations =
   List.map
@@ -226,9 +228,18 @@ let with_fixtures ~socket ~spool ~sink body =
               body
                 { socket = socket.path; spool = spool.path; sink = sink.path })))
 
+(* The divergence probe's own arms belong to [test_readiness.ml], which builds
+   the two sources it compares. Here both are named as paths nothing made, which
+   the probe reads as a host with no crontab and no payload directory -- two
+   answers that agree -- so it passes and leaves this file's three subjects the
+   only things that can move. *)
+let absent_crontab = scratch_path "bondi-absent-crontab" ""
+let absent_payload_dir = scratch_path "bondi-absent-payload" ""
+
 let observe ~cron_configured fixtures =
   Readiness.observe ~cron_configured ~docker_socket:fixtures.socket
     ~spool_dir:fixtures.spool ~diagnostic_sink:fixtures.sink
+    ~crontab_path:absent_crontab ~payload_dir:absent_payload_dir
 
 let test_an_openable_socket_path_passes () =
   with_fixtures ~socket:listening_socket ~spool:writable_spool
@@ -332,6 +343,21 @@ let test_a_writable_diagnostic_sink_passes () =
       check bool "and the probe wrote a line to it, terminated" true
         (String.length written > 0 && String.ends_with ~suffix:"\n" written))
 
+(* The line the probe appends is the shared one, byte for byte, and not a
+   literal kept beside the probe. Two parties match on this string -- the
+   process that writes it and a reader outside the container that greps the log
+   stream for it -- and a divergence between them is silent at both ends: the
+   write succeeds and the reader simply never matches. The terminator is the
+   writer's, so the shared value plus one newline is the whole of what lands. *)
+let test_the_sink_probe_writes_the_shared_marker () =
+  with_fixtures ~socket:listening_socket ~spool:writable_spool
+    ~sink:writable_sink (fun fixtures ->
+      let observations = observe ~cron_configured:true fixtures in
+      check_passed "the sink probe ran" Readiness.Diagnostic_sink observations;
+      check string "and wrote the shared marker, terminated"
+        (Check_marker.diagnostic_sink ^ "\n")
+        (read_file fixtures.sink))
+
 let test_an_unwritable_diagnostic_sink_fails () =
   check_not_root ();
   with_fixtures ~socket:listening_socket ~spool:writable_spool
@@ -397,7 +423,9 @@ let test_the_spool_is_not_probed_when_cron_is_unconfigured () =
         (is_ready (Readiness.plan without_cron));
       let with_cron = observe ~cron_configured:true fixtures in
       check (list string) "the same box with cron configured does probe it"
-        [ "docker socket"; "crontab spool"; "diagnostic sink" ]
+        [
+          "docker socket"; "crontab spool"; "cron divergence"; "diagnostic sink";
+        ]
         (probe_names with_cron);
       check (list string) "and the unwritable spool is what the verdict names"
         [ "crontab spool" ]
@@ -428,6 +456,8 @@ let () =
         [
           test_case "a writable diagnostic sink passes" `Quick
             test_a_writable_diagnostic_sink_passes;
+          test_case "the sink probe writes the shared marker" `Quick
+            test_the_sink_probe_writes_the_shared_marker;
           test_case "an unwritable diagnostic sink fails" `Quick
             test_an_unwritable_diagnostic_sink_fails;
           test_case "a full diagnostic sink is not a failure" `Quick

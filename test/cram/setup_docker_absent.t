@@ -31,7 +31,17 @@ succeed, so the run reaches the install rather than stopping earlier.
   >   *BONDI_CRON_PAYLOAD_LISTED*)
   >     echo BONDI_CRON_PAYLOAD_LISTED
   >     echo BONDI_CRON_PAYLOAD_END ;;
+  >   # The ACME file the orchestrator phase needs in place before it runs.
+  >   # Without this arm the command falls through to *) and answers nothing,
+  >   # which setup reads as a host that could not be asked, and the run stops
+  >   # in the ACME phase -- before the convergence this file now asserts.
+  >   *BONDI_ACME_PRESENT*) echo BONDI_ACME_PRESENT ;;
   >   *'PortBindings'*) echo '127.0.0.1' ;;
+  >   # The restart-policy reading the run takes after it has started the
+  >   # container. This box reports the policy setup asked for, so the reading
+  >   # is the whole of the convergence: nothing is corrected, and the count
+  >   # below is the inspect alone.
+  >   *'RestartPolicy'*) echo 'unless-stopped' ;;
   >   # The orchestrator's image on its own, which is the version the report's
   >   # orchestrator read holds this box to before running a subcommand inside
   >   # its container. Without this arm the command falls through to *) and
@@ -40,11 +50,23 @@ succeed, so the run reaches the install rather than stopping earlier.
   >   # ends the command rather than merely containing it: the probe's own
   >   # listing asks for {{.State}} and {{.Image}} together, and an arm that
   >   # matched both would answer the probe with a version.
-  >   *'name=^/bondi-orchestrator$'*"--format '{{.Image}}'") echo 'mlopez1506/bondi-server:0.10.1' ;;
-  >   # This box is below the floor, so its orchestrator is never asked. The arm
-  >   # is here so that a change which stopped asking the version would show up
-  >   # as this line rather than as a silent fall-through to *).
-  >   *'bondi-server status'*) echo 'a box below the floor was asked anyway' >&2; exit 1 ;;
+  >   *'name=^/bondi-orchestrator$'*"--format '{{.Image}}'") echo 'mlopez1506/bondi-server:0.15.0' ;;
+  >   # The three readings setup takes off the box once it has started the
+  >   # container: the wait for a running state, the server's own check inside
+  >   # it, and a read of the container's log stream for the line the check
+  >   # writes to its diagnostic sink. The check writes a document and the log
+  >   # read carries the marker because an answer that says nothing is a
+  >   # rejection rather than a pass, so a command falling through to the
+  >   # catch-all below would fail this run for a reason no fixture here chose.
+  >   'attempt=0; while'*) : ;;
+  >   *'bondi-server check'*) echo '{"ready":true,"observations":[]}' ;;
+  >   'docker logs --tail'*) echo 'bondi check: diagnostic sink is writable' ;;
+  >   # The closing report's own reading, which is a different question from the
+  >   # one setup takes and is answered here so that a fall-through to *) cannot
+  >   # stand in for it. This box clears the floor, so the report does ask; what
+  >   # it is told is a refusal, and every report line this file prints is
+  >   # normalised, so the wording is not the subject.
+  >   *'bondi-server status'*) echo 'this fixture does not answer the report' >&2; exit 1 ;;
   >   *) : ;;
   > esac
   > STUB
@@ -69,13 +91,16 @@ succeed, so the run reaches the install rather than stopping earlier.
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
   > bondi_server:
-  >   version: "0.10.1"
+  >   version: "0.15.0"
   > EOF
 
 The run reports the absence and installs, rather than refusing a reading the
-host did give it.
+host did give it. The status is asserted rather than piped away: this stub
+answers every reading the run takes, so the run converges, and a run that had
+stopped part-way would still print the four lines below.
 
-  $ bondi-client setup 2>&1 | head -4
+  $ bondi-client setup > out.log 2>&1
+  $ head -4 out.log
   Setting up the servers...
   Processing server: 127.0.0.1
   Docker not found on server 127.0.0.1
@@ -92,11 +117,12 @@ was read as a transport failure.
   $ grep -c 'docker --version' ssh-argv.log
   2
 
-A host with no Docker holds no container that predates this run, so the
-restart-policy convergence is skipped entirely rather than asked about. The two
-counts above are taken from the same log and are non-zero, so this zero is the
-inspect being absent rather than the log being empty.
+The restart-policy inspect reaches the host. A host that had no Docker holds
+only the container this run just created, and the `--restart` that created it
+is a request rather than a reading -- so this is the one run whose policy has
+never been inspected, and it used to be the one run that never asked. The
+count is one because this box reports the policy setup asked for: the reading
+happens, and nothing follows it.
 
   $ grep -c 'RestartPolicy' ssh-argv.log
-  0
-  [1]
+  1

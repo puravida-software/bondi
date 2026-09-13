@@ -61,5 +61,6 @@
   eio
   eio.mock
   server_test_helpers
+  test_helpers
   unix
   yojson))

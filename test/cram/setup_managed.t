@@ -25,7 +25,16 @@ what reaches argv from what reaches stdin.
   >   *'label=bondi.type=managed'*)
   >     if [ -n "$MANAGED_PS_FAILS" ]; then exit 7; fi
   >     cat "$MANAGED_PS" ;;
-  >   *BONDI_ORCHESTRATOR_SERVING*) echo BONDI_ORCHESTRATOR_SERVING ;;
+  >   # The three readings setup takes off the box once it has started the
+  >   # container: the wait for a running state, the server's own check inside
+  >   # it, and a read of the container's log stream for the line the check
+  >   # writes to its diagnostic sink. The check writes a document and the log
+  >   # read carries the marker because an answer that says nothing is a
+  >   # rejection rather than a pass, so a command falling through to the
+  >   # catch-all below would fail this run for a reason no fixture here chose.
+  >   'attempt=0; while'*) : ;;
+  >   *'bondi-server check'*) echo '{"ready":true,"observations":[]}' ;;
+  >   'docker logs --tail'*) echo 'bondi check: diagnostic sink is writable' ;;
   >   *'/var/spool/cron/crontabs/root'*) echo BONDI_CRONTAB_ABSENT ;;
   >   *'PortBindings'*) echo '127.0.0.1' ;;
   >   # The host's applied restart policy. Without this arm the command falls
@@ -47,11 +56,13 @@ what reaches argv from what reaches stdin.
   >   # ends the command rather than merely containing it: the probe's own
   >   # listing asks for {{.State}} and {{.Image}} together, and an arm that
   >   # matched both would answer the probe with a version.
-  >   *'name=^/bondi-orchestrator$'*"--format '{{.Image}}'") echo 'mlopez1506/bondi-server:0.1.0' ;;
-  >   # This box is below the floor, so its orchestrator is never asked. The arm
-  >   # is here so that a change which stopped asking the version would show up
-  >   # as this line rather than as a silent fall-through to *).
-  >   *'bondi-server status'*) echo 'a box below the floor was asked anyway' >&2; exit 1 ;;
+  >   *'name=^/bondi-orchestrator$'*"--format '{{.Image}}'") echo 'mlopez1506/bondi-server:0.15.0' ;;
+  >   # The closing report's own reading, which is a different question from the
+  >   # one setup takes and is answered here so that a fall-through to *) cannot
+  >   # stand in for it. This box clears the floor, so the report does ask; what
+  >   # it is told is a refusal, and every report line this file prints is
+  >   # normalised, so the wording is not the subject.
+  >   *'bondi-server status'*) echo 'this fixture does not answer the report' >&2; exit 1 ;;
   >   *) : ;;
   > esac
   > STUB
@@ -67,7 +78,7 @@ A declared managed container that the server does not have.
   $ : > "$MANAGED_PS"
   $ cat > bondi.yaml <<'EOF'
   > bondi_server:
-  >   version: "0.1.0"
+  >   version: "0.15.0"
   > cron_jobs:
   >   - name: healthcheck
   >     image: example.com/healthcheck
@@ -97,14 +108,15 @@ Every run now ends on the report of what the host holds, which this file takes
 apart elsewhere; here the run's own lines are the subject, so they are taken
 without it.
 
-  $ bondi-client setup 2>&1 | head -10
+  $ bondi-client setup > out.log 2>&1
+  $ head -10 out.log
   Setting up the servers...
   Processing server: 127.0.0.1
   Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 127.0.0.1
   cron on server 127.0.0.1 resolves docker at /usr/bin/docker
   curl on server 127.0.0.1 can run the crontab lines an older bondi wrote: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
-  bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.1.0
+  bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.15.0
   No alloy is configured for server 127.0.0.1: /etc/bondi/alloy is not on the host
   Wrote secret environment file on server 127.0.0.1: /etc/bondi/gateway/env
   bondi-gateway container started on server 127.0.0.1: 
@@ -151,7 +163,7 @@ directory — which holds its secrets — deleted.
   $ printf 'gateway\tstale-hash\n' > "$MANAGED_PS"
   $ cat > bondi.yaml <<'EOF'
   > bondi_server:
-  >   version: "0.1.0"
+  >   version: "0.15.0"
   > cron_jobs:
   >   - name: healthcheck
   >     image: example.com/healthcheck
@@ -164,14 +176,15 @@ directory — which holds its secrets — deleted.
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
   > EOF
-  $ bondi-client setup 2>&1 | head -11
+  $ bondi-client setup > out.log 2>&1
+  $ head -11 out.log
   Setting up the servers...
   Processing server: 127.0.0.1
   Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 127.0.0.1
   cron on server 127.0.0.1 resolves docker at /usr/bin/docker
   curl on server 127.0.0.1 can run the crontab lines an older bondi wrote: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
-  bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.1.0
+  bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.15.0
   No alloy is configured for server 127.0.0.1: /etc/bondi/alloy is not on the host
   Stopped bondi-gateway container on server 127.0.0.1
   Removed bondi-gateway container on server 127.0.0.1
@@ -199,7 +212,7 @@ container that may already exist.
   $ export MANAGED_PS_FAILS=1
   $ cat > bondi.yaml <<'EOF'
   > bondi_server:
-  >   version: "0.1.0"
+  >   version: "0.15.0"
   > cron_jobs:
   >   - name: healthcheck
   >     image: example.com/healthcheck
@@ -267,7 +280,7 @@ converge, so the lookup does not matter.
   $ : > "$MANAGED_PS"
   $ cat > bondi.yaml <<'EOF'
   > bondi_server:
-  >   version: "0.1.0"
+  >   version: "0.15.0"
   > cron_jobs:
   >   - name: healthcheck
   >     image: example.com/healthcheck
@@ -280,14 +293,15 @@ converge, so the lookup does not matter.
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
   > EOF
-  $ bondi-client setup 2>&1 | head -7
+  $ bondi-client setup > out.log 2>&1
+  $ head -7 out.log
   Setting up the servers...
   Processing server: 127.0.0.1
   Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 127.0.0.1
   cron on server 127.0.0.1 resolves docker at /usr/bin/docker
   curl on server 127.0.0.1 can run the crontab lines an older bondi wrote: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
-  bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.1.0
+  bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.15.0
   $ unset MANAGED_PS_FAILS
 
 A container that declares no secrets still has its environment file written, so
@@ -301,7 +315,7 @@ old one on disk under a container that no longer references it.
   $ : > "$MANAGED_PS"
   $ cat > bondi.yaml <<'EOF'
   > bondi_server:
-  >   version: "0.1.0"
+  >   version: "0.15.0"
   > cron_jobs:
   >   - name: healthcheck
   >     image: example.com/healthcheck
@@ -321,14 +335,15 @@ old one on disk under a container that no longer references it.
   >     env_vars:
   >       TRADING_MODE: paper
   > EOF
-  $ bondi-client setup 2>&1 | head -10
+  $ bondi-client setup > out.log 2>&1
+  $ head -10 out.log
   Setting up the servers...
   Processing server: 127.0.0.1
   Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 127.0.0.1
   cron on server 127.0.0.1 resolves docker at /usr/bin/docker
   curl on server 127.0.0.1 can run the crontab lines an older bondi wrote: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
-  bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.1.0
+  bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.15.0
   No alloy is configured for server 127.0.0.1: /etc/bondi/alloy is not on the host
   Wrote secret environment file on server 127.0.0.1: /etc/bondi/gateway/env
   bondi-gateway container started on server 127.0.0.1: 
@@ -357,7 +372,7 @@ away from what the digest actually produces.
   $ export MANAGED_PS="$PWD/managed-ps.txt"
   $ cat > bondi.yaml <<'EOF'
   > bondi_server:
-  >   version: "0.1.0"
+  >   version: "0.15.0"
   > cron_jobs:
   >   - name: healthcheck
   >     image: example.com/healthcheck
@@ -396,14 +411,15 @@ Second run: same declaration, same hash. Nothing is stopped, removed, written or
 started.
 
   $ : > ssh-argv.log
-  $ bondi-client setup 2>&1 | head -7
+  $ bondi-client setup > out.log 2>&1
+  $ head -7 out.log
   Setting up the servers...
   Processing server: 127.0.0.1
   Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 127.0.0.1
   cron on server 127.0.0.1 resolves docker at /usr/bin/docker
   curl on server 127.0.0.1 can run the crontab lines an older bondi wrote: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
-  bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.1.0
+  bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.15.0
   $ grep -c 'bondi-gateway' ssh-argv.log
   0
   [1]
@@ -417,7 +433,8 @@ fixture missing the code path.
 
   $ sed -i 's/tag: "10.48.1e"/tag: "10.49.0a"/' bondi.yaml
   $ : > ssh-argv.log
-  $ bondi-client setup 2>&1 | grep -E 'gateway container|environment file'
+  $ bondi-client setup > out.log 2>&1
+  $ grep -E 'gateway container|environment file' out.log
   Stopped bondi-gateway container on server 127.0.0.1
   Removed bondi-gateway container on server 127.0.0.1
   Wrote secret environment file on server 127.0.0.1: /etc/bondi/gateway/env

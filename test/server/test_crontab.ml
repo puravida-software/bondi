@@ -3,6 +3,8 @@ module Crontab = Bondi_server__Crontab
 module Alert = Bondi_common.Alert
 module String_utils = Bondi_common.String_utils
 
+let exec_line = Test_helpers.exec_line
+
 let test_job_name_from_cron_line_valid () =
   let line =
     "* * * * * /usr/bin/curl -s -X POST http://localhost:3030/api/v1/run -H \
@@ -773,6 +775,120 @@ let test_a_marker_carrying_whitespace_is_still_the_section () =
     (merged (Some [ redeployed_backup ])
        [ "# BEGIN BONDI CRON\r"; line_holding_a_value; "# END BONDI CRON  " ])
 
+(* The reading a report rests on, and the one place [None] and [Some []] are
+   opposite answers rather than two spellings of nothing. [None] is a host
+   nothing is known about; [Some []] is a host that fires none of Bondi's jobs.
+   A reader that answered [Some []] for the first would name every payload file
+   on the box as belonging to a job nothing fires -- loudly, and on exactly the
+   host whose crontab Bondi understands least.
+
+   Every arm runs against a file this test wrote and removed, so none of them
+   reads the crontab of whichever machine ran the suite. *)
+
+let with_a_crontab contents body =
+  let path = Filename.temp_file "bondi-crontab" "" in
+  Fun.protect
+    ~finally:(fun () ->
+      try Sys.remove path with
+      | Sys_error _ -> ())
+    (fun () ->
+      let channel = open_out path in
+      Fun.protect
+        ~finally:(fun () -> close_out channel)
+        (fun () ->
+          List.iter (fun line -> output_string channel (line ^ "\n")) contents);
+      body path)
+
+let test_section_job_names_reads_the_section_in_order () =
+  with_a_crontab
+    [
+      "0 1 * * * /usr/bin/something-else";
+      Bondi_common.Cron_section.begin_marker;
+      exec_line "rotate";
+      exec_line "backup";
+      Bondi_common.Cron_section.end_marker;
+    ]
+    (fun path ->
+      check
+        (option (list string))
+        "the jobs the section fires, in the order it names them"
+        (Some [ "rotate"; "backup" ])
+        (Crontab.section_job_names ~crontab_path:path))
+
+(* A crontab that is not there is an answer and a crontab whose markers do not
+   balance is not. The affirmative arm above runs on the same reader, so an
+   implementation that had stopped finding any section at all could not satisfy
+   both. *)
+let test_section_job_names_separates_no_answer_from_no_jobs () =
+  with_a_crontab
+    [ Bondi_common.Cron_section.end_marker; exec_line "rotate" ]
+    (fun path ->
+      check
+        (option (list string))
+        "markers that do not balance are no answer at all" None
+        (Crontab.section_job_names ~crontab_path:path));
+  with_a_crontab [ "0 1 * * * /usr/bin/something-else" ] (fun path ->
+      check
+        (option (list string))
+        "a crontab with no Bondi section fires none of Bondi's jobs" (Some [])
+        (Crontab.section_job_names ~crontab_path:path));
+  let absent = Filename.temp_file "bondi-crontab-absent" "" in
+  Sys.remove absent;
+  check
+    (option (list string))
+    "a crontab that is not there fires none of them either" (Some [])
+    (Crontab.section_job_names ~crontab_path:absent)
+
+(* A file that is there and will not open is the other [None], and it is a
+   different code path from the malformed one above: that one reads the file and
+   refuses what it found, this one never reads it. Root would find every fixture
+   readable, so the arm is asserted not to be running as root rather than
+   skipped -- an arm that silently does not run is the one that proves nothing.
+*)
+let test_section_job_names_answers_none_for_a_crontab_it_cannot_read () =
+  check bool "the suite does not run as root, or this arm proves nothing" false
+    (Int.equal (Unix.geteuid ()) 0);
+  with_a_crontab
+    [
+      Bondi_common.Cron_section.begin_marker;
+      exec_line "rotate";
+      Bondi_common.Cron_section.end_marker;
+    ]
+    (fun path ->
+      check
+        (option (list string))
+        "the same file, readable, is the affirmative arm" (Some [ "rotate" ])
+        (Crontab.section_job_names ~crontab_path:path);
+      Unix.chmod path 0o000;
+      check
+        (option (list string))
+        "a crontab that will not open is no answer, never an empty one" None
+        (Crontab.section_job_names ~crontab_path:path);
+      Unix.chmod path 0o600)
+
+(* A third [None], and the one neither arm above reaches: a path that is there,
+   that stats, that opens, and that is not a file at all. Docker creates a
+   directory on the host for any bind-mount source that does not exist, so a
+   [crontab_path] naming a directory is an ordinary misconfiguration rather than
+   an exotic one, and the read of it raises where the two arms above return. The
+   reader owes it the answer it owes an unreadable file -- no answer at all --
+   because the caller above it is a probe whose written contract is that a
+   reading it cannot take is an [Error] and never an exception. *)
+let test_section_job_names_answers_none_for_a_path_that_is_a_directory () =
+  let path = Filename.temp_file "bondi-crontab-dir" "" in
+  Sys.remove path;
+  Unix.mkdir path 0o700;
+  Fun.protect
+    ~finally:(fun () ->
+      try Unix.rmdir path with
+      | Unix.Unix_error _ -> ())
+    (fun () ->
+      check
+        (option (list string))
+        "a crontab path that is a directory is no answer, never an empty one"
+        None
+        (Crontab.section_job_names ~crontab_path:path))
+
 let () =
   run "Crontab"
     [
@@ -782,6 +898,17 @@ let () =
           test_case "malformed line" `Quick
             test_job_name_from_cron_line_malformed;
           test_case "no json" `Quick test_job_name_from_cron_line_no_json;
+        ] );
+      ( "section_job_names",
+        [
+          test_case "reads the section in the order it names them" `Quick
+            test_section_job_names_reads_the_section_in_order;
+          test_case "separates no answer from no jobs" `Quick
+            test_section_job_names_separates_no_answer_from_no_jobs;
+          test_case "a crontab it cannot read is no answer" `Quick
+            test_section_job_names_answers_none_for_a_crontab_it_cannot_read;
+          test_case "a crontab path that is a directory is no answer" `Quick
+            test_section_job_names_answers_none_for_a_path_that_is_a_directory;
         ] );
       ( "merge_bondi_section",
         [

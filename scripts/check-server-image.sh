@@ -16,10 +16,12 @@
 #   1. that command, with only its image reference and container name
 #      substituted, serves HTTP
 #   2. `status` writes the same bytes the status route writes
-#   3. `check` reports the box ready, as JSON, exits 0, and the marker it
-#      writes to PID 1's stderr comes back out of `docker logs`
-#   4. `check --cron-configured` fails on a container with no spool, exits 3,
-#      and still writes its readiness document to stdout
+#   3. `check` reports the box ready, as JSON, exits 0, the marker it writes to
+#      PID 1's stderr comes back out of `docker logs`, and the cron divergence
+#      is not among the probes a deployment without cron is asked about
+#   4. `check --cron-configured` fails on a container with no spool, exits the
+#      not-ready code, still writes its readiness document to stdout, and does
+#      ask about the cron divergence
 #   5. a payload that does not decode exits 2, and the route answers 400
 #   6. a well-formed request Bondi cannot carry out exits 1, and the route 500
 #
@@ -49,6 +51,56 @@ container="bondi-check-$$"
 base_url="http://127.0.0.1:3030/api/v1"
 here="$(cd "$(dirname "$0")" && pwd)"
 fixture="$here/orchestrator-run-command.txt"
+# The line `check` writes to its diagnostic sink, taken from the single place it
+# is spelled rather than repeated here. A copy in this script would be a second
+# spelling, and a divergence between the two spellings is precisely the defect
+# this assertion exists to catch: the server would go on writing its line and
+# this gate would go on looking for a different one, silently, from both ends.
+#
+# It is derived from the source rather than read out of the running binary
+# because the binary writes the line to PID 1's stderr and nowhere else -- which
+# is the stream asserted against below, so a needle taken from it would be
+# matching itself -- and no other output carries it.
+#
+# The extraction is anchored to the definition, so a comment that happens to
+# quote the line cannot supply it, and it must yield exactly one line: an empty
+# needle makes `grep -qF` match every line of the log and this gate would then
+# pass having asserted nothing.
+#
+# What this does not cover: the needle comes from the working tree, not from the
+# image under test, so an image built from an older tree fails this assertion
+# without the two spellings having drifted from each other. That is the same
+# assumption the run-command fixture beside this script already makes -- the
+# check is of an image built from this tree.
+marker_source="$here/../lib/common/check_marker.ml"
+marker="$(sed -n 's/^let diagnostic_sink = "\(.*\)"$/\1/p' "$marker_source")"
+if [ -z "$marker" ] || [ "$(printf '%s\n' "$marker" | wc -l)" -ne 1 ]; then
+    echo "error: could not derive the check marker from $marker_source" >&2
+    exit 1
+fi
+# The exit code a Bondi server subcommand leaves behind when the box is not in a
+# state to serve, taken from the single place it is spelled. A copy here would be
+# a second spelling, and the assertions below cannot tell a code that drifted
+# from a code that was always wrong: each of them reads a number back out of a
+# container and compares it to a number this script supplied.
+#
+# It is derived from the source for the same reason the marker is -- the number
+# the image leaves is the thing under test, so an expectation read back out of it
+# would be matching itself -- and the extraction is anchored to the definition so
+# that a comment quoting the value cannot supply it. It is checked because a
+# derivation that quietly yielded nothing would turn every assertion below into
+# one that reports "expected " and names no value.
+#
+# What this does not cover: as with the marker, the number comes from the working
+# tree rather than from the image under test, so an image built from an older
+# tree fails these assertions without the two spellings having drifted from each
+# other. That is the same assumption the rest of this check already makes.
+not_ready_source="$here/../lib/common/readiness_exit_code.ml"
+not_ready="$(sed -n 's/^let not_ready = \([0-9][0-9]*\)$/\1/p' "$not_ready_source")"
+if [ -z "$not_ready" ] || [ "$(printf '%s\n' "$not_ready" | wc -l)" -ne 1 ]; then
+    echo "error: could not derive the not-ready exit code from $not_ready_source" >&2
+    exit 1
+fi
 attempts=30
 work="$(mktemp -d)"
 
@@ -207,6 +259,24 @@ expect_stream_contains() {
     echo "ok: $what: $stream names '$needle'"
 }
 
+# The absence half. It is only worth anything beside an affirmative arm on the
+# same container, which is why the two `check` runs below are a pair: the same
+# box, the same paths, and only the flag different. Without that, a probe that
+# had stopped being taken at all would satisfy the absence and nothing here
+# would notice.
+expect_stream_lacks() {
+    local what stream needle
+    what="$1"
+    stream="$2"
+    needle="$3"
+    if grep -qF -- "$needle" "$work/$stream"; then
+        echo "error: $what: did not expect '$needle' on $stream" >&2
+        show_subcommand
+        return 1
+    fi
+    echo "ok: $what: $stream does not name '$needle'"
+}
+
 expect_stream_nonempty() {
     local what stream
     what="$1"
@@ -325,11 +395,17 @@ run_subcommand /dev/null check
 expect_code "check" 0
 expect_stream_contains "check" stdout '"ready":true'
 expect_stream_contains "check" stdout '"docker_socket"'
-expect_container_log_contains "check" 'bondi check: diagnostic sink is writable'
+expect_container_log_contains "check" "$marker"
+# A deployment that configures no cron is not asked about the cron divergence,
+# and a probe that was not taken is absent from the document rather than
+# recorded as having passed. The container cannot answer that question about
+# itself, so a pass here would be a claim about two sources nobody compared.
+# The affirmative arm is the very next run, on this same container.
+expect_stream_lacks "check" stdout '"cron_divergence"'
 
 echo "==> $image: check --cron-configured fails where there is no spool"
 run_subcommand /dev/null check --cron-configured
-expect_code "check --cron-configured" 3
+expect_code "check --cron-configured" "$not_ready"
 expect_stream_contains "check --cron-configured" stderr 'crontab spool'
 # The document goes to stdout on the failing arm as well, which is the whole
 # reason `check` writes through `Cmd_io.diagnostic_of` rather than
@@ -346,6 +422,17 @@ expect_stream_contains "check --cron-configured" stderr 'crontab spool'
 # both reached their own stream.
 expect_stream_contains "check --cron-configured" stdout '"ready":false'
 expect_stream_contains "check --cron-configured" stdout '"crontab_spool"'
+# The affirmative arm for the absence asserted above: the same container, the
+# same paths, the flag the only difference, and the probe is in the document.
+#
+# It passes here, and the code above stays the not-ready one because of the
+# spool alone. This container has no crontab and no payload directory, so both
+# sources answer and they agree -- a host that fires none of Bondi's jobs and
+# holds no job's files is not in disagreement with itself. That is what keeps
+# this arm a pin on the readiness class rather than on whichever probe happened
+# to fail: a deployment declaring cron against an image with no spool must still
+# fail, and it still does.
+expect_stream_contains "check --cron-configured" stdout '"cron_divergence"'
 
 echo "==> $image: a payload that does not decode"
 cp "$work/invalid-deploy.json" "$work/payload.json"
@@ -373,5 +460,10 @@ run_subcommand /dev/null check --cron-configured
 expect_code "check --cron-configured" 0
 expect_stream_contains "check --cron-configured" stdout '"ready":true'
 expect_stream_contains "check --cron-configured" stdout '"crontab_spool"'
+# On the box that mounts the spool the divergence probe is taken and passes:
+# the mounted crontab holds no Bondi section and no job has been deployed, so
+# both sources answer and agree. A ready verdict that had simply dropped the
+# probe would fail the line above it.
+expect_stream_contains "check --cron-configured" stdout '"cron_divergence"'
 
 echo "ok: $image answers on the command line what it answers over HTTP"

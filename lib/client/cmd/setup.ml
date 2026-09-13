@@ -143,6 +143,18 @@ let phase_of_action : action -> Setup_phases.phase = function
   | CleanManagedConfig _ ->
       Setup_phases.Managed
 
+(* The whole sentence an operator is left with when an action fails: the host's
+   own words, then the phase the run stopped in and the phases it never
+   reached. It is a named value rather than a step inside the interpreter's
+   fold because the composition is the thing that has to hold -- the
+   orchestrator's report quotes the container's account, and the phase report
+   wraps it; either one dropping the other is a change no test of either alone
+   would see. *)
+let action_failure_report ~server ~failed ~remaining ~reason =
+  Setup_phases.failure_message ~server ~failed:(phase_of_action failed)
+    ~remaining:(List.map phase_of_action remaining)
+    ~reason
+
 (* ------------------------------------------------------------------------- *)
 (* Phase 1: Gather context (read-only)                                       *)
 (* ------------------------------------------------------------------------- *)
@@ -306,6 +318,103 @@ let orchestrator_restart_convergence ~expected observed =
             observed = got;
             command = orchestrator_restart_update_command ~policy:expected;
           }
+
+(* One reading the orchestrator phase takes off the box after it has started
+   the container, and the order the phase takes them in.
+
+   A list rather than two calls written one after the other in the arm that
+   runs them: the order is the property -- a reading taken before the container
+   is running answers for a container that has not started, and a second
+   reading is not free, because the check writes to the container's log stream
+   and, where cron is configured, touches the spool the host's cron daemon
+   watches. The log stream is read last for the same kind of reason: the line
+   it looks for is one the check writes, so a read taken ahead of the check
+   answers for a stream the check had not written to yet. Held as a value, that
+   order is something a test can read; spelled inline, it is something only a
+   host can disagree with. *)
+type orchestrator_reading = Wait_running | Take_check | Read_log_stream
+
+let orchestrator_readings = [ Wait_running; Take_check; Read_log_stream ]
+
+(* Whether cron is converged on this host is the caller's to say, and it is
+   answered from the parsed configuration and the crontab reading setup has
+   already taken, rather than from anything the container reports about itself:
+   a container cannot soundly infer either, and the host's crontab is the thing
+   being converged rather than the thing being asked. It is the same value that
+   decides the cron mounts, so the box the reading asks about its spool is
+   exactly the box that was given one.
+
+   How much of the log stream is read back is not a number this phase chooses.
+   It is the bound the diagnostics read already asks for, spelled once in
+   [Orchestrator_probe] and read from there: a second spelling here is a number
+   that can drift from the one an operator is shown without anything saying
+   so. *)
+let orchestrator_reading_command ~cron_configured = function
+  | Wait_running ->
+      Orchestrator_probe.running_command
+        ~container_name:Builtin_container.orchestrator
+        ~attempts:Orchestrator_probe.running_attempts
+  | Take_check ->
+      Orchestrator_probe.check_command
+        ~container_name:Builtin_container.orchestrator ~cron_configured
+  | Read_log_stream ->
+      Orchestrator_probe.log_stream_command
+        ~container_name:Builtin_container.orchestrator
+        ~lines:Orchestrator_probe.log_lines
+
+(* What one reading's outcome means, decided here so that the arm which runs it
+   only carries the decision out.
+
+   The wait has no verdict function of its own: it is written so that its exit
+   status is its whole answer -- zero once the container reads as running, and
+   non-zero with a sentence on standard error otherwise -- and the transport
+   brings that sentence back with the failure. So the reading is the status,
+   and what an operator is told is the transport's own account of it, which
+   already separates a command the host ran and refused from a host that was
+   never reached at all.
+
+   The check's three outcomes collapse to two here, and only here: a box that
+   named its faults and a box that answered nothing are the same thing to a
+   phase that must stop either way, but they are different sentences, and each
+   arrives carrying its own. Collapsing them any earlier would be collapsing
+   the sentence too. *)
+let orchestrator_reading_verdict reading reading_output =
+  match reading with
+  | Wait_running -> (
+      match reading_output with
+      | Ok _ -> Ok ()
+      | Error failure ->
+          Error
+            (Remote_exec.explain
+               ~subject:
+                 "the wait for the orchestrator container to reach a running \
+                  state"
+               failure))
+  | Take_check -> (
+      match Orchestrator_probe.verdict_of_output reading_output with
+      | Orchestrator_probe.Serving -> Ok ()
+      | Orchestrator_probe.Not_ready reason
+      | Orchestrator_probe.Unreachable reason ->
+          Error reason)
+  | Read_log_stream -> (
+      (* A stream that came back without the line and a stream that could not
+         be read are kept apart here, because they send an operator to
+         different places: the first to a container that is running and can no
+         longer be seen -- the sink reported that it took the bytes, so what is
+         broken is downstream of it -- and the second to the transport, the key
+         or the container name. Both stop the phase all the same: neither is
+         evidence that a line the server wrote arrived, and reporting success
+         without that evidence is what lets a deployment delete its own
+         observability quietly. *)
+      match Orchestrator_probe.log_stream_of_output reading_output with
+      | Orchestrator_probe.Carrying -> Ok ()
+      | Orchestrator_probe.Silent ->
+          Error
+            "the box answered, and the line it writes to its diagnostic sink \
+             was not in the container's recent log output -- the sink took the \
+             bytes and the stream an operator and a log shipper read is not \
+             carrying them"
+      | Orchestrator_probe.Unreadable reason -> Error reason)
 
 (* The mode Bondi declares for the River config file, as one named value so that
    the command that writes it and the expectation the read-back is checked
@@ -1027,6 +1136,21 @@ let plan (config : Config_file.t) ~(specs : Managed_container.t list)
    declaration surfaces here rather than inside the plan. *)
 let plan_for_config (config : Config_file.t) (ctx : setup_context) =
   let* specs = Config_file.managed_containers config in
+  (* The declared image, held to the floor before anything is started rather
+     than after. An image below it has no subcommands to answer with: it
+     ignores the arguments and starts serving, so the reading setup takes to
+     establish that the container came up never answers at all, and the box is
+     reported as one that could not be reached. Refused here, the operator is
+     told which version was asked for and which is required, on a host where
+     nothing has been stopped, removed or run.
+
+     The floor is the one the client already holds a box to before running a
+     subcommand inside its container, not a second number: two floors for one
+     capability drift, and the drift is silent in the direction that accepts a
+     box which cannot answer. *)
+  let* () =
+    Server_version.answers_command_surface config.bondi_server.version
+  in
   let* () =
     match ctx.docker_status with
     (* Installing Docker restarts the daemon, and with it every container
@@ -1401,21 +1525,34 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
                    got expected)
         in
         (* [docker run -d] reports that the container was created, which is not
-           the same fact as the server being up. The verdict is a pure decision
-           in [Orchestrator_probe]; this arm obtains the host's answer, and
-           fetches the container's own account of the failure only when there is
-           one to explain. *)
-        let probe =
-          Remote_exec.command_output ?session
-            ~timeout_seconds:host_command_seconds
-            ~command:
-              (Orchestrator_probe.probe_command
-                 ~port:Bondi_common.Defaults.server_port
-                 ~attempts:Orchestrator_probe.readiness_attempts)
-            server
-        in
+           the same fact as the server being up. Each reading's verdict is a
+           pure decision; this arm obtains the host's answers in the order the
+           readings declare, stops at the first that rejects, and fetches the
+           container's own account of the failure only when there is one to
+           explain.
+
+           What the reading is told about cron is the value this run already
+           planned from, not a second predicate built here. It is still read
+           from the configuration rather than from the box -- the container
+           cannot soundly infer it about itself, and the host's crontab is the
+           thing this run converges rather than the thing it asks -- but it
+           also counts the reading of the crontab setup has already taken and
+           already acted on. A box that declares no job and is holding a Bondi
+           section got the spool and the payload mounts a moment ago; asked the
+           narrower question it would be the one box never probed about the
+           lines it is likeliest to be holding. *)
         let* () =
-          Orchestrator_probe.verdict probe
+          List.fold_left
+            (fun taken reading ->
+              let* () = taken in
+              orchestrator_reading_verdict reading
+                (Remote_exec.command_output ?session
+                   ~timeout_seconds:host_command_seconds
+                   ~command:
+                     (orchestrator_reading_command
+                        ~cron_configured:cron_payload_needed reading)
+                   server))
+            (Ok ()) orchestrator_readings
           |> Result.map_error (fun reason ->
               let diagnostics =
                 match
@@ -1683,10 +1820,8 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
         | Ok () -> run rest
         | Error reason ->
             Error
-              (Setup_phases.failure_message ~server:ip_address
-                 ~failed:(phase_of_action action)
-                 ~remaining:(List.map phase_of_action rest)
-                 ~reason))
+              (action_failure_report ~server:ip_address ~failed:action
+                 ~remaining:rest ~reason))
   in
   run actions
 
@@ -1757,6 +1892,29 @@ let converge_orchestrator_restart_policy ?session (server : Config_file.server)
            Builtin_container.orchestrator ip_address observed expected);
       Ok ()
 
+(* The run that creates the container reads the policy too. The `--restart` on
+   the `docker run` this tool issues is a request; what the daemon applied is
+   only ever visible from an inspect, which is the same reasoning the
+   convergence above already rests on -- three containers created with the flag
+   were found at `no` on 2026-09-02. A host that had no Docker is therefore not
+   a host whose policy is known, it is the one host nobody has ever asked, and
+   the first `bondi setup` a box ever gets used to be the only run that skipped
+   the question.
+
+   A Docker state that could not be read is still skipped, and that is not
+   symmetry for its own sake: an inspect issued against a host whose version
+   probe never answered fails on the transport, and the run would report that
+   as a restart policy it could not converge -- a second failure describing the
+   first one badly. [plan_for_config] has already refused such a reading before
+   this is reached, so the arm is the rule written down rather than a path with
+   traffic on it. *)
+let converge_restart_policy ?session server ~docker_status =
+  match docker_status with
+  | Docker_installed _
+  | Docker_not_installed _ ->
+      converge_orchestrator_restart_policy ?session server
+  | Docker_undetermined _ -> Ok ()
+
 (* ------------------------------------------------------------------------- *)
 (* Entry point                                                               *)
 (* ------------------------------------------------------------------------- *)
@@ -1821,17 +1979,8 @@ let setup_server config server =
             ~cron_payload_needed:(cron_payload_needed config context)
             server config actions
         in
-        match context.docker_status with
-        (* A host that had no Docker holds no container this run did not just
-           create, and it was created by a command that carries the flag. The
-           convergence exists for containers that predate the run; here there
-           are none. *)
-        | Docker_not_installed _ -> Ok ()
-        (* [plan_for_config] has already refused a Docker version it could
-           not read, so this arm is never reached with one. *)
-        | Docker_undetermined _ -> Ok ()
-        | Docker_installed _ ->
-            converge_orchestrator_restart_policy ?session server
+        converge_restart_policy ?session server
+          ~docker_status:context.docker_status
       in
       (* One staged key for the whole of a server's run, rather than one with
          every command in it. This is the client's longest sequence of remote

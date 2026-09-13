@@ -409,6 +409,75 @@ let read_job_file path =
   | Sys_error _ -> None
   | End_of_file -> None
 
+(* A read for reporting, which is not the read [read_crontab] performs. That one
+   answers a rewrite, where a file that cannot be opened and a file that is not
+   there are the same thing -- both mean "start from nothing" -- and it takes
+   the module's own path. This one answers a comparison, where the two are
+   opposite: a crontab that is not there is a host firing none of Bondi's jobs,
+   which is an answer, and a crontab that would not open is no answer at all,
+   because reporting it as empty would name every one of the host's payload
+   files as belonging to a job nothing fires.
+
+   [Unix.stat] is what separates them. [open_in] raises [Sys_error] for a file
+   that is absent and for one the process may not read, with the distinction
+   only in the message text, and matching on that text is matching on libc's
+   wording. [observed -- 2026-09-12] OCaml 5.3 on this box, running as uid 1000:
+   on a path nothing made, [Unix.stat] raises [ENOENT] and [open_in] raises
+   [Sys_error "<path>: No such file or directory"]; on /etc/shadow, mode 400
+   owned by root, [Unix.stat] raises nothing at all and [open_in] raises
+   [Sys_error "/etc/shadow: Permission denied"]. So the stat sorts absent from
+   present and the open is still what decides whether a present file can be
+   read.
+
+   The read itself is the third refusal, and neither of those two reaches it: a
+   path that stats and opens can still not be a file whose length is a length or
+   whose bytes can be taken, and [Sys_error] is what says so. A directory is the
+   ordinary way to arrive here rather than an exotic one -- Docker creates a
+   directory on the host for any bind-mount source that does not exist, so a
+   [crontab_path] pointed at a mount that was never made is a directory that
+   stats and opens. [observed -- 2026-09-12] OCaml 5.3 on this box: on a
+   directory, [Unix.stat] and [open_in] both succeed and [really_input_string]
+   raises [Sys_error "Invalid argument"]. A non-seekable file refuses
+   [in_channel_length] the same way. The answer owed is the one an unreadable
+   file gets -- none -- because an exception here leaves this module's caller,
+   whose written contract is that a reading it cannot take is an [Error] and
+   never a raise. *)
+let read_crontab_at path =
+  match Unix.stat path with
+  | exception Unix.Unix_error (Unix.ENOENT, _, _) -> Some ""
+  | exception Unix.Unix_error _ -> None
+  | _stats -> (
+      match open_in path with
+      | exception Sys_error _ -> None
+      | ic ->
+          Fun.protect
+            ~finally:(fun () -> close_in_noerr ic)
+            (fun () ->
+              match really_input_string ic (in_channel_length ic) with
+              | contents -> Some contents
+              | exception End_of_file -> None
+              | exception Sys_error _ -> None))
+
+(* The exec reader alone, where [name_of_section_line] above asks the legacy
+   reader too. A legacy line carries the whole job on the line, so it has no
+   payload files and never had any; naming it here would report every live
+   legacy line as a job whose files are gone and tell the operator to delete a
+   line that works. The client's reader makes the same choice, and the two ends
+   compare like for like because of it. *)
+let section_job_names ~crontab_path =
+  match read_crontab_at crontab_path with
+  | None -> None
+  | Some contents -> (
+      let lines = String.split_on_char '\n' contents in
+      match Bondi_common.Cron_section.split_lines lines with
+      | Error _ -> None
+      | Ok { before = _; section = None; after = _ } -> Some []
+      | Ok { before = _; section = Some section; after = _ } ->
+          Some
+            (section
+            |> List.filter Bondi_common.Cron_section.is_entry_line
+            |> List.filter_map job_name_from_exec_line))
+
 let list_scheduled_jobs () : (listed_job list, string) result =
   let* contents = read_crontab () in
   let lines = String.split_on_char '\n' contents in

@@ -307,19 +307,22 @@ let eval_argv ~serve ~observe ~argv =
 
 (* The paths the container the server runs in actually uses. Each is the one the
    code that owns it exports, never a literal repeated here: the socket the
-   Docker client opens, the spool the crontab module writes, and the stream the
-   diagnostics module duplicates its lines to.
+   Docker client opens, the spool and the crontab file the crontab module
+   writes, the stream the diagnostics module duplicates its lines to, and the
+   directory the cron payload writer makes a job's files under.
 
-   The gather is taken as an argument rather than named here, and all three
-   paths are strings, so a transposed pair type-checks and every unit test that
-   drives the group through an injected gather passes -- the fault would surface
-   only in the image gate, which needs a Docker Engine and does not run under
+   The gather is taken as an argument rather than named here, and all five paths
+   are strings, so a transposed pair type-checks and every unit test that drives
+   the group through an injected gather passes -- the fault would surface only
+   in the image gate, which needs a Docker Engine and does not run under
    [dune test]. Passing the gather in is what lets a test read back which
    constant landed in which slot. *)
 let production_observe ~observe ~cron_configured =
   observe ~cron_configured ~docker_socket:Docker.Client.default_socket_path
     ~spool_dir:Crontab.crontab_spool_dir
     ~diagnostic_sink:Diagnostics.pid_one_stderr
+    ~crontab_path:Crontab.crontab_path
+    ~payload_dir:Bondi_common.Cron_exec_line.cron_root
 
 let eval () =
   eval_argv ~serve:Server.serve

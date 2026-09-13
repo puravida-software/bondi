@@ -107,6 +107,8 @@ val production_observe :
     docker_socket:string ->
     spool_dir:string ->
     diagnostic_sink:string ->
+    crontab_path:string ->
+    payload_dir:string ->
     Readiness.observation list) ->
   cron_configured:bool ->
   Readiness.observation list

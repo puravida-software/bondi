@@ -33,14 +33,18 @@ let http_status : t -> Dream.status = function
    [_opam/lib/cmdliner/cmdliner.mli] on 2026-09-05. 0 is excluded because it
    would report a failure as a success.
 
-   [Not_ready] takes 3, the first code the fences above leave free. It is not
+   [Not_ready] takes the first code the fences above leave free. It is not
    folded onto 1 because an operator reading 1 cannot tell a box that failed a
    readiness probe -- a machine to repair -- from a request that failed while
-   the box was serving, and the two have different next steps. *)
+   the box was serving, and the two have different next steps. Its number is
+   the one arm a reader outside this library also has to know, because a client
+   receives it as a bare status over a transport that carries nothing else, so
+   it is taken from the shared library rather than spelled a second time
+   there. *)
 let exit_code : t -> int = function
   | Invalid_request _ -> 2
   | Orchestrator_failure _ -> 1
-  | Not_ready _ -> 3
+  | Not_ready _ -> Bondi_common.Readiness_exit_code.not_ready
 
 (* The sentence an operator reads beside a code they have just been left with.
    Matched on the class rather than keyed by the number, so that a class added

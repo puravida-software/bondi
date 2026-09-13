@@ -22,7 +22,16 @@ inspection says has a healthcheck to answer for. This host's checks pass.
   >   'docker --version') echo 'Docker version 27.0.0, build deadbeef' ;;
   >   *BONDI_CRON_DOCKER_PRESENT*) echo 'BONDI_CRON_DOCKER_PRESENT /usr/bin/docker' ;;
   >   'curl --version') echo 'curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0' ;;
-  >   *BONDI_ORCHESTRATOR_SERVING*) echo BONDI_ORCHESTRATOR_SERVING ;;
+  >   # The three readings setup takes off the box once it has started the
+  >   # container: the wait for a running state, the server's own check inside
+  >   # it, and a read of the container's log stream for the line the check
+  >   # writes to its diagnostic sink. The check writes a document and the log
+  >   # read carries the marker because an answer that says nothing is a
+  >   # rejection rather than a pass, so a command falling through to the
+  >   # catch-all below would fail this run for a reason no fixture here chose.
+  >   'attempt=0; while'*) : ;;
+  >   *'bondi-server check'*) echo '{"ready":true,"observations":[]}' ;;
+  >   'docker logs --tail'*) echo 'bondi check: diagnostic sink is writable' ;;
   >   *"'--name' 'bondi-gateway'"*) echo 'a1b2c3d4e5f6' ;;
   >   *BONDI_CONTAINER_TIMEOUT*) echo BONDI_CONTAINER_HEALTHY ;;
   >   'docker ps -a --format'*)
@@ -93,7 +102,7 @@ the source's row is produced, not how the kernel words a refusal.
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
   > bondi_server:
-  >   version: "0.10.3"
+  >   version: "0.15.0"
   > cron_jobs:
   >   - name: daily-close
   >     image: example.com/daily-close
@@ -125,7 +134,7 @@ lines the run printed on its way there are unchanged.
   cron on server 127.0.0.1 resolves docker at /usr/bin/docker
   curl on server 127.0.0.1 can run the crontab lines an older bondi wrote: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
   ACME file permissions updated on server 127.0.0.1: /etc/traefik/acme/acme.json
-  bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.10.3
+  bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.15.0
   No alloy is configured for server 127.0.0.1: /etc/bondi/alloy is not on the host
   Wrote secret environment file on server 127.0.0.1: /etc/bondi/gateway/env
   bondi-gateway container started on server 127.0.0.1: a1b2c3d4e5f6
@@ -174,12 +183,14 @@ last thing the plan did.
   the host is read after it is converged
 
 The orchestrator was genuinely looked for — once for the server, with its one
-answer then carried onto every row. This box runs a server from before there
-were subcommands to ask it with, so the answer is the refusal, naming what the
-box reported, what is required and the command that fixes it. What the
-normalisation above hides is that wording, not whether the source was
-consulted. A run that quietly declined to look would print a different sentence
-here, and every row carries the source's own account of why it has nothing.
+answer then carried onto every row. The stub answers every read from the same
+fixture whether or not this run converged anything, so what the report sees is
+the box as it stood before: a server from before there were subcommands to ask
+it with. The answer is therefore the refusal, naming what the box reported,
+what is required and the command that fixes it. What the normalisation above
+hides is that wording, not whether the source was consulted. A run that quietly
+declined to look would print a different sentence here, and every row carries
+the source's own account of why it has nothing.
 
   $ grep -c "not reachable: the server is running bondi-server 0.10.3, but this command runs a 'bondi-server' subcommand" out.log
   5
