@@ -53,6 +53,25 @@ let test_make_https_ok () =
          error: %s"
         msg
 
+(* The property an outbound handshake actually depends on, held where a unit
+   test can hold it. [Tls_eio.client_of_flow] draws from the default generator,
+   so an unseeded generator raises at handshake time and not at construction --
+   which is exactly why asserting [make_https ()] returns [Ok] does not cover
+   this, and why the case below calls the seam and then draws bytes itself. *)
+let test_make_https_seeds_the_generator () =
+  let (_ : Alert_delivery.https) = https_or_fail () in
+  (* Deliberately unguarded: an unseeded generator raises
+     [Mirage_crypto_rng.No_default_generator], whose registered printer is
+     verbatim the line the image gate's `image-gate-alert-tls` arm failed on, so
+     letting it surface reports the regression better than any message written
+     here. Wrapping it would also mean naming the exception, and the measured
+     raise is [No_default_generator] rather than the [Unseeded_generator] the
+     name suggests -- a handler on the wrong one is a dead arm. *)
+  let bytes = Mirage_crypto_rng.generate 32 in
+  Alcotest.(check int)
+    "the seeded generator answers with the requested number of bytes" 32
+    (String.length bytes)
+
 let test_deliver_posts_to_each_target () =
   Eio_mock.Backend.run @@ fun () ->
   let clock = Eio_mock.Clock.make () in
@@ -114,7 +133,11 @@ let () =
             test_is_success_status;
         ] );
       ( "make_https",
-        [ Alcotest.test_case "loads trust store" `Quick test_make_https_ok ] );
+        [
+          Alcotest.test_case "loads trust store" `Quick test_make_https_ok;
+          Alcotest.test_case "the seam leaves the generator seeded" `Quick
+            test_make_https_seeds_the_generator;
+        ] );
       ( "deliver",
         [
           Alcotest.test_case "posts to each target" `Quick

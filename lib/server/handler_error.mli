@@ -1,9 +1,8 @@
-(** Why an endpoint did not produce a result.
+(** Why a subcommand did not produce a result.
 
-    The classification is what both the HTTP status and the process exit code
-    are chosen from, so it is a variant rather than a string: the caller's
-    mistake and Bondi's own fault are not the same event and must not be
-    reported as though they were. *)
+    The classification is what the process exit code is chosen from, so it is a
+    variant rather than a string: the caller's mistake and Bondi's own fault are
+    not the same event and must not be reported as though they were. *)
 type t =
   | Invalid_request of string
       (** The request could not be acted on as written -- a body that does not
@@ -22,24 +21,21 @@ type t =
 val message : t -> string
 (** The human-readable half of a failure, without its classification. Never
     contains a value taken from the rejected payload: payloads carry environment
-    variables and sink URLs that may embed credentials, and this text is
-    returned over HTTP, mailed by cron, and shipped off the box with the
-    diagnostics stream. *)
-
-val http_status : t -> Dream.status
-(** The HTTP status for a failure class: 400 for {!Invalid_request}, 500 for
-    {!Orchestrator_failure}, 503 for {!Not_ready}. Kept beside the variant so
-    that the handler is left with no decision of its own.
-
-    {!Not_ready} is given a status even though no route returns it today. That
-    is the point of choosing both answers from one variant: the class exists, so
-    its status is picked deliberately now rather than defaulted inside whichever
-    handler first returns it. *)
+    variables and sink URLs that may embed credentials, and this text is written
+    to the subcommand's standard error, mailed by cron, and shipped off the box
+    with the diagnostics stream. *)
 
 val exit_code : t -> int
-(** The process exit code for a failure class, chosen from the same variant as
-    {!http_status} and kept beside it, so that adding a class forces both
-    answers to be picked rather than one of them defaulted inside a handler.
+(** The process exit code for a failure class, chosen here and in no caller, so
+    that a subcommand is left with no decision of its own.
+
+    Nothing sits beside it any more to make that choice deliberate by symmetry.
+    What forces it instead is the match: the body is an exhaustive [function]
+    over {!t}, so a class added later cannot compile without being handed a
+    number of its own, and {!exit_documentation} is derived by applying this
+    function to every class, so the same edit is asked in the same moment for
+    the sentence an operator reads beside that number. A defaulted answer has
+    nowhere to sit between the two.
 
     Never 0, never 255, never 128 or above, and never 123 to 125. The client
     reads 255 as ssh's own failure and 128 plus n as a signal, so a verdict from

@@ -1,5 +1,18 @@
 # Build stage
-FROM ocaml/opam:alpine-ocaml-5.3 AS builder
+#
+# 5.5 and not 5.3, and the reason is the runtime rather than the language.
+# OCaml through 5.4 sizes the alternate signal stack from `SIGSTKSZ`, which musl
+# fixes at 8192 when the binary is compiled. The kernel refuses `sigaltstack`
+# below the running CPU's signal-frame minimum, and on an AMX-capable Intel Xeon
+# that minimum is larger than 8192 -- so the binary dies before `main` with
+# "Failed to allocate signal stack for domain 0" and the container exits 139.
+# It is a property of the host that runs the image, not of the host that built
+# it. 5.5.1 asks `sysconf(_SC_SIGSTKSZ)` instead (ocaml/ocaml#14933).
+#
+# [observed -- 2026-09-13] Built in each image and traced: 5.3.0 calls
+# sigaltstack with ss_size=8192, 5.5.1 with ss_size=10544.
+# Do not move this back to a 5.3 or 5.4 image.
+FROM ocaml/opam:alpine-ocaml-5.5 AS builder
 
 # Set build argument for version (build-time only, not available at runtime)
 ARG VERSION

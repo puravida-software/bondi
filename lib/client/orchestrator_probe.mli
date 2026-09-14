@@ -33,11 +33,20 @@ val log_lines : int
 
     Bounded, because the line a caller looks for was written moments ago and an
     unbounded read pulls a busy orchestrator's whole history across the
-    connection to find it. Not bounded to one or two lines either: an
-    orchestrator that is serving writes lines of its own between the check
-    answering and the read being taken, and a bound tight enough for them to
-    push the marker out would report a healthy container as one whose
-    diagnostics never arrive. *)
+    connection to find it. Fifty rather than two is slack kept deliberately, and
+    not a bound derived from what the stream carries: read off this tree on
+    2026-09-13, the check puts exactly one line into the container log stream on
+    every path that answers -- the marker its diagnostic-sink probe writes --
+    because the document and the reasons go to the exec's own streams, which the
+    log never sees, and PID 1 idles without writing a line of its own. On a
+    quiet box the marker is the last line there is.
+
+    What the slack is for is the other writer: a second exec into the same
+    container, a deploy or a cron run, whose diagnostics are duplicated into PID
+    1's stderr while this read is being taken, and whose backtrace on an
+    escaping exception is many lines rather than one. A bound of two would put
+    the marker behind one such backtrace and report a container that answered as
+    one whose diagnostics never arrive. *)
 
 val running_command : container_name:string -> attempts:int -> string
 (** The shell command that waits on the host for [container_name] to reach a
@@ -71,10 +80,12 @@ val check_command : container_name:string -> cron_configured:bool -> string
     box it is on is in a state to serve.
 
     It runs the server's own check subcommand inside the container that was just
-    started, rather than fetching a health endpoint over a published port. The
-    endpoint answers 204 and says nothing, so a rejection obtained that way
-    names no fault, where the subcommand names every probe that failed. It also
-    needs no fetch tool inside the container and no port published outside it.
+    started, rather than fetching a health endpoint over a published port, which
+    is how this reading was once taken. That endpoint answered 204 and said
+    nothing, so a rejection obtained that way named no fault, where the
+    subcommand names every probe that failed; there is no endpoint to fetch and
+    no port published on the host any more in any case. It also needs no fetch
+    tool inside the container.
 
     {b The reading is taken once, after the wait, and never by looping this
        command until it passes.} The check acts on the box on every invocation:

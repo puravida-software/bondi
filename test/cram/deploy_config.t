@@ -43,6 +43,31 @@ Deploy with valid target but no servers.
   Error: no servers configured. Add servers to bondi.yaml under service or each cron job.
   [1]
 
+The same configuration with the two fields Bondi still parses and no longer acts
+on. Both are named, once, straight after the file is read and before this run
+reaches anything the file is about.
+
+  $ cat > bondi.yaml <<'EOF'
+  > service:
+  >   name: web
+  >   image: myimg
+  >   port: 8080
+  >   registry_user: null
+  >   registry_pass: null
+  >   env_vars: {}
+  >   servers: []
+  > bondi_server:
+  >   version: "0.1.0"
+  >   bind_address: "0.0.0.0"
+  >   api_token: "not-a-real-token"
+  > EOF
+  $ bondi-client deploy web:v1 2>&1
+  Deployment process initiated...
+  bondi_server.bind_address is set to 0.0.0.0 and no longer does anything: the orchestrator serves no HTTP, so there is no socket to bind. Remove it from bondi.yaml.
+  bondi_server.api_token is set and no longer does anything: the orchestrator serves no HTTP, so there is no request to authenticate. Remove it from bondi.yaml, and rotate it if it was ever a real secret -- a credential that sat in a configuration file is compromised whether or not anything still reads it.
+  Error: no servers configured. Add servers to bondi.yaml under service or each cron job.
+  [1]
+
 A cron-declaring deploy reads the box's two cron sources and compares them
 before it posts anything, so what it prints is the state it found rather than
 the state it just created. The stub answers the version gate, the crontab spool,

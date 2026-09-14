@@ -5,7 +5,8 @@ module Report = Bondi_client.Status_report
 (* --- The captured response ---
 
    fixtures/orchestrator_status_response.json was not written here. It is the
-   body of GET /api/v1/status, recorded verbatim off a running orchestrator:
+   status document a running orchestrator produced, recorded verbatim off the
+   box:
 
      image     mlopez1506/bondi-server:latest
                sha256:de53659011631034bef1e6c6bbc417853f4df7815e6f687aa175a425cc7cdbd6

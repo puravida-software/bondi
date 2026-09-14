@@ -43,10 +43,12 @@ let a_cron_job : Config_file.cron_job =
     server = { Config_file.ip_address = "203.0.113.1"; ssh = None; port = None };
   }
 
-(* `bind_address` and `api_token` also reach the run command and are pinned to
-   their defaults here. The header this file prints names them and says why they
-   get no line of their own, so the exclusion is stated where the fixture's
-   reader is rather than only where its author was. *)
+(* `bind_address` and `api_token` reach nothing. Every field of the record is
+   named all the same, rather than taken from a fixture builder's optional
+   arguments: a field that defaults out of sight is a field nobody chose. The
+   header this file prints says why the two dead ones get no line of their own,
+   so the exclusion is stated where the fixture's reader is rather than only
+   where its author was. *)
 let config ~(cron_jobs : Config_file.cron_job list option) : Config_file.t =
   {
     user_service = None;
@@ -63,15 +65,10 @@ let config ~(cron_jobs : Config_file.cron_job list option) : Config_file.t =
   }
 
 let print_labelled label config =
-  match
-    Setup.orchestrator_run_command
-      ~cron_payload_needed:(Setup.has_cron_jobs config)
-      config
-  with
-  | Ok command -> Printf.printf "%s %s\n" label command
-  | Error message ->
-      prerr_endline message;
-      exit 1
+  Printf.printf "%s %s\n" label
+    (Setup.orchestrator_run_command
+       ~cron_payload_needed:(Setup.has_cron_jobs config)
+       config)
 
 let () =
   print_string
@@ -81,19 +78,20 @@ let () =
      # runtest` regenerates and diffs it, and `dune promote` accepts a change.\n\
      #\n\
      # One line per rootless-sensitive deployment shape, which is not one line\n\
-     # per deployment shape. The command varies on four config inputs; the two\n\
-     # lines below are the input that moves the flags a rootless engine\n\
+     # per deployment shape. The command varies on two config inputs; the two\n\
+     # lines below are the one that moves the flags a rootless engine\n\
      # reinterprets: `no-cron` and, with cron jobs configured, `cron`, which\n\
      # additionally carries `--user root`, the spool mount and the\n\
-     # /etc/bondi/cron payload mount.\n\
+     # /etc/bondi/cron payload mount. The other input is the image tag, which\n\
+     # the script reading this file substitutes for the one under test.\n\
      #\n\
-     # Held constant at their defaults, and named here rather than left to be\n\
-     # inferred from the builder: `bondi_server.bind_address`, which only\n\
-     # changes the address in `-p ADDR:3030:3030`, and `bondi_server.api_token`,\n\
-     # which only adds `-e BONDI_API_TOKEN=`. Neither reaches a flag a rootless\n\
-     # engine reinterprets, which is what this fixture exists to pin. The\n\
-     # residue is that everything asserted through these lines is asserted\n\
-     # against an unauthenticated API; a token-gated orchestrator is a shape\n\
-     # nothing here covers.\n";
+     # `bondi_server.bind_address` and `bondi_server.api_token` are named here\n\
+     # because they used to be the other two inputs and are now neither: the\n\
+     # orchestrator publishes no port and is passed no environment, so the\n\
+     # fields are read out of bondi.yaml, reported to the operator as dead and\n\
+     # dropped. There is no value of either that these two lines fail to\n\
+     # cover. The residue the older wording recorded -- that everything\n\
+     # asserted through these lines is asserted against an unauthenticated\n\
+     # API -- went with the API.\n";
   print_labelled "no-cron" (config ~cron_jobs:None);
   print_labelled "cron" (config ~cron_jobs:(Some [ a_cron_job ]))

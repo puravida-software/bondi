@@ -21,7 +21,7 @@ let crontab_spool_dir = "/var/spool/cron/crontabs"
 let bondi_begin_marker = Bondi_common.Cron_section.begin_marker
 let bondi_end_marker = Bondi_common.Cron_section.end_marker
 
-(* Run payload sent to /run endpoint *)
+(* Run payload written to the run subcommand's standard input *)
 type run_payload = {
   job : string;
   image : string;
@@ -175,16 +175,17 @@ let malformed_section = "the Bondi section of the crontab is malformed: "
 (* The refusal for a crontab whose markers do not balance. It names which of the
    three malformations it is and nothing else -- not the line, not the contents
    of the position it stopped at, not a payload. Every line in a crontab may be
-   a job's payload including its credentials, and this text is returned over
-   HTTP, mailed by cron and shipped with the diagnostics stream; the convention
-   that a decode error carries the input it rejected is inverted here for that
-   reason. The three sentences are pairwise distinct, so the message alone
+   a job's payload including its credentials, and this text is returned to
+   whoever ran the subcommand, mailed by cron and shipped with the diagnostics
+   stream; the convention that a decode error carries the input it rejected is
+   inverted here for that reason. The three sentences are pairwise distinct, so
+   the message alone
    answers which defect an operator is going to look for.
 
    A message rather than a classified failure: this module's other error path is
    a string, both callers turn the refusal straight back into one, and neither
-   handler asks it what HTTP status or exit code it deserves. A vocabulary no
-   consumer reads is a vocabulary that goes out of step with the ones that do. *)
+   caller asks it what exit code it deserves. A vocabulary no consumer reads is
+   a vocabulary that goes out of step with the ones that do. *)
 let refusal_of_malformation : Bondi_common.Cron_section.malformation -> string =
   function
   | End_without_begin ->

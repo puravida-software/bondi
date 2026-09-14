@@ -1,18 +1,18 @@
-(** [GET /api/v1/status] -- what Bondi believes is running on this box.
+(** The [status] subcommand -- what Bondi believes is running on this box.
 
-    The endpoint is a read-only aggregate over independent sources: the named
+    The report is a read-only aggregate over independent sources: the named
     service's container, the orchestrator's, Traefik's, Alloy's, every managed
     container discovered by label, and the crontab. A source that cannot be read
     becomes an entry in [errors] beside whatever else could be read, rather than
-    failing the response: the client renders anything it does not hear about as
+    failing the report: the client renders anything it does not hear about as
     not found, which reads as "setup has not run" when the real cause is an
     unreachable Docker.
 
-    Everything below {!route} is exposed for one of two reasons -- it is part of
-    the wire contract, or it is a pure seam the tests reach because the code
-    around it needs a Docker client and an Eio net that a unit test has no
-    business constructing. Nothing here is intended for another module to call
-    in production. *)
+    Everything here besides {!report} is exposed for one of two reasons -- it is
+    part of the answer the caller reads, or it is a pure seam the tests reach
+    because the code around it needs a Docker client and an Eio net that a unit
+    test has no business constructing. Nothing here is intended for another
+    module to call in production. *)
 
 type component_status = {
   name : string;
@@ -97,9 +97,9 @@ val cron_state_of_listing :
 
     The warning names how many entries could not be read and where they are. It
     never names an entry: a legacy line carries the job's payload, credentials
-    included, and this text is returned over HTTP, mailed by cron and shipped
-    off the box with the diagnostics stream. [None] when every entry resolved,
-    including when there were none. *)
+    included, and this text is returned to whoever ran the subcommand, mailed by
+    cron and shipped off the box with the diagnostics stream. [None] when every
+    entry resolved, including when there were none. *)
 
 val plan : service_name:string option -> status_context -> comprehensive_status
 (** Build the response from gathered state, purely. [service_name] is absent
@@ -112,9 +112,8 @@ val report :
   clock:_ Eio.Time.clock ->
   service_name:string option ->
   (comprehensive_status, Handler_error.t) result
-(** What the endpoint decides, naming no transport, so a caller holding no HTTP
-    request can reach it. Gathers, plans, and writes one diagnostic line per
-    entry in [errors].
+(** The whole decision, naming no transport. Gathers, plans, and writes one
+    diagnostic line per entry in [errors].
 
     A source that failed is not an [Error] here -- it is an entry in [errors]
     alongside everything that could be read. The [Error] arm is an exception
@@ -124,16 +123,9 @@ val report :
     returned a value would break structured concurrency.
 
     Precondition: it reads Docker through Eio -- [Cohttp_eio] under an
-    [Eio.Switch] -- so it must be called from inside an Eio fiber, which in this
-    process means under [Lwt_eio.with_event_loop]. {!route} supplies one with
-    [Lwt_eio.run_eio]; a caller holding no HTTP request supplies its own, with
-    [Eio_main.run] or the same wrapper. *)
-
-val route :
-  client:Docker.Client.t ->
-  net:_ Eio.Net.t ->
-  clock:_ Eio.Time.clock ->
-  Dream.route
-(** The [GET /api/v1/status] route. It decodes the optional [service] query
-    parameter, dispatches to {!report}, and encodes the answer as JSON or as the
-    failure's own status and message. *)
+    [Eio.Switch] -- so it must be called from inside an Eio fiber, and [~clock]
+    and [~net] must be that fiber's own. Both are what
+    {!Environment.with_environment} hands its callback, which is the one place
+    this process enters the Eio runtime; a caller that passes capabilities from
+    anywhere else is passing them across a runtime boundary they do not belong
+    to. *)

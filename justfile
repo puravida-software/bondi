@@ -1,7 +1,5 @@
 # https://cheatography.com/linux-china/cheat-sheets/justfile/
 
-import "hurl_tests/hurl.just"
-
 IMAGE_NAME := "mlopez1506/bondi-server"
 
 # The last thing printed is what the run means. Without it the gate ends on the
@@ -91,20 +89,26 @@ verify-server-image-negative TAG:
     ./scripts/verify-server-image-negative.sh {{ IMAGE_NAME }}:{{ TAG }}
 
 # Every subcommand is exercised inside a container started by the exact command
-# an unchanged client uses, with its exit code and its JSON asserted against the
-# corresponding route's. The negative arm runs in the same recipe rather than
-# beside it, so this file and CI each hold one line for the pair and cannot come
-# to hold different numbers of them. The script refuses any engine that is not
-# Docker Engine: a rootless one reinterprets the two flags it exercises.
-# Prove the image answers on the command line what it answers over HTTP.
+# an unchanged client uses, with its exit code and its JSON asserted against what
+# this tree says each one answers. The negative arm runs in the same recipe
+# rather than beside it, so this file and CI each hold one line for the pair and
+# cannot come to hold different numbers of them. The script refuses any engine
+# that is not Docker Engine: a rootless one reinterprets the two flags it
+# exercises.
+# One assertion is opt-in: the outbound-TLS handshake reaches a host outside this
+# project, so it runs only under BONDI_CHECK_TLS_HANDSHAKE=1, which both release
+# workflows set at the step that calls this recipe. A local run without it prints
+# a skipped: line naming the variable and asserts everything else.
+# Prove the published image ships the command surface this tree describes.
 check-server-image TAG:
     ./scripts/check-server-image.sh {{ IMAGE_NAME }}:{{ TAG }}
     ./scripts/check-server-image-negative.sh {{ IMAGE_NAME }}:{{ TAG }}
 
 # Build the server Docker image the way release-dry-run CI does, then prove the
 # result runs: verifies the Dockerfile, that every dependency resolves from a
-# clean base image, and that the packaged binary starts and serves — the
-# regression class that plain `dune build` cannot catch. Requires Docker.
+# clean base image, and that the packaged binary starts and answers every one of
+# its subcommands — the regression class that plain `dune build` cannot catch.
+# Requires Docker.
 # Uses the CI-computed version when commitizen (cz) is present; otherwise a dev
 # placeholder, since the version is only embedded at runtime and does not affect
 # what this step verifies.
@@ -132,14 +136,48 @@ push-server TAG:
     docker push {{ IMAGE_NAME }}:{{ TAG }}
 
 server-docker:
-    docker run --group-add $(stat -c %g /var/run/docker.sock) --name bondi-orchestrator -p 3030:3030 -v /var/run/docker.sock:/var/run/docker.sock --rm {{ IMAGE_NAME }}
+    docker run --group-add $(stat -c %g /var/run/docker.sock) --name bondi-orchestrator -v /var/run/docker.sock:/var/run/docker.sock --rm {{ IMAGE_NAME }}
 
-# ODOC_WARN_ERROR matches what CI's lint-doc action sets. Without it odoc
-# reports an unresolvable {!Reference} as a warning and exits 0, so the local
-# gate passes and CI fails on the same tree — which is how a broken cross-library
-# reference reaches a pull request.
+# [observed — 2026-09-13, dune 3.20.2, odoc 3.1.0] The `@doc` alias is blind
+# here: with an unresolvable {!Reference} deliberately injected into an .mli,
+# `dune build @doc` printed nothing and exited 0 — on a cold `_doc` tree, with
+# and without ODOC_WARN_ERROR. Only `@doc-new`, the odoc-3 driver, reports the
+# reference at all, and it exits 0 too, so the warning has to be grepped for.
+# ODOC_WARN_ERROR is deliberately not set: under `@doc-new` it turns the
+# dependency set's own warnings (stdlib's `seq.mld`) into errors and the build
+# dies before reaching this project's sources. For the same reason the grep is
+# restricted to files under this tree. The doc directory is deleted first
+# because odoc is not re-run once its outputs are up to date, which would
+# otherwise leave the gate quietest exactly when someone re-runs it to confirm
+# a fix.
+#
+# The capture takes three lines after each `File "` header rather than one, so
+# that a diagnostic whose message wraps is not truncated, and a header this
+# recipe cannot classify as `Warning:` or `Error:` fails on its own rather than
+# passing silently. [observed — 2026-09-13: with
+# `{!No_Such_Module.no_such_value}` injected into `lib/server/cli.mli` the
+# recipe exited 1 on two consecutive runs, and 0 again once removed.]
+#
+# What the gate cannot see: odoc reports only the modules the doc set renders.
+# The same injection in `lib/server/readiness.mli`, which the library does not
+# re-export, produced no diagnostic and the recipe exited 0. [observed —
+# 2026-09-13, same session.]
 lint-doc:
-    ODOC_WARN_ERROR=true opam exec -- dune build @doc
+    rm -rf _build/default/_doc_new
+    @out="$(opam exec -- dune build @doc-new 2>&1)"; \
+      status=$?; \
+      [ $status -eq 0 ] || { printf '%s\n' "$out"; exit $status; }; \
+      mine="$(printf '%s\n' "$out" | grep -A3 -E '^File "(lib|bin|test|scripts)/' || true)"; \
+      if printf '%s\n' "$mine" | grep -qE '^(Warning|Error):'; then \
+        printf '%s\n' "$mine"; \
+        echo "lint-doc: odoc could not resolve the reference(s) above" >&2; \
+        exit 1; \
+      fi; \
+      if printf '%s\n' "$mine" | grep -qE '^File "'; then \
+        printf '%s\n' "$mine"; \
+        echo "lint-doc: odoc reported the diagnostic above against this tree in a shape this recipe does not classify" >&2; \
+        exit 1; \
+      fi
 
 lint-fmt:
     opam exec -- dune build @fmt

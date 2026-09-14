@@ -83,8 +83,8 @@ val write_run_file : name:string -> Yojson.Safe.t -> (unit, string) result
     The name is checked before any I/O, so a name that could escape the job's
     directory is refused rather than written. The error names the file's path
     and never its contents: the contents are the payload this file exists to
-    keep out of the crontab, and this text is returned over HTTP and mailed by
-    cron. *)
+    keep out of the crontab, and this text is returned to whoever ran the
+    subcommand and mailed by cron. *)
 
 val read_env_file : string -> (string * string) list
 (** The job's secrets, or the empty list when the file is absent or unreadable.

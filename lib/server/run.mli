@@ -1,19 +1,17 @@
-(** [POST /api/v1/run] — execute one cron job in a container and report how it
+(** The [run] subcommand — execute one cron job in a container and report how it
     ended.
 
-    Two things reach it. The [run] subcommand reads a job's run file on standard
-    input and dispatches here, which is how the exec lines Bondi writes now
-    fire; the route below answers the legacy [curl] lines that every crontab in
-    the estate still holds. Either way this is where a scheduled job's failure
-    becomes visible: what the subcommand writes to stderr and what the route
-    returns are what reach cron's mail, and the payload's sinks are what reach
-    the operator's alerting.
+    One thing reaches it: the subcommand reads a job's run file on standard
+    input and dispatches here, which is how the exec lines Bondi writes fire.
+    This is where a scheduled job's failure becomes visible: what the subcommand
+    writes to stderr and the document it writes to standard output are what
+    reach cron's mail, and the payload's sinks are what reach the operator's
+    alerting.
 
-    Everything below {!route} is exposed for one of three reasons — it is
-    {!run}, which is the endpoint's whole decision with no transport named; it
-    is part of the wire contract; or it is a pure seam the tests reach because
-    the code around it needs a Docker client and an Eio net that a unit test has
-    no business constructing. Nothing but {!run} and {!route} is intended for
+    Everything here besides {!run} is exposed for one of two reasons — it is
+    part of the answer the caller reads, or it is a pure seam the tests reach
+    because the code around it needs a Docker client and an Eio net that a unit
+    test has no business constructing. Nothing but {!run} is intended for
     another module to call in production. *)
 
 type run_payload = {
@@ -27,11 +25,10 @@ type run_payload = {
 (** The body of a run request, and the whole content of a job's run file:
     {!Crontab.run_payload_of_cron_job} encodes it at deploy time into the file
     {!Crontab.entry_of_cron_job}'s line hands to the [run] subcommand on
-    standard input. A legacy [curl] line sends the same record as an HTTP body
-    instead. The optional fields are omitted rather than sent as [null], so a
-    job that configures nothing produces the same bytes it did before those
-    fields existed. Unknown fields are rejected: a misspelled key must not read
-    as an unconfigured one. *)
+    standard input. The optional fields are omitted rather than written as
+    [null], so a job that configures nothing produces the same bytes it did
+    before those fields existed. Unknown fields are rejected: a misspelled key
+    must not read as an unconfigured one. *)
 
 type run_response = { exit_code : int; warning : string option }
 (** The body of a successful run. [warning] reports a best-effort cleanup step
@@ -41,7 +38,7 @@ val run_payload_of_yojson : Yojson.Safe.t -> (run_payload, string) result
 (** Decode a run request body. *)
 
 val run_response_to_yojson : run_response -> Yojson.Safe.t
-(** Encode a run result for the HTTP response. *)
+(** Encode a run result for the document the subcommand writes. *)
 
 val outcome_of_result : (int, string) result -> Bondi_common.Alert.outcome
 (** Classify how a run ended for alerting: a container that completed reports
@@ -126,14 +123,13 @@ val run :
     unit) ->
   string ->
   (run_response, Handler_error.t) result
-(** What the endpoint decides, naming no transport, so a caller holding no HTTP
-    request can reach it. Takes the request body as written and answers the
-    response or the failure.
+(** The whole decision, naming no transport. Takes the request body as written
+    and answers the response or the failure.
 
-    [deliver] is taken in the shape the server builds once at startup, and the
-    net and the clock it needs are bound here rather than by the caller: a
-    caller that had to pre-bind them would be rebuilding part of the endpoint,
-    which is what this signature exists to make unnecessary.
+    [deliver] is taken in the shape {!Environment.with_environment} builds once
+    per process, and the net and the clock it needs are bound here rather than
+    by the caller: a caller that had to pre-bind them would be rebuilding part
+    of this function, which is what this signature exists to make unnecessary.
 
     Alert delivery is a bounded, best-effort side channel run after the outcome
     is recorded and the container is cleaned up: it cannot change the answer,
@@ -141,28 +137,16 @@ val run :
     body that did not decode names no job and reaches no sink; a body that did
     alerts even when it is refused before anything starts.
 
-    Unlike {!Status.report} and {!Deploy.deploy}, this catches no exception. An
-    exception escaping it is answered by the web framework, as it always has
-    been; classifying it here would change the body the caller reads.
+    Unlike {!Status.report} and {!Deploy.deploy}, this catches no exception. One
+    that escapes is classified by the subcommand boundary in {!Cli}, which
+    records the raw backtrace on the diagnostics stream before answering
+    [Orchestrator_failure]; catching it here would answer the same class with
+    the backtrace already lost.
 
     Precondition: it runs the container through Eio -- [Cohttp_eio] under an
-    [Eio.Switch] -- so it must be called from inside an Eio fiber, which in this
-    process means under [Lwt_eio.with_event_loop]. {!route} calls it straight
-    from its Lwt handler, which already sits under that event loop; a caller
-    that does not must supply the fiber itself, with [Eio_main.run] or
-    [Lwt_eio.run_eio]. *)
-
-val route :
-  clock:'clock Eio.Time.clock ->
-  client:Docker.Client.t ->
-  net:'net Eio.Net.t ->
-  deliver:
-    (net:'net Eio.Net.t ->
-    clock:'clock Eio.Time.clock ->
-    targets:Bondi_common.Alert.sink list ->
-    payload:Bondi_common.Alert.payload ->
-    unit) ->
-  Dream.route
-(** The [POST /api/v1/run] route. It reads the request body, dispatches to
-    {!run}, and encodes the answer as JSON or as the failure's own status and
-    message. *)
+    [Eio.Switch] -- so it must be called from inside an Eio fiber, and [~clock]
+    and [~net] must be that fiber's own. Both are what
+    {!Environment.with_environment} hands its callback, which is the one place
+    this process enters the Eio runtime; a caller that passes capabilities from
+    anywhere else is passing them across a runtime boundary they do not belong
+    to. *)

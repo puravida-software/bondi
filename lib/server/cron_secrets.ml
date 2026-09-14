@@ -74,7 +74,8 @@ let write_600 path contents =
 (* The name check runs before any I/O, so a name that could escape the job's
    directory never reaches mkdir or open. No error message names the contents:
    for both files the contents are the thing the file exists to keep out of the
-   crontab, and this text is returned over HTTP and mailed by cron. *)
+   crontab, and this text is returned to whoever ran the subcommand and mailed
+   by cron. *)
 let write_job_file ~name ~path_of contents =
   if not (is_valid_name name) then
     Error (Printf.sprintf "unsafe cron job name for a config path: %S" name)

@@ -36,7 +36,6 @@ what reaches argv from what reaches stdin.
   >   *'bondi-server check'*) echo '{"ready":true,"observations":[]}' ;;
   >   'docker logs --tail'*) echo 'bondi check: diagnostic sink is writable' ;;
   >   *'/var/spool/cron/crontabs/root'*) echo BONDI_CRONTAB_ABSENT ;;
-  >   *'PortBindings'*) echo '127.0.0.1' ;;
   >   # The host's applied restart policy. Without this arm the command falls
   >   # through to *) and answers nothing, which setup reads as a refusal to
   >   # report rather than as agreement.

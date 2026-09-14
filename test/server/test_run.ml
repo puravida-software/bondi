@@ -172,9 +172,10 @@ let test_plan_for_payload_critical_map_targets_critical_sinks () =
         [ "https://page.example.com/x" ]
         (List.map Alert.sink_url dispatch.Alert.targets)
 
-(* The pre-start half of [/run]. [Run.prepare] is the seam these exercise
-   because everything past it needs a Docker client and an Eio net; the two
-   status cases assert the failure classifier, which is what [route] reads. *)
+(* The pre-start half of the run subcommand. [Run.prepare] is the seam these
+   exercise because everything past it needs a Docker client and an Eio net;
+   the two classification cases assert the failure classifier, which is what
+   the subcommand's exit code is taken from. *)
 
 let alerting_sinks_json =
   `Assoc
@@ -247,14 +248,14 @@ let test_run_dispatches_no_alert_when_unconfigured () =
     "the same failure with no sinks configured dispatches nothing" []
     !dispatched
 
-let test_run_status_for_malformed_body () =
+let test_run_exit_code_for_malformed_body () =
   let dispatched = ref [] in
   let err =
     prepare_must_fail ~deliver:(recording_deliver dispatched) "{\"job\": "
   in
   Alcotest.(check int)
-    "a malformed body answers a client error, not 404" 400
-    (Dream.status_to_int (Handler_error.http_status err));
+    "a malformed body is the caller's mistake, not a bondi fault" 2
+    (Handler_error.exit_code err);
   Alcotest.(check (list (list string)))
     "a body that names no job has no sinks to alert to" [] !dispatched
 
@@ -328,7 +329,7 @@ let test_warning_skips_cleanup_when_the_start_failed () =
     "a run that never started does not clean up" false cleaned;
   Alcotest.(check (option string)) "and carries no warning" None warning
 
-let test_run_status_for_orchestrator_failure () =
+let test_run_exit_code_for_orchestrator_failure () =
   match
     Run.response_of_run_result ~warning:None
       (Error "docker http 500: internal server error")
@@ -337,8 +338,8 @@ let test_run_status_for_orchestrator_failure () =
       Alcotest.fail "a Docker-level failure must not answer as a run result"
   | Error err ->
       Alcotest.(check int)
-        "an orchestrator fault answers a server error, not 404" 500
-        (Dream.status_to_int (Handler_error.http_status err))
+        "an orchestrator fault is a bondi fault, not the caller's mistake" 1
+        (Handler_error.exit_code err)
 
 let test_run_outcome_from_exit_code () =
   Alcotest.check outcome_testable "completed run classifies as Exited n"
@@ -401,7 +402,8 @@ let test_run_binds_its_own_net_and_clock_into_the_alert_channel () =
       Alcotest.fail "an untagged image must be refused before anything starts"
   | Error err -> check_untagged_image_failure err);
   Alcotest.(check (list (list string)))
-    "the alert side channel fires from inside run, not from the route"
+    "the alert side channel fires from inside run, not from the subcommand \
+     that wraps it"
     [ [ "https://sink.example.com/x" ] ]
     !dispatched;
   Alcotest.(check (option bool))
@@ -447,12 +449,12 @@ let () =
           Alcotest.test_case "decode error names keys, not values" `Quick
             test_run_decode_error_names_keys_not_values;
         ] );
-      ( "run failure status",
+      ( "run failure classification",
         [
           Alcotest.test_case "malformed body" `Quick
-            test_run_status_for_malformed_body;
+            test_run_exit_code_for_malformed_body;
           Alcotest.test_case "orchestrator failure" `Quick
-            test_run_status_for_orchestrator_failure;
+            test_run_exit_code_for_orchestrator_failure;
         ] );
       ( "warning_of_run",
         [

@@ -369,6 +369,14 @@ let validate_deployments (config : Config_file.t) deployments :
   | Some msg -> Error msg
   | None -> Ok deployments
 
+(* What this run says about fields the configuration declares that Bondi still
+   parses and no longer acts on. A value for the same reason
+   [cron_divergence_report] is one: the lines are decided here and printed by
+   the caller, so a test can hold what this command would say without a box to
+   say it to. *)
+let deprecation_notices (config : Config_file.t) =
+  Deprecations.messages config.bondi_server
+
 let run force_traefik_redeploy deployments =
   print_endline "Deployment process initiated...";
   let deployments =
@@ -400,6 +408,10 @@ let run force_traefik_redeploy deployments =
       prerr_endline ("Error reading configuration: " ^ message);
       exit 1
   | Ok config -> (
+      (* Said before the targets are checked, for the reason [setup] says it
+         before the servers are: what is being reported on is the file, and a
+         run refused for some other reason is still a run that read it. *)
+      List.iter print_endline (deprecation_notices config);
       (match validate_deployments config deployments with
       | Error msg ->
           prerr_endline msg;

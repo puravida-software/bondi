@@ -26,7 +26,6 @@ The stub records every SSH call so the absence of one can be asserted.
   >   *BONDI_CRON_PAYLOAD_LISTED*)
   >     echo BONDI_CRON_PAYLOAD_LISTED
   >     echo BONDI_CRON_PAYLOAD_END ;;
-  >   *'PortBindings'*) echo '127.0.0.1' ;;
   >   # The orchestrator's image on its own, which is the version the report's
   >   # orchestrator read holds this box to before running a subcommand inside
   >   # its container. Without this arm the command falls through to *) and

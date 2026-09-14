@@ -26,9 +26,9 @@ the same gather/plan/interpret sandwich:
 
 - `bondi_common` — Shared types and utilities. No I/O.
 - `bondi_client` — CLI commands. Reads `bondi.yaml`, SSHes to servers,
-  calls server API.
-- `bondi_server` — HTTP handlers + Docker Engine client. Manages
-  containers, Traefik, and cron jobs.
+  runs the server's subcommands inside the orchestrator's container.
+- `bondi_server` — the server binary's subcommands + Docker Engine
+  client. Manages containers, Traefik, and cron jobs.
 
 A module is acceptable when it is:
 - Self-contained with explicit, minimal dependencies
@@ -49,8 +49,6 @@ All implementation follows strict TDD:
   `test/common/`.
 - **Cram tests** — Shell-session snapshots for CLI behaviour. Located in
   `test/cram/`. Must be updated when CLI output changes.
-- **Hurl tests** — HTTP integration tests against a running server.
-  Located in `hurl_tests/`.
 
 ### III. Simplicity Gate
 

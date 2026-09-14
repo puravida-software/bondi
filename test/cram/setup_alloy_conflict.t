@@ -43,7 +43,6 @@ succeeds, so the failure is genuinely mid-plan.
   >     echo 'docker: Error response from daemon: Conflict. The container name "/bondi-alloy" is already in use by container "d671990dc231".' >&2
   >     exit 125 ;;
   >   *'/var/spool/cron/crontabs/root'*) echo BONDI_CRONTAB_ABSENT ;;
-  >   *'PortBindings'*) echo '127.0.0.1' ;;
   >   # The host's applied restart policy. The conflict run below aborts in the
   >   # alloy phase and never gets as far as asking for it; the arm is here for
   >   # the alloy-withdrawn run at the end of the file, which completes its plan

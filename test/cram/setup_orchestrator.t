@@ -97,7 +97,6 @@ leaves a running one.
   >   *BONDI_CRON_PAYLOAD_LISTED*)
   >     echo BONDI_CRON_PAYLOAD_LISTED
   >     echo BONDI_CRON_PAYLOAD_END ;;
-  >   *'PortBindings'*) echo "${PUBLISHED_ON-127.0.0.1}" ;;
   >   'docker update'*)
   >     if [ -n "$RESTART_UPDATE_STICKS" ]; then printf 'unless-stopped\n' > "$RESTART_POLICY"; fi
   >     echo bondi-orchestrator ;;
@@ -371,44 +370,28 @@ in exactly the state wanted.
   1
 
 
-The publish address is declared in bondi.yaml, and setup checks what the host
-actually published rather than trusting that `docker run` applied it.
+The orchestrator publishes no port, and nothing reads a binding back.
 
 Until 2026-08-29 setup ran `-p 3030:3030` unconditionally, publishing an
-unauthenticated API that mounts the host Docker socket on every interface. One
-box had been closed by a loopback binding applied by hand and recorded nowhere;
-a later setup converged that box against bondi.yaml, which did not mention the
-binding, and silently re-exposed a production orchestrator. The run reported
-success and the readiness probe agreed, because "is it up" and "who can reach
-it" are different questions. These two assertions are that difference.
+unauthenticated API that mounts the host Docker socket on every interface. The
+loopback default that closed that hole, and the read-back that asserted the
+host had applied it, are both gone with the thing they guarded: the container
+serves nothing over the network, so there is no address to publish and no
+posture to check. Bondi's own commands and the crontab's exec lines all reach
+this container through its own subcommands, never through a socket.
+
+Asserted as an absence on a run proven to have issued the command -- an
+ssh log nothing reached would satisfy every line below on its own.
 
   $ : > "$ORCHESTRATOR_PS"
   $ : > ssh-argv.log
   $ bondi-client setup > /dev/null 2>&1
-  $ grep -o -- '-p 127.0.0.1:3030:3030' ssh-argv.log | head -1
-  -p 127.0.0.1:3030:3030
-
-The wide form is never emitted.
-
-  $ grep -c -- '-p 3030:3030' ssh-argv.log || true
+  $ grep -c -- 'docker run -d --name bondi-orchestrator' ssh-argv.log
+  1
+  $ grep -c -- ' -p ' ssh-argv.log || true
   0
-
-When the host reports a binding other than the one asked for, setup fails and
-names both. Docker reports "every interface" as an empty HostIp, which must read
-as 0.0.0.0 rather than as agreement with the request -- otherwise the check
-passes on exactly the configuration it exists to catch.
-
-  $ : > "$ORCHESTRATOR_PS"
-  $ PUBLISHED_ON=0.0.0.0 bondi-client setup > out.log 2>&1
-  [1]
-  $ grep -o 'orchestrator published on .* asks for [0-9.]*' out.log
-  orchestrator published on 0.0.0.0 but bondi.yaml asks for 127.0.0.1
-
-  $ : > "$ORCHESTRATOR_PS"
-  $ PUBLISHED_ON= bondi-client setup > out.log 2>&1
-  [1]
-  $ grep -o 'orchestrator published on .* asks for [0-9.]*' out.log
-  orchestrator published on 0.0.0.0 but bondi.yaml asks for 127.0.0.1
+  $ grep -c -- 'PortBindings' ssh-argv.log || true
+  0
 
 
 Docker's default restart policy is `no`, so a host reboot, a docker-ce upgrade

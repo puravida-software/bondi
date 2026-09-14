@@ -1,20 +1,7 @@
-(* A configuration failure is classified here rather than beside the
-   configuration, because the class is what both the exit code and, for the
-   route-backed subcommands, the HTTP status are chosen from -- and that choice
-   belongs with the process boundary that reads it. The value came from whoever
-   started the container, not from Bondi, so it is the caller's request that was
-   wrong as written. The offending text is carried into the message: it is the
-   operator's own environment variable, and a message naming only the variable
-   leaves an unsubstituted template indistinguishable from a typo. *)
-let handler_error_of_config_error = function
-  | Server_config.Invalid_port port ->
-      Handler_error.Invalid_request
-        (Printf.sprintf "BONDI_SERVER_PORT is not a number: %s" port)
-
 (* The one place an exception that escaped a subcommand's body becomes a failure
-   class. The bodies behind the subcommands catch nothing, and say so: under
-   Dream an escaping exception was answered by the framework, and classifying it
-   there would have changed the body the caller reads.
+   class. The bodies behind the subcommands catch nothing, and say so: each is
+   the subcommand's decision and nothing around it, so classifying an escaping
+   exception there would put a second boundary inside the decision itself.
 
    A command line has no framework behind it -- it has cmdliner, which for this
    purpose is worse than nothing. [Cmd.eval'] below is called without [~catch]
@@ -60,7 +47,7 @@ let classified_result body =
 
 (* The whole of a subcommand, classified. [classified_result] covers a body that
    answers a result; this covers everything a term evaluates -- the environment
-   [Server.with_environment] builds, which runs [Eio_main.run], creates the
+   [Environment.with_environment] builds, which runs [Eio_main.run], creates the
    Docker client and loads the outbound trust store, and the write
    [Cmd_io.status_of] ends with. Neither of those sits inside any body, so a
    wrap that enclosed only the body would leave the same 125 reachable by
@@ -92,20 +79,22 @@ let classified_status action =
   | Ok code -> code
   | Error error -> Cmd_io.status_of (Error error) ~encode:Fun.id
 
-(* The failure goes to [Cmd_io.fail] rather than [Cmd_io.status_of], because
-   serving has no JSON answer: a success here is a server that ran and stopped,
-   and encoding something for it would put bytes on stdout that no caller asked
-   for. [Cmd_io.fail] writes stderr and nothing else, so that property survives
-   the sharing -- and what is shared is not only the table but the write itself,
-   which is the part that would otherwise drift the first time a failure gains a
-   prefix or a terminator. *)
-let serve_action ~serve () =
-  classified_status (fun () ->
-      match serve () with
-      | Ok () -> 0
-      | Error error -> Cmd_io.fail (handler_error_of_config_error error))
+(* The idle, classified like every other term: an exception that escapes it must
+   leave the code its class carries rather than cmdliner's internal error, and
+   the term the image's entrypoint evaluates is the last one that should be an
+   exception to that.
 
-let serve_term ~serve = Cmdliner.Term.(const (serve_action ~serve) $ const ())
+   It encodes nothing. A success here is a process that was stopped from
+   outside, and writing bytes to stdout for it would be an answer no caller
+   asked for. The zero is what a caller that supplied an idle which returns
+   gets; the real one never returns, and the code is the one the empty argument
+   list has left behind since the group has had a default term. *)
+let idle_action ~idle () =
+  classified_status (fun () ->
+      idle ();
+      0)
+
+let idle_term ~idle = Cmdliner.Term.(const (idle_action ~idle) $ const ())
 
 (* The exit statuses the manual documents. Cmdliner documents its own three and
    no others unless it is handed a list, so without this the only codes an
@@ -137,20 +126,11 @@ let exits =
    answer is that the version is not known. *)
 let version () = Env.read_string_with_default "VERSION" "unknown"
 
-let serve_cmd ~serve =
-  let info =
-    Cmdliner.Cmd.info "serve" ~exits
-      ~doc:
-        "Serve the HTTP API. Also what running the binary with no command does."
-  in
-  Cmdliner.Cmd.v info (serve_term ~serve)
-
-(* The payload is decoded before any environment is built, and the order is the
-   same one [serve] takes with its configuration: a body that cannot be read is
-   refused without an Eio runtime, a Docker client and an outbound TLS handler
-   having been created for a process that is about to stop. It is also what
-   keeps a refusal off the machine entirely, so the refusal path is reachable
-   from a test that has no Docker socket to speak of. *)
+(* The payload is decoded before any environment is built: a body that cannot be
+   read is refused without an Eio runtime, a Docker client and an outbound TLS
+   handler having been created for a process that is about to stop. It is also
+   what keeps a refusal off the machine entirely, so the refusal path is
+   reachable from a test that has no Docker socket to speak of. *)
 let deploy_action () =
   classified_status (fun () ->
       match Deploy.decode_input (Cmd_io.read_stdin ()) with
@@ -158,7 +138,7 @@ let deploy_action () =
           Cmd_io.status_of (Error error)
             ~encode:Deploy.deploy_response_to_yojson
       | Ok input ->
-          Server.with_environment (fun ~net ~clock ~client:_ ~deliver:_ ->
+          Environment.with_environment (fun ~net ~clock ~client:_ ~deliver:_ ->
               Cmd_io.status_of
                 (Deploy.deploy ~clock ~net input)
                 ~encode:Deploy.deploy_response_to_yojson))
@@ -177,17 +157,17 @@ let run_result ~clock ~client ~net ~deliver body =
 let run_action () =
   classified_status (fun () ->
       let body = Cmd_io.read_stdin () in
-      Server.with_environment (fun ~net ~clock ~client ~deliver ->
+      Environment.with_environment (fun ~net ~clock ~client ~deliver ->
           Cmd_io.status_of
             (run_result ~clock ~client ~net ~deliver body)
             ~encode:Run.run_response_to_yojson))
 
-(* The selector is an argument rather than a payload: it arrived as a query
-   parameter on the route, and a service name is not a credential. Nothing this
-   subcommand reads is. *)
+(* The selector is an argument rather than a payload: a service name is not a
+   credential, and nothing else this subcommand reads is either. Payloads are
+   what standard input exists for here, and this subcommand has none. *)
 let status_action service_name =
   classified_status (fun () ->
-      Server.with_environment (fun ~net ~clock ~client ~deliver:_ ->
+      Environment.with_environment (fun ~net ~clock ~client ~deliver:_ ->
           Cmd_io.status_of
             (Status.report ~client ~net ~clock ~service_name)
             ~encode:Status.comprehensive_status_to_yojson))
@@ -259,13 +239,13 @@ let check_cmd ~observe =
   Cmdliner.Cmd.v info
     Cmdliner.Term.(const (check_action ~observe) $ cron_configured_arg)
 
-let group ~serve ~observe =
+let group ~idle ~observe =
   let info =
     Cmdliner.Cmd.info "bondi-server" ~exits ~version:(version ())
       ~doc:"The Bondi orchestrator."
   in
-  Cmdliner.Cmd.group info ~default:(serve_term ~serve)
-    [ serve_cmd ~serve; deploy_cmd; run_cmd; status_cmd; check_cmd ~observe ]
+  Cmdliner.Cmd.group info ~default:(idle_term ~idle)
+    [ deploy_cmd; run_cmd; status_cmd; check_cmd ~observe ]
 
 (* The signal disposition every subcommand path runs under, set here because
    here is the single point all of them pass through.
@@ -291,19 +271,33 @@ let group ~serve ~observe =
    restores it -- eio 1.3 does it in both backends, at
    [_opam/lib/eio_posix/eio_posix.ml] line 23 and
    [_opam/lib/eio_linux/eio_linux.ml] line 556, read on 2026-09-11 -- because
-   that covers only a path that reaches an environment. [check] builds none;
-   [deploy]'s undecodable-payload arm answers before one is built; [serve]'s own
-   failure is written after [Eio_main.run] has returned; and cmdliner writes
-   [--help], [--version] and its own usage errors before any term is evaluated
-   at all.
+   that covers only a path that reaches an environment. [check] builds none; the
+   idle builds none; [deploy]'s undecodable-payload arm answers before one is
+   built; and cmdliner writes [--help], [--version] and its own usage errors
+   before any term is evaluated at all.
 
    Ignored rather than handled, and process-wide rather than set around each
    write, for the reason [diagnostics.mli] gives about itself: the disposition
    is a property of the process, not of a call, and this binary writes from more
    than one fiber. *)
-let eval_argv ~serve ~observe ~argv =
+let eval_argv ~idle ~observe ~argv =
   Sys.set_signal Sys.sigpipe Sys.Signal_ignore;
-  Cmdliner.Cmd.eval' ~argv (group ~serve ~observe)
+  (* The other process-global disposition, and it is here for the same reason:
+     it has to be in force before anything raises. The classification above
+     takes the raw backtrace as its handler's first statement, which is the
+     earliest a handler can take one -- and with recording switched off it takes
+     an empty one, so the diagnostic is the exception's message followed by a
+     blank line and nothing says why. It used to be switched on for this binary
+     by the request logger the HTTP surface installed, which was a side effect
+     of serving rather than a decision anyone took; the subcommand path never
+     ran that logger and so never had frames at all. The deletion of the serving
+     path is what makes the gap total, and this is where the decision now lives.
+
+     Set at the top of evaluation rather than beside the handler: recording is a
+     property of the process and must precede the raise, and a handler that
+     turned it on would be turning it on after the only moment it mattered. *)
+  Printexc.record_backtrace true;
+  Cmdliner.Cmd.eval' ~argv (group ~idle ~observe)
 
 (* The paths the container the server runs in actually uses. Each is the one the
    code that owns it exports, never a literal repeated here: the socket the
@@ -324,7 +318,54 @@ let production_observe ~observe ~cron_configured =
     ~crontab_path:Crontab.crontab_path
     ~payload_dir:Bondi_common.Cron_exec_line.cron_root
 
+(* The idle PID 1 runs, and it never returns of its own accord: the container's
+   job is to be up, and a PID 1 that fell off the end of its entrypoint would be
+   a container the runtime reaps. That is a fear about falling through, which is
+   a different event from being asked to stop -- SIGTERM and SIGINT are the
+   asking, and answering either is not the same as running out of entrypoint.
+
+   Without a disposition of its own the asking does nothing at all.
+   [observed -- 2026-09-13] against this binary run as the init of a PID
+   namespace ([unshare -rpf --mount-proc], the process reading [NSpid: ... 1]):
+   the kernel discards a signal still at its default action when the target is
+   that namespace's init, so SIGTERM was dropped and the process was still
+   running two seconds later. Every [docker stop bondi-orchestrator] -- which
+   [bondi setup] issues on each version bump, and which an operator issues by
+   hand -- would then wait out the daemon's whole stop timeout and end in a
+   SIGKILL.
+
+   The discard is a property of a signal's disposition and not of its number, so
+   the same disposition is installed for SIGINT. That is the other signal an
+   operator sends at this process: [docker kill --signal=INT], and Ctrl-C on a
+   [docker run] that allocated no TTY, where [--sig-proxy] forwards the
+   interrupt to PID 1. [observed -- 2026-09-13, Docker 29.7.2]
+   [docker run --help] gives [--sig-proxy] as "(default true)", and the
+   justfile's [server-docker] recipe passes no [-t], so that is the recipe's own
+   case: left at the default action its container could not be stopped from the
+   terminal that started it.
+
+   So the signals that reach here end differently, and the loop below is what
+   says which. SIGTERM and SIGINT exit 0, because a stop that was asked for is
+   not a failure. Any other signal whose delivery merely cuts the sleep short
+   resumes it, which is why the sleep is a long one repeated rather than a
+   single unbounded wait: a shortened sleep must not fall through into a return.
+
+   The dispositions are set once, above the loop, rather than inside it. They
+   are a property of the process and not of a sleep, so an iteration that set
+   them again would only re-set what is already in force -- and setting them
+   inside would leave the first sleep, the one a stop arriving early lands in,
+   running under the default action this comment exists to replace. *)
+let wait_forever () =
+  let stop = Sys.Signal_handle (fun _ -> exit 0) in
+  Sys.set_signal Sys.sigterm stop;
+  Sys.set_signal Sys.sigint stop;
+  let rec sleep_on () =
+    Unix.sleep 3600;
+    sleep_on ()
+  in
+  sleep_on ()
+
 let eval () =
-  eval_argv ~serve:Server.serve
+  eval_argv ~idle:wait_forever
     ~observe:(production_observe ~observe:Readiness.observe)
     ~argv:Sys.argv

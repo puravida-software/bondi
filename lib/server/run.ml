@@ -1,5 +1,5 @@
-(* POST /api/v1/run - Execute a cron job.
-   Request body: {"job":"name","image":"...","env_vars":{...}} *)
+(* The `run` subcommand - Execute a cron job.
+   Payload on standard input: {"job":"name","image":"...","env_vars":{...}} *)
 
 open Json_helpers
 module Alert = Bondi_common.Alert
@@ -128,10 +128,10 @@ let dispatch_alert ~deliver ~payload ~outcome =
 
 (* The rejected body's keys are named; its values never are. A run payload
    carries env_vars and sink URLs that may embed credentials, and this message
-   is returned over HTTP and mailed by cron. Without the key list the ppx's
-   message names only the type that failed, which cannot distinguish a
-   misspelled field from a missing one — the two most likely ways a
-   hand-edited crontab line goes wrong. *)
+   is returned to whoever ran the subcommand and mailed by cron. Without the
+   key list the ppx's message names only the type that failed, which cannot
+   distinguish a misspelled field from a missing one — the two most likely ways
+   a hand-edited crontab line goes wrong. *)
 let decode_payload body =
   match Yojson.Safe.from_string body with
   | exception Yojson.Json_error msg ->
@@ -177,20 +177,20 @@ let warning_of_run ~cleanup ~started ~run_result =
   | Error _, Error _ ->
       None
 
-(* The whole of what the endpoint decides, with no transport named, so a caller
-   holding no HTTP request can reach it.
+(* The whole decision, with no transport named.
 
-   [deliver] arrives in the same shape the route was handed at startup, and the
+   [deliver] arrives in the shape [Environment.with_environment] builds, and the
    resources it needs are bound here rather than by the caller: a caller that
-   had to pre-bind [net] and [clock] itself would be reconstructing part of the
-   endpoint, which is the thing this signature exists to make unnecessary. The
+   had to pre-bind [net] and [clock] itself would be reconstructing part of this
+   function, which is the thing this signature exists to make unnecessary. The
    pure seams below it take the already-bound form, because none of them has a
    net or a clock to give.
 
-   There is no catch-all here, unlike [Status.report] and [Deploy.deploy]. This
-   endpoint has never had one: an exception escaping it is answered by the web
-   framework, and turning that into an [Orchestrator_failure] would change the
-   body the caller reads. *)
+   There is no catch-all here, unlike [Status.report] and [Deploy.deploy]. An
+   exception that escapes is classified by [Cli]'s own subcommand boundary,
+   which records the raw backtrace on the diagnostics stream before answering
+   [Orchestrator_failure]; catching it here would answer the same class with the
+   backtrace already lost. *)
 let run ~clock ~client ~net ~deliver body =
   let post_alert ~targets ~payload = deliver ~net ~clock ~targets ~payload in
   let* payload, full_image = prepare ~deliver:post_alert body in
@@ -219,14 +219,3 @@ let run ~clock ~client ~net ~deliver body =
   dispatch_alert ~deliver:post_alert ~payload
     ~outcome:(outcome_of_result run_result);
   response
-
-let route ~clock ~client ~net ~deliver =
-  Dream.post "/run" @@ fun req ->
-  let%lwt body = Dream.body req in
-  match run ~clock ~client ~net ~deliver body with
-  | Ok response ->
-      response |> run_response_to_yojson |> Yojson.Safe.to_string |> Dream.json
-  | Error err ->
-      Dream.respond
-        ~status:(Handler_error.http_status err)
-        ("Run failed: " ^ Handler_error.message err)

@@ -7,6 +7,8 @@ directory a previous run has already written to.
   $ rm -f wrong-shape.json not-json.txt run-payload.json refusal.txt argv.err
   $ rm -f run-refusal.txt help.txt help-flat.txt
   $ rm -f check.json check.err cron-check.json cron-check.err
+  $ rm -f idle.out idle.err serve.out serve.err unhandled.err term.out term.err
+  $ rm -f int.out int.err
 
 A deploy payload that is JSON of the wrong shape is refused as written. The
 message names the field that failed and never the value it carried: a payload
@@ -112,3 +114,113 @@ a manual this file has no business pinning.
   1
   $ grep -c '3 on a box that is not in a state to serve\.' help-flat.txt
   1
+
+The bare binary is what the image's entrypoint runs, and it is what a client
+that predates the HTTP surface's deletion still starts an orchestrator with. It
+must stay up: a container whose PID 1 exits is a container the runtime reaps. So
+what is asserted is that something else had to stop it. It is stopped from
+outside after a second, by a signal rather than by the timeout's default: a
+process killed by SIGKILL leaves 137, which no exit code this binary or its
+command-line library can choose collides with. The timeout's own 124 would --
+observed on 2026-09-12, cmdliner's cli_error is 124 as well, so a refusal and a
+stopping would have read the same.
+
+The stopping runs inside its own shell, which is not an aesthetic choice: the
+shell that runs this file has job control on and announces a foreground job
+killed by a signal, with the process id in the line. That line would be a diff
+on every run. A shell spawned for the command has no job control and says
+nothing, and its own status is the one being read.
+
+  $ sh -c 'timeout -s KILL 1 bondi-server > idle.out 2> idle.err'; status=$?
+  $ case "$status" in 137) echo "it was still running when it was stopped";; *) echo "it exited on its own: $status";; esac
+  it was still running when it was stopped
+
+It writes nothing while it idles, and a help page least of all: a group that
+answered an empty argument list with usage and a non-zero status would stop
+every orchestrator already deployed from starting. The two lines are matched
+rather than transcribed and their absence is what is asserted -- cmdliner's
+wording for both changes with its version, so a file that pinned the text would
+fail on a switch upgrade rather than on this binary.
+
+  $ if grep -qE 'Usage:|Try ' idle.out idle.err; then echo "it printed a help page"; else echo "it printed no help page"; fi
+  it printed no help page
+
+The serve subcommand left with the HTTP surface. This is also the affirmative
+arm for the case above: the same binary run a second way does exit, so "still
+running" is a property of the empty argument list rather than of a binary that
+hangs whatever it is given. The status is the command-line library's own and is
+classified rather than pinned to a number.
+
+  $ sh -c 'timeout -s KILL 5 bondi-server serve > serve.out 2> serve.err'; status=$?
+  $ case "$status" in 0) echo "serve was accepted";; 137) echo "serve idled";; *) echo "serve was refused";; esac
+  serve was refused
+
+Staying up is not the same as refusing to stop. SIGTERM is how a stop is asked
+for -- `docker stop` sends it and waits out the daemon's timeout before falling
+back to SIGKILL -- and the orchestrator's process is PID 1 of its container,
+where the kernel discards a signal whose disposition is still the default. So
+the disposition has to be installed rather than inherited, and what it buys is
+the difference between a replacement that takes a moment and one that takes the
+full timeout on every version bump.
+
+The status is read from `wait` and not from `timeout`: GNU `timeout` answers 124
+whenever it had to signal at all, whatever the command did next, so it cannot
+tell a deliberate exit from a death. A backstop SIGKILL follows a second later so
+that a binary which ignored the signal ends this file instead of hanging it, and
+the three outcomes are classified rather than pinned away -- 0 is the exit the
+handler takes, 143 is death by SIGTERM's default action, 137 is the backstop
+having been needed.
+
+This runs the binary as an ordinary process, where the default action would
+already stop it, so what it pins is which of the three happened and not the PID 1
+case, which no test runnable under `dune test` can reach. That case is reached by
+`scripts/check-server-image.sh`, which stops a real container whose PID 1 is this
+binary and holds the stop to both a deadline and an exit code -- it needs a
+Docker Engine, which is why it is a release gate and not a test here.
+
+  $ sh -c 'bondi-server > term.out 2> term.err & pid=$!; sleep 1; kill -TERM $pid; sleep 1; kill -KILL $pid 2> /dev/null; wait $pid'; status=$?
+  $ case "$status" in 0) echo "it stopped when it was asked to";; 143) echo "it died of the default action";; 137) echo "it ignored the signal";; *) echo "unclassified: $status";; esac
+  it stopped when it was asked to
+
+SIGINT is the other signal an operator sends at this process, and the argument
+above does not stop at SIGTERM. `docker kill --signal=INT` sends it, and so does
+Ctrl-C on a `docker run` started without `-t`, where `--sig-proxy` forwards the
+interrupt to PID 1 -- which is how the `server-docker` recipe in the justfile
+runs this binary. [observed -- 2026-09-13, Docker 29.7.2] `docker run --help`
+gives `--sig-proxy` as "(default true)", and that recipe passes no `-t`. At the default action the kernel
+discards SIGINT at a namespace's init exactly as it discards SIGTERM, so the
+container would be stoppable only from a second terminal.
+
+The shape is the SIGTERM arm's, and so is the reading of the status out of
+`wait`. The three outcomes differ only in which death is which: 130 is death by
+SIGINT's default action, and 137 is again the backstop having been needed.
+Backgrounding is what makes 137 the outcome without a disposition here rather
+than 130 -- a non-interactive shell sets SIGINT to ignore in a command it starts
+with `&` -- and an explicitly installed handler overrides that inherited ignore,
+which is the same thing it has to do to the kernel's discard at PID 1.
+
+  $ sh -c 'bondi-server > int.out 2> int.err & pid=$!; sleep 1; kill -INT $pid; sleep 1; kill -KILL $pid 2> /dev/null; wait $pid'; status=$?
+  $ case "$status" in 0) echo "it stopped when it was asked to";; 130) echo "it died of the default action";; 137) echo "it ignored the signal";; *) echo "unclassified: $status";; esac
+  it stopped when it was asked to
+
+An exception nobody expected is answered with a diagnostic that carries a
+backtrace, and the backtrace has to have frames in it. Recording is
+process-global and has to be switched on before anything raises, so a handler
+that takes the backtrace at the moment of the catch still gets an empty one
+unless something earlier turned recording on. Nothing in this binary's own
+output would say so: the phrase is written either way, and what is missing is
+the line under it.
+
+The exception is induced by closing the standard output the subcommand writes
+its answer to, which raises rather than returning a failure -- the one path into
+the classification that needs no fixture and no engine. It is asserted at the
+binary because the process the unit tests run in has backtrace recording
+switched on by the test framework itself, so an assertion made there would pass
+against either version of this binary.
+
+  $ bondi-server check >&- 2> unhandled.err
+  [1]
+  $ grep -c 'a subcommand failed with an unhandled exception: Sys_error' unhandled.err
+  1
+  $ if grep -qE '^(Raised|Called from|Re-raised|Raised by primitive operation) ' unhandled.err; then echo "the diagnostic carries a frame"; else echo "the diagnostic carries an empty backtrace"; fi
+  the diagnostic carries a frame

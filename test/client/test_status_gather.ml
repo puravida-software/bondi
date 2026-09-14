@@ -9,6 +9,9 @@ module Cron_payload = Bondi_client.Cron_payload
 module Cron_exec_line = Bondi_common.Cron_exec_line
 module Status_cmd = Bondi_client.Cmd.Status
 module Container_health = Bondi_client.Container_health
+module Deprecations = Bondi_client.Deprecations
+
+let contains ~needle hay = Test_helpers.contains ~needle hay
 
 (* Every arm named, so a seventh verdict is a compile error here rather than a
    case this suite renders as some other one. *)
@@ -537,6 +540,48 @@ let test_the_orchestrator_read_is_a_remote_exec_outcome () =
             (Test_helpers.contains message
                ~needle:"Permission denied (publickey)."))
 
+(* The two fields the client still parses and no longer acts on are said by the
+   commands that act on the configuration. This one is not: it is the command
+   run repeatedly and read quickly, and a warning on every read trains the
+   reader to skip the section it is in.
+
+   That is a property of placement, and a case that deleted a call would not
+   have it: deleting proves a line is needed somewhere, never that it is absent
+   here. The near miss this case is built around is this module's own warnings
+   channel -- [report_of_reading] already takes the configuration, so a notice
+   added there needs no new argument and reaches every status output there is.
+
+   Two of the four arms are affirmative, on the same fixture: the configuration
+   really does declare both dead fields and yields two notices, and the report's
+   warnings really are non-empty for a reason of their own. Without them the
+   emptiness below is equally true of a fixture that reaches nothing. *)
+let test_a_declared_field_reaches_none_of_statuss_output () =
+  let declared : Config_file.t =
+    {
+      config with
+      bondi_server =
+        {
+          version = "0.10.3";
+          bind_address = Some "0.0.0.0";
+          api_token = Some "not-a-real-token";
+        };
+    }
+  in
+  let notices = Deprecations.messages declared.bondi_server in
+  check int "the fixture declares both dead fields" 2 (List.length notices);
+  let report =
+    Gather.report_of_reading ~config:declared ~address:"10.0.0.1" ~waits:[]
+      (reading ())
+  in
+  check bool "the warnings channel carries something of its own" true
+    (List.mem "failed to inspect cron container nightly-close" report.warnings);
+  check (list string) "and no deprecation notice is among them" []
+    (List.filter (fun warning -> List.mem warning notices) report.warnings);
+  check bool "nor does the rendered table name either dead field" false
+    (let rendered = Report.render_table [ report ] in
+     contains ~needle:"bind_address" rendered
+     || contains ~needle:"api_token" rendered)
+
 let () =
   run "status gather"
     [
@@ -568,5 +613,10 @@ let () =
             `Quick test_a_health_wait_is_not_cut_off_by_the_session_it_runs_in;
           test_case "the orchestrator read is a remote-exec outcome" `Quick
             test_the_orchestrator_read_is_a_remote_exec_outcome;
+        ] );
+      ( "deprecation notices",
+        [
+          test_case "a declared field reaches none of status's output" `Quick
+            test_a_declared_field_reaches_none_of_statuss_output;
         ] );
     ]

@@ -6,6 +6,7 @@ module Setup = Bondi_client.Cmd.Setup
 module Status_cmd = Bondi_client.Cmd.Status
 module Setup_phases = Bondi_client.Setup_phases
 module Crontab_listing = Bondi_client.Crontab_listing
+module Deprecations = Bondi_client.Deprecations
 
 (* Production always passes the declared specs; the existing tests predate them
    and are about the non-managed parts of the plan. *)
@@ -963,7 +964,8 @@ let test_each_reading_collapses_to_go_on_or_stop_with_a_sentence () =
         reason);
   (match
      Setup.orchestrator_reading_verdict Setup.Read_log_stream
-       (Ok "2026-09-12T09:00:00Z listening on 0.0.0.0:3030\n")
+       (Ok
+          "2026-09-12T09:00:00Z alert delivered to alerts.example.com (HTTP 204)\n")
    with
   | Ok () ->
       fail
@@ -1264,12 +1266,12 @@ let test_run_command_mounts_the_payload_directory_for_a_held_section () =
   check bool "and the same value plans the copy" true
     (List.mem "PreserveCronPayloads nightly-report"
        (orchestrator_phase (plan config context)));
-  match Setup.orchestrator_run_command ~cron_payload_needed:needed config with
-  | Error message -> fail message
-  | Ok command ->
-      check bool "the replacement container sees the host directory" true
-        (Bondi_common.String_utils.contains
-           ~needle:"-v /etc/bondi/cron:/etc/bondi/cron" command)
+  let command =
+    Setup.orchestrator_run_command ~cron_payload_needed:needed config
+  in
+  check bool "the replacement container sees the host directory" true
+    (Bondi_common.String_utils.contains
+       ~needle:"-v /etc/bondi/cron:/etc/bondi/cron" command)
 
 (* The negative arm, so the assertion above is the section's doing rather than a
    mount added unconditionally. A host with no section and no declared cron job
@@ -1285,11 +1287,11 @@ let test_run_command_omits_the_payload_mount_without_cron () =
   in
   let needed = Setup.cron_payload_needed config context in
   check bool "nothing needs the payload directory" false needed;
-  match Setup.orchestrator_run_command ~cron_payload_needed:needed config with
-  | Error message -> fail message
-  | Ok command ->
-      check bool "no payload mount" false
-        (Bondi_common.String_utils.contains ~needle:"/etc/bondi/cron" command)
+  let command =
+    Setup.orchestrator_run_command ~cron_payload_needed:needed config
+  in
+  check bool "no payload mount" false
+    (Bondi_common.String_utils.contains ~needle:"/etc/bondi/cron" command)
 
 (* The reading is asked about the same cron this run planned the mounts from,
    which on this box is not what the configuration declares. A host declaring no
@@ -1491,8 +1493,12 @@ let test_plan_cron_only_no_acme () =
 (* The crontab lines an older bondi wrote use --fail-with-body, which an older
    curl rejects as an unknown option, and they go on firing until each job is
    deployed again. Verifying the host's curl at setup turns that into one loud
-   failure here rather than every surviving legacy job failing at its next tick. The check precedes RunServer, so an unusable host
-   never gets an orchestrator that would write lines it cannot run. *)
+   failure here rather than a silent one on the host. What it no longer decides
+   is whether those jobs run: the orchestrator serves nothing and publishes no
+   port, so on a current image a surviving legacy line fails at the connection
+   at its next tick whatever curl is installed. What this pins is the plan, not
+   the gate's worth -- the check precedes RunServer, so an unusable host never
+   gets an orchestrator that would write lines it cannot run. *)
 let test_plan_requires_curl_when_cron_jobs_declared () =
   let cron_job =
     {
@@ -2530,6 +2536,29 @@ let test_restart_policy_is_not_read_where_docker_was_undetermined () =
                "a Docker state that could not be read was acted on anyway: %s"
                message))
 
+(* What the client says about configuration it still parses and no longer acts
+   on. [setup] is a command that acts on the file, so it says it; the wording
+   itself is pinned once, at the surface, by this command's cram session rather
+   than a second time here.
+
+   What is pinned here is the composition: what setup says is what the fields it
+   was handed say, so a call that reached for some other configuration -- or for
+   a hand-written sentence of its own -- is a failure. The first arm is on the
+   same fixture and proves that configuration has something to say, which is
+   what makes the last arm's silence a configuration declaring neither rather
+   than a fixture that reaches nothing. *)
+let test_a_declared_bind_address_reaches_setups_output () =
+  let declared : Config_file.t =
+    Client_fixtures.mk_config ~bind_address:"0.0.0.0" ()
+  in
+  check bool "the fixture declares something to say" true
+    (Deprecations.messages declared.bondi_server <> []);
+  check (list string) "what setup says is what the declared fields say"
+    (Deprecations.messages declared.bondi_server)
+    (Setup.deprecation_notices declared);
+  check (list string) "a configuration declaring neither says nothing" []
+    (Setup.deprecation_notices (Client_fixtures.mk_config ()))
+
 let () =
   run "Setup.plan"
     [
@@ -2633,6 +2662,11 @@ let () =
             test_plan_for_config_proceeds_when_probes_succeed;
         ] );
       ("order", [ test_case "action order" `Quick test_plan_action_order ]);
+      ( "deprecation notices",
+        [
+          test_case "a declared bind_address reaches setup's output" `Quick
+            test_a_declared_bind_address_reaches_setups_output;
+        ] );
       ( "cron docker",
         [
           test_case "required when cron jobs are declared" `Quick

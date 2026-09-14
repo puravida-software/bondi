@@ -5,10 +5,9 @@ let emit json =
   flush stdout
 
 (* No match over [Handler_error.t] here, deliberately. The class already answers
-   both "what does this exit with" and "what does this answer over HTTP", and a
-   second match in this module would be a second table that agrees today and
-   drifts the first time a class is added. This makes no decision: it asks the
-   class. *)
+   "what does this exit with", and a second match in this module would be a
+   second table that agrees today and drifts the first time a class is added.
+   This makes no decision: it asks the class. *)
 let fail error =
   prerr_string (Handler_error.message error);
   prerr_newline ();

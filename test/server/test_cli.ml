@@ -5,69 +5,65 @@ module Diagnostics = Bondi_server__Diagnostics
 module Docker_client = Bondi_server__Docker__Client
 module Handler_error = Bondi_server__Handler_error
 module Readiness = Bondi_server__Readiness
-module Server_config = Bondi_server__Server_config
 module Readiness_exit_code = Bondi_common.Readiness_exit_code
 module String_utils = Bondi_common.String_utils
 
-(* The command group is exercised with an explicit argv, an explicit serve
+(* The command group is exercised with an explicit argv, an explicit idle
    action and an explicit readiness gather, which is the only way the questions
    these tests ask can be asked at all: [Cli.eval] reads this process's own
-   argv -- Alcotest's -- the real serve binds a port and does not return, and
-   the real gather probes the Docker socket and PID 1 of whichever box is
-   running the suite. The subject is still the group that ships; only its three
-   inputs are supplied by the test. *)
+   argv -- Alcotest's -- the real idle never returns, and the real gather probes
+   the Docker socket and PID 1 of whichever box is running the suite. The
+   subject is still the group that ships; only its three inputs are supplied by
+   the test. *)
 (* An observe that fails the case that reaches it. Every term but [check] must
    leave the machine alone, and a term that probed a socket here would be
    asserting about whichever box ran the suite. *)
 let unused_observe ~cron_configured:_ =
   fail "no term but check may observe readiness"
 
-let evaluate ?(observe = unused_observe) ~serve argv =
-  Cli.eval_argv ~serve ~observe ~argv
+let evaluate ?(observe = unused_observe) ~idle argv =
+  Cli.eval_argv ~idle ~observe ~argv
 
-(* A serve that records that it ran. The recording is what "which term was
-   evaluated" means here: an exit code alone cannot tell a serve that returned
-   zero from a group that quietly did nothing. *)
-let recording_serve () =
+(* An idle that records that it ran and then returns, which the real one never
+   does. The recording is what "which term was evaluated" means here: an exit
+   code alone cannot tell an idle that was reached from a group that quietly
+   did nothing. *)
+let recording_idle () =
   let evaluated = ref false in
-  let serve () =
-    evaluated := true;
-    Ok ()
-  in
-  (serve, evaluated)
+  let idle () = evaluated := true in
+  (idle, evaluated)
 
-let test_no_arguments_evaluates_serve () =
-  let serve, evaluated = recording_serve () in
-  let code = evaluate ~serve [| "bondi-server" |] in
-  check bool "empty argv evaluated the serve term" true !evaluated;
-  check int "a serve that returned exits zero" 0 code
+(* The contract the image's entrypoint depends on: the bare binary is what a
+   client that predates this feature runs, so the empty argument list must
+   reach the action that keeps the container up. The action is injected because
+   the real one never returns, and a test that could not replace it could not
+   observe that it was reached at all. *)
+let test_an_empty_argument_list_reaches_the_idle_action () =
+  let idle, evaluated = recording_idle () in
+  let code = evaluate ~idle [| "bondi-server" |] in
+  check bool "empty argv evaluated the idle term" true !evaluated;
+  check int "an idle that returned exits zero" 0 code
 
-let test_the_serve_subcommand_evaluates_serve () =
-  let serve, evaluated = recording_serve () in
-  let code = evaluate ~serve [| "bondi-server"; "serve" |] in
-  check bool "the named serve subcommand evaluated the serve term" true
+(* [serve] left the group with the HTTP surface, and this is the assertion that
+   it left rather than merely stopped being documented. The affirmative arm for
+   the absence is the case above, on the same injected action: the group does
+   evaluate it when the argument list is empty, so a group that evaluated
+   nothing at all could not pass the pair. The exit code is asserted as "not
+   success" rather than against cmdliner's own number, which is a property of
+   the library version rather than of this group. *)
+let test_serve_is_not_a_subcommand () =
+  let idle, evaluated = recording_idle () in
+  let code = evaluate ~idle [| "bondi-server"; "serve" |] in
+  check bool "the serve subcommand did not evaluate the idle term" false
     !evaluated;
-  check int "a serve that returned exits zero" 0 code
+  check bool "serve does not exit zero" true (code <> 0)
 
-(* The affirmative arm for this absence is the two cases above: they show the
-   group evaluates serve when it should, so a group that evaluated nothing at
-   all could not pass the file. The exit code is asserted too, and asserted as
-   "not success" rather than against cmdliner's own number, which is a property
-   of the library version rather than of this group. *)
-let test_an_unknown_subcommand_does_not_evaluate_serve () =
-  let serve, evaluated = recording_serve () in
-  let code = evaluate ~serve [| "bondi-server"; "not-a-command" |] in
-  check bool "an unknown subcommand did not evaluate the serve term" false
+let test_an_unknown_subcommand_does_not_evaluate_idle () =
+  let idle, evaluated = recording_idle () in
+  let code = evaluate ~idle [| "bondi-server"; "not-a-command" |] in
+  check bool "an unknown subcommand did not evaluate the idle term" false
     !evaluated;
   check bool "an unknown subcommand does not exit zero" true (code <> 0)
-
-(* A server that cannot read its own port configuration used to print to stderr
-   and fall off the end of main, exiting 0 -- a container the runtime would
-   treat as having done its job. The code comes from the one failure table. *)
-let test_a_configuration_failure_does_not_exit_zero () =
-  let serve () = Error (Server_config.Invalid_port "not-a-number") in
-  let code = evaluate ~serve [| "bondi-server" |] in
-  check int "a port that was wrong as written exits 2" 2 code
 
 (* The subcommands write to this process's own stdout and stderr and read its
    stdin, because their caller is a shell holding file descriptors 0, 1 and 2.
@@ -109,36 +105,27 @@ let with_streams ~stdin_contents f =
   (value, written_out, written_err)
 
 let run_cli ?observe ~stdin_contents argv =
-  let serve () = fail "no payload subcommand may evaluate the serve term" in
-  with_streams ~stdin_contents (fun () -> evaluate ?observe ~serve argv)
+  let idle () = fail "no payload subcommand may evaluate the idle term" in
+  with_streams ~stdin_contents (fun () -> evaluate ?observe ~idle argv)
 
-(* The message carries the offending text as well as the variable's name, and
-   that is asserted rather than argued: the operator wrote the value, and a
-   sentence naming only [BONDI_SERVER_PORT] leaves an unsubstituted template
-   indistinguishable from a typo. The two values below are exactly that pair,
-   and each must appear in the sentence its own run produced -- which is what
-   makes this an assertion that the value was substituted rather than that the
-   sentence mentions a port at all. *)
-let test_a_configuration_failure_names_the_value_it_refused () =
-  let refuse value () = Error (Server_config.Invalid_port value) in
-  let typo_code, typo_out, typo_err =
+(* The near miss the empty-argv contract has always existed to prevent, and the
+   half the exit code alone does not cover: a group that reached the idle and
+   printed a help page beside it would satisfy the case above. What is asserted
+   is that nothing was written at all, which subsumes the page and needs no
+   wording -- cmdliner's [Usage:] and [Try ...] lines change with its version,
+   so a test that pinned their text would fail on a switch upgrade rather than
+   on this group. The idle is recorded here too, so the emptiness cannot pass
+   because the argument list stopped reaching the term. *)
+let test_an_empty_argument_list_does_not_print_help () =
+  let idle, evaluated = recording_idle () in
+  let code, written_out, written_err =
     with_streams ~stdin_contents:"" (fun () ->
-        evaluate ~serve:(refuse "not-a-number") [| "bondi-server" |])
+        evaluate ~idle [| "bondi-server" |])
   in
-  check int "a port that was wrong as written exits 2" 2 typo_code;
-  check string "a failure writes nothing to stdout" "" typo_out;
-  check bool "the variable the operator set is named" true
-    (String_utils.contains ~needle:"BONDI_SERVER_PORT" typo_err);
-  check bool "the value it carried is named beside it" true
-    (String_utils.contains ~needle:"not-a-number" typo_err);
-  let _, _, template_err =
-    with_streams ~stdin_contents:"" (fun () ->
-        evaluate ~serve:(refuse "${PORT}") [| "bondi-server" |])
-  in
-  check bool "an unsubstituted template is not reported as a typo" true
-    (String_utils.contains ~needle:"${PORT}" template_err);
-  check bool "the other run's value is not in this run's sentence" false
-    (String_utils.contains ~needle:"not-a-number" template_err)
+  check bool "empty argv evaluated the idle term" true !evaluated;
+  check int "an idle that returned exits zero" 0 code;
+  check string "empty argv writes nothing to stdout" "" written_out;
+  check string "empty argv writes nothing to stderr" "" written_err
 
 (* Both payloads below are refused before the term reaches Docker or Eio: one
    is not JSON at all and the other is JSON whose [image] is a number. That is
@@ -310,16 +297,16 @@ let test_a_body_that_raises_exits_with_its_class_s_code () =
   check bool "the exception is named where the operator reads it" true
     (String_utils.contains ~needle:"the body raised" written_err)
 
-(* Serving is the fifth term and the one the image's entrypoint evaluates, so
-   the same classification covers it: a trust store that cannot be loaded or an
-   Eio backend that will not start is a machine fault, not a mistyped command. *)
-let test_a_serve_that_raises_exits_with_its_class_s_code () =
-  let serve () = raise sentinel in
+(* The idle is the term the image's entrypoint evaluates, so the same
+   classification covers it: an idle that died of a machine fault must leave the
+   code its class carries rather than cmdliner's internal error. *)
+let test_an_idle_that_raises_exits_with_its_class_s_code () =
+  let idle () = raise sentinel in
   let code, _, written_err =
     with_streams ~stdin_contents:"" (fun () ->
-        evaluate ~serve [| "bondi-server" |])
+        evaluate ~idle [| "bondi-server" |])
   in
-  check int "an exception that escaped serve exits 1" 1 code;
+  check int "an exception that escaped the idle exits 1" 1 code;
   check bool "the exception is named where the operator reads it" true
     (String_utils.contains ~needle:"the body raised" written_err)
 
@@ -352,7 +339,19 @@ let test_classified_result_answers_an_escaping_exception_as_a_failure () =
         (String_utils.contains ~needle:"the body raised" message)
   | `Raised _ -> fail "an ordinary exception must not escape the classification");
   check bool "the backtrace went to the diagnostics stream" true
-    (String_utils.contains ~needle:"unhandled exception" written_err)
+    (String_utils.contains ~needle:"unhandled exception" written_err);
+  (* The phrase above is written whether or not there is a backtrace to write,
+     so on its own it is satisfied by a diagnostic whose second line is empty.
+     This pins that the handler writes the frames it was handed -- a handler
+     that stopped rendering the raw backtrace would still satisfy the phrase.
+
+     What it cannot see is whether the process recorded any: backtrace recording
+     is process-global and the test framework switches it on for its own runner,
+     so this assertion passes here against a binary that records none. That half
+     is asserted at the binary instead, where nothing has switched it on but the
+     binary itself. *)
+  check bool "the handler renders the frames it was handed" true
+    (String_utils.contains ~needle:"Raised at" written_err)
 
 (* The exact value is asserted, not merely its shape: a classification that
    caught the cancellation and raised one of its own would satisfy a shape
@@ -445,8 +444,8 @@ let test_classified_status_propagates_a_cancellation () =
    caller who ran [bondi-server check] reads [bondi-server check --help]. *)
 let test_help_documents_the_codes_a_failure_leaves_behind () =
   let page argv =
-    let serve () = fail "asking for help must not evaluate the serve term" in
-    with_streams ~stdin_contents:"" (fun () -> evaluate ~serve argv)
+    let idle () = fail "asking for help must not evaluate the idle term" in
+    with_streams ~stdin_contents:"" (fun () -> evaluate ~idle argv)
   in
   List.iter
     (fun command ->
@@ -466,7 +465,7 @@ let test_help_documents_the_codes_a_failure_leaves_behind () =
                ~needle:(Printf.sprintf "%d %s" exit_code doc)
                rendered))
         Handler_error.exit_documentation)
-    [ []; [ "serve" ]; [ "deploy" ]; [ "run" ]; [ "status" ]; [ "check" ] ]
+    [ []; [ "deploy" ]; [ "run" ]; [ "status" ]; [ "check" ] ]
 
 (* The version an operator asks for is the one the image was built with, and the
    image publishes it as [VERSION] in the runtime stage. Setting it here is what
@@ -475,10 +474,10 @@ let test_help_documents_the_codes_a_failure_leaves_behind () =
    hard-coded one. *)
 let test_the_group_reports_the_version_the_image_baked () =
   Unix.putenv "VERSION" "9.9.9-from-the-test";
-  let serve () = fail "asking for the version must not evaluate serve" in
+  let idle () = fail "asking for the version must not evaluate the idle" in
   let code, written_out, _ =
     with_streams ~stdin_contents:"" (fun () ->
-        evaluate ~serve [| "bondi-server"; "--version" |])
+        evaluate ~idle [| "bondi-server"; "--version" |])
   in
   check int "--version exits zero" 0 code;
   check string "the version the image baked is the version reported"
@@ -584,7 +583,7 @@ let with_vanished_stderr f =
   Unix.close writer;
   f ()
 
-(* The work is put in the serve action because it is the one action a test can
+(* The work is put in the idle action because it is the one action a test can
    fill with arbitrary work without a Docker socket; what is being asserted is
    the disposition and the write, which every subcommand path shares.
 
@@ -596,7 +595,7 @@ let with_vanished_stderr f =
 let test_a_write_while_work_is_in_flight_does_not_abort_the_work () =
   let child =
     in_a_child (fun ~report ->
-        let serve () =
+        let idle () =
           Diagnostics.write "halfway through the work the client asked for";
           let reached =
             match Unix.write_substring Unix.stderr "." 0 1 with
@@ -605,10 +604,9 @@ let test_a_write_while_work_is_in_flight_does_not_abort_the_work () =
                 "the stream was a pipe with no reader"
           in
           report_line report reached;
-          report_line report "the work ran to completion";
-          Ok ()
+          report_line report "the work ran to completion"
         in
-        with_vanished_stderr (fun () -> evaluate ~serve [| "bondi-server" |]))
+        with_vanished_stderr (fun () -> evaluate ~idle [| "bondi-server" |]))
   in
   (match child.status with
   | Unix.WEXITED 0 -> ()
@@ -647,14 +645,14 @@ let test_a_write_while_work_is_in_flight_does_not_abort_the_work () =
 let test_the_final_response_write_keeps_its_classification () =
   let err_path = Filename.temp_file "bondi_cli_closed_stdout" ".txt" in
   let err_fd = Unix.openfile err_path [ Unix.O_WRONLY; Unix.O_TRUNC ] 0o600 in
-  let serve () = Ok () in
+  let idle () = () in
   let child =
     in_a_child (fun ~report:_ ->
         Unix.dup2 err_fd Unix.stderr;
         Unix.close Unix.stdout;
         evaluate
           ~observe:(fun ~cron_configured:_ -> [])
-          ~serve
+          ~idle
           [| "bondi-server"; "check" |])
   in
   Unix.close err_fd;
@@ -680,16 +678,14 @@ let () =
     [
       ( "command group",
         [
-          test_case "no arguments evaluates serve" `Quick
-            test_no_arguments_evaluates_serve;
-          test_case "the serve subcommand evaluates serve" `Quick
-            test_the_serve_subcommand_evaluates_serve;
-          test_case "an unknown subcommand does not evaluate serve" `Quick
-            test_an_unknown_subcommand_does_not_evaluate_serve;
-          test_case "a configuration failure does not exit zero" `Quick
-            test_a_configuration_failure_does_not_exit_zero;
-          test_case "a configuration failure names the value it refused" `Quick
-            test_a_configuration_failure_names_the_value_it_refused;
+          test_case "an empty argument list reaches the idle action" `Quick
+            test_an_empty_argument_list_reaches_the_idle_action;
+          test_case "an empty argument list does not print help" `Quick
+            test_an_empty_argument_list_does_not_print_help;
+          test_case "serve is not a subcommand" `Quick
+            test_serve_is_not_a_subcommand;
+          test_case "an unknown subcommand does not evaluate the idle" `Quick
+            test_an_unknown_subcommand_does_not_evaluate_idle;
         ] );
       ( "the manual",
         [
@@ -721,8 +717,8 @@ let () =
         [
           test_case "a body that raises exits with its class's code" `Quick
             test_a_body_that_raises_exits_with_its_class_s_code;
-          test_case "a serve that raises exits with its class's code" `Quick
-            test_a_serve_that_raises_exits_with_its_class_s_code;
+          test_case "an idle that raises exits with its class's code" `Quick
+            test_an_idle_that_raises_exits_with_its_class_s_code;
           test_case "an escaping exception is answered as a failure" `Quick
             test_classified_result_answers_an_escaping_exception_as_a_failure;
           test_case "a cancellation propagates" `Quick

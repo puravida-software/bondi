@@ -327,14 +327,15 @@ let interpret ~clock ~client ~net (actions : deploy_action list) :
   run actions
 
 (* ------------------------------------------------------------------------- *)
-(* JSON / HTTP                                                               *)
+(* JSON                                                                      *)
 (* ------------------------------------------------------------------------- *)
 
-(* The decode is a decision the endpoint makes, so it answers in the same
+(* The decode is a decision this module makes, so it answers in the same
    vocabulary as the rest of it: a body that did not decode is a value the
    caller wrote that failed a precondition, which is [Invalid_request] and
-   carries that class's status and exit code. The two messages are unchanged --
-   [route] prefixes them, and that prefix is the wire. *)
+   carries that class's exit code. The two messages are unchanged: they were
+   written to be read after a caller-supplied prefix and are still worded that
+   way. *)
 let decode_input body : (Simple.deploy_input, Handler_error.t) result =
   match Yojson.Safe.from_string body with
   | exception Yojson.Json_error msg ->
@@ -447,24 +448,19 @@ let converge_traefik_restart_policy ~clock ~client ~net ~strategy input :
 let orchestrator_step result =
   Result.map_error (fun m -> Handler_error.Orchestrator_failure m) result
 
-(* The endpoint's whole decision, naming no transport, so a caller holding no
-   HTTP request can reach it. Everything above it in [route] is decoding and
-   everything below is encoding.
+(* The whole decision, naming no transport. [decode_input] runs above it and
+   the response encoder below it, and neither is this function's business.
 
-   The catch-all is where the route's [Lwt.catch] went, and it is deliberately
-   not narrowed to exclude [Stdlib.Exit]: nothing on this path calls [exit],
-   and answering a raised [Exit] differently than this endpoint answers it
-   today would change what the wire says. What did move is the boundary -- the
-   old catch also covered the JSON encoding, which now sits on the route's side
-   of the seam. The encoder walks a record of four strings and has no input on
-   which it can raise.
+   The catch-all is deliberately not narrowed to exclude [Stdlib.Exit]: nothing
+   on this path calls [exit], and answering a raised [Exit] differently than
+   this function answers it today would change what the caller reads. The JSON
+   encoding is outside it, on the caller's side of the seam; the encoder walks a
+   record of four strings and has no input on which it can raise.
 
-   [Eio.Cancel.Cancelled] is the one exception the boundary move makes it wrong
-   to absorb. The old [Lwt.catch] sat outside [Lwt_eio.run_eio], where a
-   cancelled fiber had already been converted before it could be seen; this
-   catch runs inside that fiber, so swallowing the cancellation would let a
-   cancelled deploy return normally and break structured concurrency. It is
-   re-raised rather than classified. *)
+   [Eio.Cancel.Cancelled] is the one exception it is wrong to absorb, because
+   this catch runs inside the fiber that would be cancelled: swallowing the
+   cancellation would let a cancelled deploy return normally and break
+   structured concurrency. It is re-raised rather than classified. *)
 let deploy ~clock ~net input : (deploy_response, Handler_error.t) result =
   try
     let client = Docker.Client.create ?registry_auth:(registry_auth input) () in
@@ -499,24 +495,3 @@ let deploy ~clock ~net input : (deploy_response, Handler_error.t) result =
   with
   | Eio.Cancel.Cancelled _ as cancelled -> raise cancelled
   | exn -> Error (Handler_error.Orchestrator_failure (Printexc.to_string exn))
-
-let route ~clock ~net =
-  Dream.post "/deploy" @@ fun req ->
-  let open Lwt.Infix in
-  let%lwt body = Dream.body req in
-  match decode_input body with
-  | Error err ->
-      Dream.respond
-        ~status:(Handler_error.http_status err)
-        ("Bad request: " ^ Handler_error.message err)
-  | Ok input -> (
-      (Lwt_eio.run_eio @@ fun () -> deploy ~clock ~net input) >>= function
-      | Ok response ->
-          response
-          |> deploy_response_to_yojson
-          |> Yojson.Safe.to_string
-          |> Dream.json
-      | Error err ->
-          Dream.respond
-            ~status:(Handler_error.http_status err)
-            ("Error deploying: " ^ Handler_error.message err))
