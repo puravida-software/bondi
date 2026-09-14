@@ -186,7 +186,25 @@ type create_container_request = {
 [@@deriving yojson]
 
 let default_socket_path : string = "/var/run/docker.sock"
-let default_api_version : string = "v1.53"
+
+(* Every request path is prefixed with this, so it is the one thing that has to
+   be true of an engine Bondi has never met. A daemon rejects a version outside
+   its own [MinAPIVersion, ApiVersion] window with a 400 and no other symptom,
+   and the window moves in both directions: old engines cap the top, new engines
+   raise the floor. This value has to sit inside the intersection for every
+   engine in the estate, which is why it is low rather than current.
+
+   It was v1.41 until a test-coverage commit moved it to v1.53 -- the version of
+   the engine on the machine that made the change. Nothing here needs a modern
+   API: the endpoints used are /containers/{json,create,...}, /images/create,
+   /images/{name} and /networks{,/create}, all of which predate 1.41.
+
+   [observed -- 2026-09-14] Docker Engine 29.8.0 advertises MinAPIVersion 1.40
+   and ApiVersion 1.56; the GitHub-hosted runner's 28.0.4 caps at 1.48. v1.53
+   is inside the first window and above the second, so the orchestrator's every
+   Engine call failed there with "client version 1.53 is too new". v1.41 is
+   inside both. *)
+let default_api_version : string = "v1.41"
 
 let create :
     ?socket_path:string ->
