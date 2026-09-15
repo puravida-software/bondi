@@ -461,7 +461,11 @@ let gated_server : Config_file.server =
     ip_address = "192.0.2.1";
     ssh =
       Some
-        { user = "deploy"; private_key_contents = "KEY"; private_key_pass = "" };
+        {
+          user = "deploy";
+          private_key_contents = Some "KEY";
+          private_key_pass = None;
+        };
     port = None;
   }
 

@@ -54,6 +54,29 @@ type failure =
           up on may be work still going on the box, and reporting it as a host
           that was never reached sends an operator to re-run something that may
           already be running. *)
+  | Agent_unavailable of { program : string }
+      (** The configured key needs a passphrase to sign with, and [program] --
+          the agent, or the program that loads a key into one -- is not on this
+          machine's PATH. Nothing was spawned and nothing ran on any host.
+
+          Settled before the spawn for {!Ssh_not_found}'s reason and not a
+          repetition of it: that arm is the client this module runs, this one is
+          the pair a passphrase needs, and only a manifest that declares an
+          encrypted key can reach it. An operator who has deployed for years
+          without either program installed meets it the day they set a
+          passphrase, which is why the rendering says why the program was
+          wanted. *)
+  | Key_passphrase_rejected of { output : string }
+      (** The configured passphrase did not unlock the configured key. Nothing
+          was dialled: the key would have been offered, accepted, and then
+          failed to sign, and the host would have reported that as an
+          authorization failure of its own -- which is the misattribution this
+          arm exists to stop.
+
+          [output] is what the loading program printed, bounded by {!message}
+          like every other payload here. It never contains the passphrase: that
+          reaches the loading program down a channel of its own and comes back
+          in nothing the program says. *)
 
 val ssh_config : Config_file.server -> (Config_file.server_ssh, failure) result
 (** [ssh_config server] is the credentials a remote call needs, or the arm
@@ -212,9 +235,27 @@ type session
 (** A connection's worth of remote calls against one server, with the private
     key staged once for its lifetime.
 
+    What it holds is what was staged for the server it was opened on, which is
+    one of three things: nothing at all, a key file [ssh] can read, or a key
+    file whose decrypted form is held by an agent this client raised. The
+    options that name an identity and the environment a call is spawned in are
+    both derived from that rather than stored beside it, so there is one answer
+    to what a session is and not two that could disagree.
+
+    A record with an unconditional key path could describe only the middle one.
+    A manifest that declares no key has no path to put in such a field, and a
+    key that cannot sign as a file has a socket to carry as well — and both are
+    now shapes a manifest may legitimately have.
+
+    The environment is carried here rather than prefixed to the command string.
+    A [VAR=value] prefix would be a second quoting surface on a line that is
+    already a shell command with a quoted destination and a quoted remote
+    command, and the runner is handed an environment by the same call that
+    spawns the client, so there is nothing to build.
+
     Opaque because there is nothing in it a caller has anything to do with: the
-    one thing it holds is a path to key material, and a caller that could read
-    it could copy it. It is created by {!with_session} and consumed by the
+    options name a path to key material, and a caller that could read that path
+    could copy the key. It is created by {!with_session} and consumed by the
     runners, and a session belongs to the server it was opened on — passing one
     to a call against a different server would hand that host another host's
     key, which the type does not prevent and which no caller has reason to do.
@@ -225,9 +266,20 @@ val with_session :
   Config_file.server ->
   (session -> 'a) ->
   ('a, failure) result
-(** [with_session ~timeout_seconds server f] stages the key, runs [f] with the
-    session, and removes the key on every path out of [f], including one [f]
-    leaves by raising.
+(** [with_session ~timeout_seconds server f] resolves how the server is
+    authenticated to, stages whatever that needs, runs [f] with the session, and
+    unstages on every path out of [f], including one [f] leaves by raising.
+
+    What is staged is the configuration's to decide and not the caller's. A
+    manifest that declares no key stages nothing and imposes no identity, so the
+    operator's own ssh configuration is what authenticates. One that declares a
+    key which can sign as it stands writes it out and names it, which is what
+    has always happened here. One that declares an encrypted key and the secret
+    that unlocks it writes the key out, raises an agent for the life of the
+    session, loads the key into it and points the client at it — the decrypted
+    form exists only inside that process and is written nowhere. An encrypted
+    key with nothing to unlock it is answered without staging or dialling
+    anything, in the same words the configuration reader refuses it in.
 
     How long key material is on disk is one decision per server rather than one
     per remote call. A run against a single box makes tens of calls, and a
@@ -237,12 +289,15 @@ val with_session :
     longer one in each.
 
     The failure arms are the staging's own — no [ssh] block in the
-    configuration, no [ssh] on this machine's PATH, nowhere to write the key —
-    and every one of them is what each call inside [f] would have answered on
-    its own. [f] is not run when one of them is returned, so a caller may
-    re-derive its answer without a session and be sure nothing was done twice.
-    An exception raised by [f] itself is [f]'s own and reaches the caller with
-    its backtrace rather than becoming one of those arms.
+    configuration, no [ssh] on this machine's PATH, nowhere to write the key, no
+    agent to raise, a passphrase that did not unlock — and every one of them is
+    what each call inside [f] would have answered on its own. Not one of them is
+    a host's answer, which is the point: the failure this replaced was a local
+    signing fault arriving as the box's authorization error. [f] is not run when
+    one of them is returned, so a caller may re-derive its answer without a
+    session and be sure nothing was done twice. An exception raised by [f]
+    itself is [f]'s own and reaches the caller with its backtrace rather than
+    becoming one of those arms.
 
     [timeout_seconds] is the bound this session is opened at: how long a call
     made over it may take before it is given up on and answered with
@@ -398,9 +453,22 @@ val docker_command_output_text :
 val ssh_options : string list
 (** The options every remote call is made with.
 
-    Two of them refuse to wait on a prompt: nothing that reads a host is
-    attended by anyone who could answer a password or a host-key question, and a
-    prompt is a wait with no deadline.
+    Two of them refuse to wait on a prompt. That was once justified by there
+    being nobody here who could answer one, and that is no longer true: a key
+    which needs a passphrase is unlocked by a helper this client writes, and a
+    helper is exactly such an attendant. It stays for the half of the claim that
+    survives. The attendant answers the program that loads a key into an agent,
+    which runs before any of this and on this machine; what [ssh] itself would
+    prompt for over these options is a password for the remote account and a
+    decision about an unknown host key, and there is still nobody to answer
+    either. A prompt is a wait with no deadline, so an unattended one costs the
+    whole invocation.
+
+    It is also what an operator who declares no key is held to. Their own
+    identity has to be usable without being asked for anything -- an agent that
+    already holds it, or a key with no passphrase on it -- because this client
+    will not stop to ask, and a configuration that would have prompted fails
+    here instead.
 
     The rest bound the network. A host that refuses a connection answers at
     once; one that accepts it and then drops the packets answers never, and
@@ -432,6 +500,14 @@ val multiplex_options : unit -> string list
     agents share one uid, so a predictable path in a shared /tmp would let one
     repo's job ride another's deployment connection.
 
+    Inside that directory the socket is named per connection rather than per
+    process, through the token [ssh] expands. One name for the whole process is
+    one connection for every server the process talks to: a manifest carries
+    several servers, every command loops them inside one process and well inside
+    [ControlPersist], and the second server's command would then run down the
+    first server's connection -- past the identity, the [IdentitiesOnly=yes] and
+    the agent that were each chosen for the second.
+
     Not folded into {!ssh_options} because the two cost different things to
     take. The shared options are a constant; this is a function because the
     first call creates the control directory, and folding them together would
@@ -444,18 +520,50 @@ val with_temp_key : string -> (string -> 'a) -> 'a
     exception from [f], whose fault reaches the caller rather than the
     cleanup's.
 
-    A key is carried in the configuration either base64-encoded or verbatim, and
-    a value that does not decode is one of the latter rather than a failure. The
-    decoding is not exposed on its own because no caller has anything to do with
-    a decoded key except write it, and this is the write.
+    The unwrap is {!Private_key.decode}'s, not this module's. A key is carried
+    in the configuration either base64-encoded or verbatim, and the classifier
+    must read the same bytes this writes: a second unwrap here is a second
+    answer to what the operator declared, and the one that decides whether a key
+    needs a passphrase would not be the one that reaches disk.
 
     Key material must not outlive the call that needs it, and a second
     implementation of the write-then-delete is a second place a copy can be left
     behind -- which is why there is one here and none anywhere else. Inside this
-    module it has exactly one caller, {!with_session}; every remote call reaches
-    a key through a session, so the question of how long one is on disk is
-    settled in that single place.
+    module it has exactly one caller, {!with_session}, on the two arms of the
+    resolution that have a key to stage; a session is where the question of how
+    long key material is on disk is settled, and a manifest that declares none
+    never reaches this at all.
+
+    What is written is what the manifest declared, unchanged. An encrypted key
+    stays encrypted at rest here: nothing in this client decrypts one, and the
+    decrypted form of a key that needs a passphrase exists only inside the agent
+    {!with_session} raises.
 
     It stays exposed so that the write, its mode and its removal can be asserted
     on directly. No caller outside this module needs it: a key reaches disk
     through a session or not at all. *)
+
+val with_public_half : key_path:string -> string -> (unit -> 'a) -> 'a
+(** [with_public_half ~key_path contents f] writes [contents] to the file [ssh]
+    looks for the public half of [key_path] in, calls [f], and removes it on
+    every path out including an exception from [f].
+
+    The name is derived from [key_path] rather than chosen, because [ssh] looks
+    under one name and no other. The removal is the same write-then-delete
+    {!with_temp_key} performs, for the same reason: what a session puts beside a
+    staged key must not outlive the session either.
+
+    Wanted because an encrypted container that is not OpenSSH's -- a traditional
+    PEM, a PKCS#8 -- keeps its public half inside the encryption. [ssh] cannot
+    read one off the staged file and, under [BatchMode], cannot ask for the
+    passphrase that would let it; named with [IdentitiesOnly=yes] the identity
+    is then skipped and the agent holding the decrypted key is never consulted.
+    The contents come from {!Ssh_agent.public_half}, which is the only thing on
+    the machine that can answer at that moment.
+
+    This is not key material. It is written at the same mode as the key beside
+    it because nothing here needs a second answer to how a session's files are
+    made.
+
+    Exposed for the same reason {!with_temp_key} is: the write and its removal
+    are assertable only from outside. No caller outside this module needs it. *)

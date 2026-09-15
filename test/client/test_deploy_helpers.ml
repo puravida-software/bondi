@@ -707,8 +707,8 @@ let gated_server ip : Config_file.server =
       Some
         {
           user = "deploy";
-          private_key_contents = "not-a-real-key";
-          private_key_pass = "";
+          private_key_contents = Some "not-a-real-key";
+          private_key_pass = None;
         };
     port = None;
   }

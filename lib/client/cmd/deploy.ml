@@ -128,7 +128,8 @@ let reported_orchestrator_version ?session (server : Config_file.server) =
       (( Remote_exec.Ssh_not_found _ | Remote_exec.Local_failure _
        | Remote_exec.Ssh_failed _ | Remote_exec.Command_failed _
        | Remote_exec.Signalled _ | Remote_exec.Stopped _
-       | Remote_exec.Timed_out _ ) as failure) ->
+       | Remote_exec.Timed_out _ | Remote_exec.Agent_unavailable _
+       | Remote_exec.Key_passphrase_rejected _ ) as failure) ->
       Error
         (Printf.sprintf
            "the orchestrator's version could not be read, and a deploy is not \

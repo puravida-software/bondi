@@ -8,17 +8,24 @@ let sample_config_yaml project_name =
   registry_pass: "{{REGISTRY_PASS}}"
   env_vars:
     ENV: "prod"
+  # Every server needs an ssh block, and `user` is the only field it must
+  # carry. There are three ways to authenticate and the first is what this
+  # file starts with:
+  #   1. Declare no key, as below. Bondi authenticates with your own ssh
+  #      configuration -- your agent, ~/.ssh/config, a jump host, a key held
+  #      in hardware that could never be pasted in here.
+  #   2. Add private_key_contents, the key verbatim or base64-encoded, for a
+  #      key that needs no passphrase. Bondi offers that key and no other.
+  #   3. Add private_key_pass alongside it when the key is encrypted. Bondi
+  #      unlocks it into an ssh-agent it raises for the run and tears down
+  #      afterwards; the decrypted key is never written anywhere.
   servers:
     - ip_address: "55.55.55.55"
       ssh:
         user: root
-        private_key_contents: "{{SSH_PRIVATE_KEY_CONTENTS}}"
-        private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
     - ip_address: "55.55.55.56"
       ssh:
         user: root
-        private_key_contents: "{{SSH_PRIVATE_KEY_CONTENTS}}"
-        private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
 
 bondi_server:
   version: 0.0.0
@@ -44,8 +51,6 @@ traefik:
 #       ip_address: "55.55.55.55"
 #       ssh:
 #         user: root
-#         private_key_contents: "{{SSH_PRIVATE_KEY_CONTENTS}}"
-#         private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
 
 # Optional: long-running supporting containers that are neither your service
 # nor a scheduled job. Never routed by Traefik. Provisioned by `bondi setup`.

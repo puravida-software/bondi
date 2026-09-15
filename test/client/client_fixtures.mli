@@ -69,3 +69,21 @@ val staged_keys_during : (unit -> 'a) -> 'a * string list
     The list is the invocations, not the distinct paths: a caller that wants to
     know one key served several calls needs both numbers, because "one distinct
     path" is also true of a session whose calls never ran. *)
+
+val ssh_argv_during : (unit -> 'a) -> 'a * string list list
+(** [ssh_argv_during f] is [f]'s value and the words each [ssh] invocation made
+    during it was spawned with, one list per invocation, in order.
+
+    The command line is built as a shell string and spawned through a shell, so
+    the words below are what [ssh] itself received after that shell split and
+    unquoted them — which is the thing a caller cares about and the only place
+    it is observable. The stub answers nothing and exits zero.
+
+    Invocations are kept apart rather than concatenated: a case reading a single
+    command line has to be able to tell one invocation from two, and an empty
+    list from an invocation that took no arguments.
+
+    Separate from {!staged_keys_during}, which records one word per invocation
+    and is what the cases counting stagings are written against. Recording every
+    word there would make each of those cases read a command line to find a
+    path. *)
