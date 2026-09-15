@@ -463,7 +463,18 @@ let orchestrator_step result =
    structured concurrency. It is re-raised rather than classified. *)
 let deploy ~clock ~net input : (deploy_response, Handler_error.t) result =
   try
-    let client = Docker.Client.create ?registry_auth:(registry_auth input) () in
+    let client =
+      let unnegotiated =
+        Docker.Client.create ?registry_auth:(registry_auth input) ()
+      in
+      match Docker.Client.negotiate unnegotiated ~net with
+      | Ok client -> client
+      | Error msg ->
+          Eio.traceln
+            "docker api version not negotiated, using the compiled default: %s"
+            msg;
+          unnegotiated
+    in
     (* The cron plan is pure and depends only on [input], so it runs before any
        workload is touched: a rejected network declaration must not be discovered
        after the service has already moved to a new tag. *)
