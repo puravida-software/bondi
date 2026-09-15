@@ -14,6 +14,7 @@
   test_status_plan
   test_run
   test_docker_client
+  test_api_version
   test_blue_green_plan
   test_alloy_config
   test_traefik_config
@@ -34,6 +35,7 @@
   test_status_plan
   test_run
   test_docker_client
+  test_api_version
   test_blue_green_plan
   test_alloy_config
   test_traefik_config

@@ -187,24 +187,41 @@ type create_container_request = {
 
 let default_socket_path : string = "/var/run/docker.sock"
 
-(* Every request path is prefixed with this, so it is the one thing that has to
-   be true of an engine Bondi has never met. A daemon rejects a version outside
-   its own [MinAPIVersion, ApiVersion] window with a 400 and no other symptom,
-   and the window moves in both directions: old engines cap the top, new engines
-   raise the floor. This value has to sit inside the intersection for every
-   engine in the estate, which is why it is low rather than current.
+(* The version used when the daemon has not been asked, and the starting point
+   for [negotiate] when it has. Every request path is prefixed with a version,
+   and a daemon rejects one outside its own [MinAPIVersion, ApiVersion] window
+   with a 400 and no other symptom.
 
-   It was v1.41 until a test-coverage commit moved it to v1.53 -- the version of
-   the engine on the machine that made the change. Nothing here needs a modern
-   API: the endpoints used are /containers/{json,create,...}, /images/create,
-   /images/{name} and /networks{,/create}, all of which predate 1.41.
+   This constant used to carry the whole burden: it had to sit inside the
+   intersection of every engine in the estate, and the window moves in both
+   directions as engines are upgraded -- an old engine caps the top, a new one
+   raises the floor. That is not a property a compiled-in constant can keep.
+   It was v1.41, then v1.53, then v1.41 again, and each move fixed one machine
+   by breaking another:
 
-   [observed -- 2026-09-14] Docker Engine 29.8.0 advertises MinAPIVersion 1.40
-   and ApiVersion 1.56; the GitHub-hosted runner's 28.0.4 caps at 1.48. v1.53
-   is inside the first window and above the second, so the orchestrator's every
-   Engine call failed there with "client version 1.53 is too new". v1.41 is
-   inside both. *)
+   [observed -- 2026-09-14] Docker Engine 29.8.0 advertised MinAPIVersion 1.40
+   and ApiVersion 1.56; the GitHub-hosted runner's 28.0.4 capped at 1.48. v1.53
+   was inside the first window and above the second, so every Engine call on the
+   runner failed with "client version 1.53 is too new".
+
+   [observed -- 2026-09-15] 178.156.181.234 answered Api=1.53 Min=1.44, so the
+   v1.41 that fixed the runner was below that daemon's floor: every deploy and
+   every status call against that box failed with "client version 1.41 is too
+   old. Minimum supported API version is 1.44".
+
+   [negotiate] ends the sequence by asking the daemon instead of predicting it.
+   The value stays low because nothing here needs a modern API -- the endpoints
+   used are /containers/{json,create,...}, /images/create, /images/{name} and
+   /networks{,/create}, all of which predate 1.41 -- so a daemon's floor is the
+   only thing that ever raises it. *)
 let default_api_version : string = "v1.41"
+let preferred_api_version : string = default_api_version
+
+type version_response = {
+  api_version : string; [@key "ApiVersion"]
+  min_api_version : string option; [@default None] [@key "MinAPIVersion"]
+}
+[@@deriving yojson { strict = false }]
 
 let create :
     ?socket_path:string ->
@@ -314,6 +331,44 @@ let call_json :
  fun ?headers ?body t ~net meth path query ->
   let* body_str = call ?headers ?body t ~net meth path query in
   Ok (Yojson.Safe.from_string body_str)
+
+(* [GET /version] is the one endpoint that answers without a version prefix, so
+   it is the only thing that can be asked before a version has been chosen. *)
+let unversioned_uri : t -> string -> Uri.t =
+ fun t path ->
+  Uri.make ~scheme:"httpunix" ~host:t.socket_path ~path ~query:[] ()
+
+let daemon_version : t -> net:_ Eio.Net.t -> (version_response, string) result =
+ fun t ~net ->
+  let* body_str =
+    with_client ~net (fun ~sw client ->
+        let response, body =
+          Cohttp_eio.Client.call client ~sw `GET (unversioned_uri t "/version")
+        in
+        let body_str = read_body_string body in
+        let* () = ensure_success ~resp:response ~body_str in
+        Ok body_str)
+  in
+  version_response_of_yojson (Yojson.Safe.from_string body_str)
+  |> Result.map_error (fun msg -> "failed to parse docker version: " ^ msg)
+
+(* The daemon is the authority on what it accepts, so Bondi asks rather than
+   assumes. A daemon that does not report [MinAPIVersion] -- the field is
+   absent before Engine 1.13 -- is taken at its ceiling with no floor, which is
+   the most any of its answers can support. *)
+let negotiate : t -> net:_ Eio.Net.t -> (t, string) result =
+ fun t ~net ->
+  let* reported = daemon_version t ~net in
+  let* maximum = Api_version.of_string reported.api_version in
+  let* minimum =
+    match reported.min_api_version with
+    | None -> Ok maximum
+    | Some reported_minimum -> Api_version.of_string reported_minimum
+  in
+  let* window = Api_version.window ~minimum ~maximum in
+  let* preferred = Api_version.of_string preferred_api_version in
+  let chosen = Api_version.choose ~preferred window in
+  Ok { t with api_version = Api_version.to_path_segment chosen }
 
 let json_body : Yojson.Safe.t -> Cohttp.Header.t * Cohttp_eio.Body.t =
  fun json ->

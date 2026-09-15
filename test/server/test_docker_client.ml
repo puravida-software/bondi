@@ -261,6 +261,39 @@ let test_request_bound_passes_a_prompt_answer_through () =
     (Alcotest.result Alcotest.string Alcotest.string)
     "answer passed through" (Ok "answered") result
 
+(* A real payload, captured from Docker Engine 29.8.0 on 2026-09-15 with
+   [curl --unix-socket /var/run/docker.sock http://localhost/version], trimmed
+   to the fields Bondi reads. The decode is [strict = false] precisely so the
+   rest of that response -- Components, Platform, build metadata -- is ignored
+   rather than being a decode failure on every engine that adds a field. *)
+let test_version_response_json () =
+  let json =
+    Yojson.Safe.from_string
+      {|{
+        "Platform": { "Name": "Docker Engine - Community" },
+        "Version": "29.8.0",
+        "ApiVersion": "1.56",
+        "MinAPIVersion": "1.40",
+        "Os": "linux",
+        "Arch": "amd64"
+      }|}
+  in
+  let response = Docker.version_response_of_yojson json |> unwrap in
+  Alcotest.check Alcotest.string "the ceiling" "1.56" response.api_version;
+  Alcotest.check
+    (Alcotest.option Alcotest.string)
+    "the floor" (Some "1.40") response.min_api_version
+
+(* MinAPIVersion is absent before Engine 1.13, and an absent floor must decode
+   rather than fail: a daemon that does not report one still answers requests. *)
+let test_version_response_without_a_minimum_json () =
+  let json = Yojson.Safe.from_string {|{ "ApiVersion": "1.24" }|} in
+  let response = Docker.version_response_of_yojson json |> unwrap in
+  Alcotest.check Alcotest.string "the ceiling" "1.24" response.api_version;
+  Alcotest.check
+    (Alcotest.option Alcotest.string)
+    "no floor reported" None response.min_api_version
+
 let () =
   Alcotest.run "Docker.Client"
     [
@@ -299,5 +332,11 @@ let () =
             test_inspect_state_unhealthy_with_streak_json;
           Alcotest.test_case "health state defaults" `Quick
             test_health_state_defaults_json;
+        ] );
+      ( "daemon version",
+        [
+          Alcotest.test_case "a real payload" `Quick test_version_response_json;
+          Alcotest.test_case "no minimum reported" `Quick
+            test_version_response_without_a_minimum_json;
         ] );
     ]
