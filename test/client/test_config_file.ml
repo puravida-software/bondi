@@ -89,8 +89,10 @@ traefik:
                   | None -> fail "expected ssh config"
                   | Some ssh ->
                       check string "ssh user" "root" ssh.user;
-                      check string "ssh key" "ssh-key" ssh.private_key_contents;
-                      check string "ssh pass" "ssh-pass" ssh.private_key_pass)));
+                      check (option string) "ssh key" (Some "ssh-key")
+                        ssh.private_key_contents;
+                      check (option string) "ssh pass" (Some "ssh-pass")
+                        ssh.private_key_pass)));
           check string "bondi version" "0.1.0" config.bondi_server.version;
           (match config.traefik with
           | None -> fail "expected traefik"
@@ -987,6 +989,106 @@ cron_jobs:
             (Bondi_common.String_utils.contains
                ~needle:"http://insecure.example.com/hook" message))
 
+(* An encrypted private key that nothing can unlock is refused where the
+   configuration is read, before any connection is opened. Left to the
+   connection, ssh offers the key -- an OpenSSH key file carries its public half
+   in cleartext -- the host accepts it, and the signature that never comes is
+   reported by the host as an authorization failure: someone else's verdict on
+   a fault that is entirely local.
+
+   The key below is armour and nothing else. A [Proc-Type: 4,ENCRYPTED] header
+   is the whole of what a traditional PEM container states about its
+   encryption, so no key material is needed to state it. What each real format
+   classifies as is settled where the classifier is tested; what is settled
+   here is that the refusal reaches the operator from [read]. *)
+let encrypted_pem_armour =
+  "-----BEGIN RSA PRIVATE KEY-----\\nProc-Type: 4,ENCRYPTED\\nDEK-Info: \
+   AES-128-CBC,0123456789ABCDEF\\n\\nbm90LWEtcmVhbC1rZXk=\\n-----END RSA \
+   PRIVATE KEY-----\\n"
+
+let ssh_identity_yaml ssh_block =
+  Printf.sprintf
+    {|service:
+  name: web
+  image: registry.example.com/web
+  port: 8080
+  env_vars: {}
+  servers:
+    - ip_address: 10.0.0.1
+      ssh:
+%s
+bondi_server:
+  version: 0.1.0
+|}
+    ssh_block
+
+let test_encrypted_key_without_passphrase_refused () =
+  let yaml =
+    ssh_identity_yaml
+      (Printf.sprintf
+         {|        user: deploy
+        private_key_contents: "%s"
+        private_key_pass: ""
+|}
+         encrypted_pem_armour)
+  in
+  with_temp_config yaml (fun () ->
+      match Config_file.read () with
+      | Ok _ ->
+          fail "expected an encrypted key with no passphrase to be refused"
+      | Error message ->
+          check bool
+            (Printf.sprintf "the refusal names the server, got: %s" message)
+            true
+            (Bondi_common.String_utils.contains ~needle:"10.0.0.1" message);
+          check bool
+            (Printf.sprintf "the refusal names the empty field, got: %s" message)
+            true
+            (Bondi_common.String_utils.contains ~needle:"ssh.private_key_pass"
+               message);
+          check bool
+            (Printf.sprintf "the refusal names the cipher, got: %s" message)
+            true
+            (Bondi_common.String_utils.contains ~needle:"(pem)" message);
+          (* The rule [validate_alloy_credentials] states and this follows: the
+             message names the variable and never the value. *)
+          check bool
+            (Printf.sprintf "the refusal echoes no key material, got: %s"
+               message)
+            false
+            (Bondi_common.String_utils.contains ~needle:"BEGIN RSA PRIVATE KEY"
+               message))
+
+(* A manifest may decline to carry key material: a developer should not paste a
+   private key into a configuration file to use a credential they already hold,
+   and a hardware-backed key cannot be carried as a string at all. Absent is a
+   shape, not an omission, and it parses.
+
+   The block below names a [user] and nothing else, which is what `bondi init`
+   scaffolds and what an operator relying on their own agent writes. Both key
+   fields are checked, because the field this fixture stopped declaring is the
+   passphrase: a required [private_key_pass] made this exact manifest fail to
+   decode, and a check on [private_key_contents] alone would have gone on
+   passing while it did. *)
+let test_manifest_with_no_private_key_parses () =
+  let yaml = ssh_identity_yaml {|        user: deploy
+|} in
+  with_temp_config yaml (fun () ->
+      match Config_file.read () with
+      | Error message -> fail message
+      | Ok config -> (
+          match Config_file.servers config with
+          | [] -> fail "expected one server"
+          | server :: _ -> (
+              match server.ssh with
+              | None -> fail "expected ssh config"
+              | Some ssh ->
+                  check string "ssh user" "deploy" ssh.user;
+                  check (option string) "no key is declared" None
+                    ssh.private_key_contents;
+                  check (option string) "and no passphrase is declared" None
+                    ssh.private_key_pass)))
+
 let () =
   run "Config_file"
     [
@@ -1047,6 +1149,14 @@ let () =
             test_managed_container_unsafe_name_rejected;
           test_case "managed container duplicate env key rejected" `Quick
             test_managed_container_duplicate_env_key_rejected;
+        ] );
+      ( "ssh identity",
+        [
+          test_case
+            "an encrypted key with an empty passphrase is refused by name"
+            `Quick test_encrypted_key_without_passphrase_refused;
+          test_case "a manifest with no private key parses" `Quick
+            test_manifest_with_no_private_key_parses;
         ] );
       ( "alerts",
         [

@@ -8,3 +8,18 @@
 (cram
  (applies_to server_cli)
  (deps %{bin:bondi-server}))
+
+; The agent's own lifetime -- its failure arms, its teardown when a body raises,
+; the mode of the directory holding its socket -- is reachable from no client
+; subcommand, so the session file that tests it drives the module through a
+; private probe. No public name and no package: it is not installed, and nothing
+; but the cram test below builds or runs it.
+
+(executable
+ (name ssh_agent_probe)
+ (modules ssh_agent_probe)
+ (libraries bondi.client unix))
+
+(cram
+ (applies_to ssh_agent_lifecycle)
+ (deps %{exe:ssh_agent_probe.exe}))

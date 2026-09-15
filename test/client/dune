@@ -21,7 +21,11 @@
   test_alloy_commands
   test_ssh_multiplex
   test_remote_exec
+  test_private_key
+  test_ssh_agent
+  test_program
   test_deprecations)
  (deps
-  (glob_files fixtures/*.json))
+  (glob_files fixtures/*.json)
+  (glob_files fixtures/*.key))
  (libraries alcotest bondi.client bondi.common test_helpers unix yojson))

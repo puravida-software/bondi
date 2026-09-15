@@ -74,6 +74,8 @@ service:
   port: 8080
   servers:
     - ip_address: "203.0.113.10"
+      ssh:
+        user: root
 
 bondi_server:
   version: 0.0.0
@@ -100,7 +102,34 @@ Key fields:
 
 ### SSH configuration
 
-Bondi connects to your server via SSH during `bondi setup`. Add SSH credentials to each server entry:
+Every server entry needs an `ssh:` block, and `user` is the only field it must carry. How Bondi authenticates is decided by which of the two key fields you add beside it, and there are three legitimate shapes.
+
+**1. Declare no key — Bondi uses your own SSH configuration.**
+
+```yaml
+servers:
+  - ip_address: "203.0.113.10"
+    ssh:
+      user: root
+```
+
+Bondi imposes no identity and stages nothing, so whatever authenticates you when you type `ssh root@203.0.113.10` authenticates Bondi: your agent, your `~/.ssh/config`, a `ProxyJump` host, a key held in a hardware token. This is what `bondi init` scaffolds, and it is the right shape for a laptop and for any CI runner that already loads a key into an agent. A hardware-backed key can only be used this way — it cannot be carried as a string.
+
+Bondi passes `BatchMode=yes` and never stops to ask for anything, so the identity you are relying on has to be usable unprompted: an agent that already holds the key, or a key with no passphrase on it. A hardware token that only wants a touch works. One that prompts for a PIN does not — there is nobody here to answer it, and the run fails rather than waiting.
+
+**2. Declare a key that needs no passphrase.**
+
+```yaml
+servers:
+  - ip_address: "203.0.113.10"
+    ssh:
+      user: root
+      private_key_contents: "{{SSH_PRIVATE_KEY_CONTENTS}}"
+```
+
+Bondi writes the key to a mode-600 temporary file for the life of the run, hands it to `ssh`, and removes it afterwards.
+
+**3. Declare an encrypted key and its passphrase.**
 
 ```yaml
 servers:
@@ -111,16 +140,33 @@ servers:
       private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
 ```
 
-The `{{...}}` syntax is a template variable — Bondi replaces it with the value of the corresponding environment variable at runtime. This keeps secrets out of the config file.
+Bondi raises an `ssh-agent` of its own for the run, loads the key into it with the passphrase, uses it, and tears the agent down. The key stays encrypted on disk — the decrypted form exists only inside that agent and is never written anywhere. This shape needs `ssh-agent` and `ssh-add` on the machine running Bondi; if either is missing, Bondi says so and runs no command rather than dialling and failing.
 
-Export the variables before running any Bondi command:
+`private_key_contents` accepts the key base64-encoded or verbatim, and reads either without being told which. Which of the two you may use depends on how the key reaches the file.
+
+**Through a `{{...}}` template variable, base64-encode it.** The substitution is made over the YAML *text* before it is parsed, so a multi-line PEM dropped into the quoted scalar `private_key_contents: "{{SSH_PRIVATE_KEY_CONTENTS}}"` is folded by YAML onto one line: every newline becomes a space, the armour runs into the body, and what arrives is no longer a key. Base64 is a single line and has nothing to fold.
+
+**Verbatim only as a block scalar written into the manifest itself**, where YAML keeps the newlines:
+
+```yaml
+        private_key_contents: |
+          -----BEGIN OPENSSH PRIVATE KEY-----
+          b3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jdHIAAAAGYmNyeXB0AAAA...
+          -----END OPENSSH PRIVATE KEY-----
+```
+
+**Where a key is declared, Bondi offers that key and no other.** It passes `IdentitiesOnly=yes`, so a declared key that cannot sign fails as a declared key rather than quietly succeeding through whatever your agent happens to be holding. If you have been declaring a placeholder key while really relying on your own agent, that will now fail: remove both key fields, which is shape 1 above and is what you meant.
+
+**An encrypted key with an empty `private_key_pass` is refused before anything is dialled.** An OpenSSH key file states its own cipher in cleartext, so Bondi can tell that the key cannot sign without a passphrase, and it stops there — naming the server, both fields and the cipher. Left to the connection, `ssh` would offer the key, the host would accept it, and the signature that never arrives would be reported as the *host's* authorization failure, which is someone else's verdict on a fault that is entirely local.
+
+The `{{...}}` syntax in the examples above is a template variable — Bondi replaces it with the value of the corresponding environment variable at runtime. This keeps secrets out of the config file. Export the variables before running any Bondi command:
 
 ```bash
-export SSH_PRIVATE_KEY_CONTENTS="$(cat ~/.ssh/my_server_key | base64)"
+export SSH_PRIVATE_KEY_CONTENTS="$(base64 -w0 < ~/.ssh/my_server_key)"
 export SSH_PRIVATE_KEY_PASS="my-key-passphrase"
 ```
 
-> **Note:** The private key contents must be base64-encoded.
+Note that the substitution is made over the whole file before it is parsed, commented-out lines included: a `{{VAR}}` you have commented out still has to be exported.
 
 ### Environment variables
 
@@ -139,8 +185,6 @@ service:
     - ip_address: "203.0.113.10"
       ssh:
         user: root
-        private_key_contents: "{{SSH_PRIVATE_KEY_CONTENTS}}"
-        private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
 ```
 
 Then export them in your shell (or CI):
@@ -167,8 +211,6 @@ service:
     - ip_address: "203.0.113.10"
       ssh:
         user: root
-        private_key_contents: "{{SSH_PRIVATE_KEY_CONTENTS}}"
-        private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
 ```
 
 ```bash
@@ -310,8 +352,6 @@ service:
     - ip_address: "203.0.113.10"
       ssh:
         user: root
-        private_key_contents: "{{SSH_PRIVATE_KEY_CONTENTS}}"
-        private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
 ```
 
 Deploy exactly the same way:
@@ -373,8 +413,6 @@ cron_jobs:
       ip_address: "203.0.113.10"
       ssh:
         user: root
-        private_key_contents: "{{SSH_PRIVATE_KEY_CONTENTS}}"
-        private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
 ```
 
 Key differences from services:
@@ -397,8 +435,6 @@ cron_jobs:
       ip_address: "203.0.113.10"
       ssh:
         user: root
-        private_key_contents: "{{SSH_PRIVATE_KEY_CONTENTS}}"
-        private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
 ```
 
 `bondi-network` is created by `bondi setup`, and `bondi deploy` also ensures it exists before writing the crontab — so a job on the shared network works even on a server that has only ever been deployed to. A cron job attached to it can reach any other container on that network by container name — for example a [managed container](#5-managed-containers) at `bondi-gateway:4002`.
@@ -442,8 +478,6 @@ cron_jobs:
       ip_address: "203.0.113.10"
       ssh:
         user: root
-        private_key_contents: "{{SSH_PRIVATE_KEY_CONTENTS}}"
-        private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
 ```
 
 ### When a run fails
@@ -499,8 +533,6 @@ cron_jobs:
       ip_address: "203.0.113.10"
       ssh:
         user: root
-        private_key_contents: "{{SSH_PRIVATE_KEY_CONTENTS}}"
-        private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
 ```
 
 - The keys are limited to `success`, `failure`, and `critical` — any other key is a config error.
@@ -531,8 +563,6 @@ cron_jobs:
       ip_address: "203.0.113.10"
       ssh:
         user: root
-        private_key_contents: "{{SSH_PRIVATE_KEY_CONTENTS}}"
-        private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
 ```
 
 - Only `failure` and `critical` take sinks — `success` never alerts.
@@ -829,8 +859,6 @@ service:
     - ip_address: "203.0.113.10"
       ssh:
         user: root
-        private_key_contents: "{{SSH_PRIVATE_KEY_CONTENTS}}"
-        private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
 
 bondi_server:
   version: 0.0.0
@@ -860,8 +888,6 @@ cron_jobs:
       ip_address: "203.0.113.10"
       ssh:
         user: root
-        private_key_contents: "{{SSH_PRIVATE_KEY_CONTENTS}}"
-        private_key_pass: "{{SSH_PRIVATE_KEY_PASS}}"
 
 managed_containers:
   - name: gateway

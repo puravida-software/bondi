@@ -22,6 +22,32 @@ jobs:
           just-version: '1.46.0'
       - uses: ./.github/actions/ocaml-deps
 
+      # test/ssh_real_sshd/ssh_real_sshd.sh authenticates against an sshd it
+      # stands up itself, because nothing short of a daemon can say whether a
+      # passphrase-protected key actually produces a signature a server
+      # accepts. It refuses to skip when CI is set, which the runner sets, so
+      # the daemon is installed here rather than assumed: what a runner image
+      # happens to ship is not a dependency this repository gets to have
+      # unwritten.
+      #
+      # The loop is the precondition rather than a formality, and it names
+      # every program that script `require`s, not only the ones installed
+      # above. `setsid` comes from util-linux on the base image, so a runner
+      # image that drops it says so here instead of arriving later as a test
+      # that cannot find a program it was promised. PATH is asserted by the
+      # same loop: the daemon installs to a sbin directory, and that directory
+      # being on this runner's PATH is assumed here and not verified anywhere
+      # else.
+      - name: Install OpenSSH
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            openssh-server openssh-client
+          for program in sshd ssh ssh-agent ssh-add ssh-keygen setsid; do
+            command -v "$program"
+          done
+
       - name: Build
         run: just build
 

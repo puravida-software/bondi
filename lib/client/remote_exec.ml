@@ -9,6 +9,8 @@ type failure =
   | Signalled of { signal : int; output : string }
   | Stopped of { signal : int; output : string }
   | Timed_out of { seconds : int; output : string }
+  | Agent_unavailable of { program : string }
+  | Key_passphrase_rejected of { output : string }
 
 let ssh_config (server : Config_file.server) =
   match server.Config_file.ssh with
@@ -41,7 +43,9 @@ let ran_on_host = function
   | Ssh_failed _
   | Signalled _
   | Stopped _
-  | Timed_out _ ->
+  | Timed_out _
+  | Agent_unavailable _
+  | Key_passphrase_rejected _ ->
       false
 
 let exited_with ~code = function
@@ -52,7 +56,9 @@ let exited_with ~code = function
   | Ssh_failed _
   | Signalled _
   | Stopped _
-  | Timed_out _ ->
+  | Timed_out _
+  | Agent_unavailable _
+  | Key_passphrase_rejected _ ->
       false
 
 type standard_error = Merged_on_failure | Merged_always
@@ -98,6 +104,16 @@ let message = function
         "the command did not finish within %ds and was given up on, and may \
          still be running on the host: %s"
         seconds (carried output)
+  | Agent_unavailable { program } ->
+      Printf.sprintf
+        "%s was not found on this machine's PATH, and the configured key needs \
+         a passphrase to sign with, so no command was run"
+        program
+  | Key_passphrase_rejected { output } ->
+      Printf.sprintf
+        "ssh.private_key_pass did not unlock the private key in \
+         ssh.private_key_contents on this machine, so no command was run: %s"
+        (carried output)
 
 let explain ~subject failure =
   if ran_on_host failure then
@@ -322,9 +338,18 @@ let drain_both ~deadline ~input ~to_command from_output from_errors =
    symlink [/bin/sh -> bash]; [/bin/sh -c 'sleep 5'] reported [comm=sleep] and
    no children, so the shell exec'd rather than forked. That is one shell on one
    machine and what [ssh_command] spells today, neither of which this module can
-   hold still -- see [give_up_on], which does not rely on it. *)
-let with_process cmd f =
-  let channels = Unix.open_process_full cmd (Unix.environment ()) in
+   hold still -- see [give_up_on], which does not rely on it.
+
+   [environment] is the child's whole environment and is taken rather than read
+   here, because a variable the client needs set is then set in the child and
+   nowhere else. The alternative is a [VAR=value ] prefix on the command string,
+   which is a second quoting surface on a line that is already a shell command
+   carrying a quoted destination and a quoted remote command -- and a value that
+   needed quoting there would be a value this module got wrong once. Taking it
+   as a parameter is what [Unix.open_process_full] already offers; nothing is
+   built to use it. *)
+let with_process ~environment cmd f =
+  let channels = Unix.open_process_full cmd environment in
   match f ~pid:(Unix.process_full_pid channels) channels with
   | value -> (Unix.close_process_full channels, value)
   | exception exn ->
@@ -372,14 +397,15 @@ let output_of_status status ~policy ~standard_output ~standard_error =
       | Unix.WSTOPPED _ ->
           standard_output ^ standard_error)
 
-let run_command ?input ?(policy = Merged_on_failure) ~timeout_seconds cmd =
+let run_command ?input ?(policy = Merged_on_failure) ~environment
+    ~timeout_seconds cmd =
   (* An absolute instant rather than a budget carried through the loop: a
      deadline taken once at the start is the whole invocation's, and one
      subtracted from at each turn would be the bound of whichever read happened
      to be slowest. *)
   let deadline = Unix.gettimeofday () +. float_of_int timeout_seconds in
   let status, drained =
-    with_process cmd
+    with_process ~environment cmd
       (fun ~pid (from_command, to_command, from_command_errors) ->
         (* Writing to a command that has already exited raises SIGPIPE, which at
            its default disposition terminates this process before the status
@@ -420,14 +446,12 @@ let run_command ?input ?(policy = Merged_on_failure) ~timeout_seconds cmd =
              output = standard_output ^ standard_error;
            })
 
-let decode_private_key contents =
-  match Base64.decode contents with
-  | Ok decoded -> decoded
-  | Error _ -> contents
-
-let with_temp_key contents f =
-  let decoded = decode_private_key contents in
-  let path = Filename.temp_file "bondi-key-" ".pem" in
+(* One write-then-delete, used by the two things a session puts on disk. A
+   second implementation of it is a second place a file can be left behind, and
+   the two below differ only in where the path comes from and what goes in it.
+   Private because what a caller is offered is the two named things, not a way
+   to write any file at all. *)
+let with_written_file ~path ~contents f =
   Fun.protect
     ~finally:(fun () ->
       (* A cleanup that finds nothing to remove is the file already having gone
@@ -444,14 +468,31 @@ let with_temp_key contents f =
       Fun.protect
         ~finally:(fun () -> close_out_noerr oc)
         (fun () ->
-          output_string oc decoded;
+          output_string oc contents;
           close_out oc;
           Unix.chmod path 0o600;
-          f path))
+          f ()))
 
-(* A prompt is a wait with no deadline, and neither command that reads a host is
-   attended by anyone who could answer one -- hence the two that were always
-   here.
+let with_temp_key contents f =
+  let decoded = Private_key.decode contents in
+  let path = Filename.temp_file "bondi-key-" ".pem" in
+  with_written_file ~path ~contents:decoded (fun () -> f path)
+
+(* [ssh] looks for the public half of an identity beside it, under this name and
+   no other, which is why the path is derived rather than chosen. *)
+let public_half_suffix = ".pub"
+
+let with_public_half ~key_path contents f =
+  with_written_file ~path:(key_path ^ public_half_suffix) ~contents f
+
+(* A prompt is a wait with no deadline. The two that were always here refuse to
+   take one, and the reason has narrowed rather than gone: there is now an
+   attendant on this machine -- the helper that answers the program loading a key
+   into an agent -- but it answers that program, before any of this, and never
+   [ssh]. What [ssh] would ask over these options is the remote account's
+   password and what to do about an unknown host key, and nobody is there for
+   either. It is also the bargain an operator who declares no key is held to:
+   their own identity has to be usable without being asked for anything.
 
    The three bounds are the same reasoning applied to the network. A host that
    refuses the connection answers at once; one that accepts it and then drops
@@ -516,6 +557,23 @@ let control_dir =
              ());
      dir)
 
+(* The socket is named per connection and not only per process, and [ssh] is
+   what names it: this client spells one option set for a whole run, and which
+   box a call is for is not known where the option is written. Left as ssh's own
+   token so the answer is ssh's definition of the same connection rather than a
+   second one of this client's.
+
+   One name for the whole process is one connection for every server the process
+   talks to. `bondi init` scaffolds two servers and every command loops them
+   inside one process, well inside [ControlPersist] -- so the second server's
+   command runs down the first server's connection, past the [-i], the
+   [IdentitiesOnly=yes] and the agent that were each chosen for the second.
+
+   [%C] rather than [%h-%p-%r] because it is 40 characters whatever the host is
+   called, and the path this goes in has about 104 bytes to spend before the
+   master stops starting at all. *)
+let connection_token = "%C"
+
 (* Kept apart from [ssh_options] because taking these is not free: the first
    call forces [control_dir], which creates a mode-700 directory. [ssh_options]
    is a constant anyone may read; this is a function because calling it does
@@ -525,17 +583,68 @@ let multiplex_options () =
   [
     "-o ControlMaster=auto";
     Printf.sprintf "-o ControlPath=%s"
-      (Filename.quote (Filename.concat dir "c"));
+      (Filename.quote (Filename.concat dir connection_token));
     "-o ControlPersist=30";
   ]
 
-let ssh_command ~user ~host ~key_path cmd =
+(* What was staged for a server, and nothing about how a command line spells it.
+   The three arms are the three things the resolution of the configured key can
+   ask for: nothing at all, a file [ssh] can read, and a file whose decrypted
+   form lives in an agent this client raised. A record with an unconditional
+   path had nothing to put in the first arm's field, and nothing anywhere to put
+   the third arm's socket.
+
+   Kept as the facts rather than as the options and the environment they produce
+   because the two derivations below are the only readers, and a session that
+   already held their answers could not be asked what it actually staged -- which
+   is the question the key's lifetime and the agent's teardown both turn on. *)
+type staging =
+  | No_identity
+  | Staged of { key_path : string }
+  | Agent_held of { key_path : string; auth_sock : string }
+
+(* The options that name an identity to [ssh], kept here because [ssh_options] is
+   the one place options are spelled and a second spelling elsewhere is a second
+   answer to how this client connects. A function rather than a constant for
+   [multiplex_options]' reason -- producing it does something, here quoting a
+   path this module chose -- and because what it produces is a property of the
+   server being connected to rather than of the client.
+
+   A manifest that declared no key names no identity at all: the operator's own
+   configuration is what authenticates, and an [-i] here would be this client
+   inserting itself into it. An agent-held key is still named, because the file
+   carries the public half [ssh] offers and the agent is what signs for it.
+
+   A declared identity is also the only one allowed to answer. Named without
+   that, it is merely the first thing offered, and whatever an ambient agent
+   happens to hold is offered after it -- so a declared key that cannot sign
+   connects anyway, on a credential nobody wrote down, and the two outcomes this
+   client distinguishes are not distinguishable at the host. What the
+   restriction removes is other identities, not other signers: its own manual
+   puts it as using only the configured identity files even when an agent offers
+   more, so the staged file is still offered and the agent that holds its
+   private half is still what signs -- which is what keeps the agent arm
+   working. Nothing is restricted where nothing was declared -- there the
+   operator's configuration is the whole mechanism, and a client that narrowed
+   it to the identity files on a command line naming none would leave [ssh]
+   nothing at all to offer. *)
+let identity_options = function
+  | No_identity -> []
+  | Staged { key_path }
+  | Agent_held { key_path; _ } ->
+      [ "-i " ^ Filename.quote key_path; "-o IdentitiesOnly=yes" ]
+
+(* Assembled as words and joined, rather than as a format string with a slot per
+   group, so that a group contributing nothing contributes no separator either.
+   A format string cannot express that: an empty slot leaves the two spaces
+   around it behind. *)
+let ssh_command ~user ~host ~identity_words cmd =
   let destination = user ^ "@" ^ host in
-  Printf.sprintf "ssh -i %s %s %s %s -- %s" (Filename.quote key_path)
-    (String.concat " " ssh_options)
-    (String.concat " " (multiplex_options ()))
-    (Filename.quote destination)
-    (Filename.quote cmd)
+  String.concat " "
+    (("ssh" :: identity_words)
+    @ ssh_options
+    @ multiplex_options ()
+    @ [ Filename.quote destination; "--"; Filename.quote cmd ])
 
 (* Whether there is an [ssh] to spawn is asked before spawning, because after
    the spawn the answer is unrecoverable: a local shell that cannot find the
@@ -544,42 +653,38 @@ let ssh_command ~user ~host ~key_path cmd =
    absent and installs Docker -- so an operator with no ssh client would have a
    box changed on the strength of a message from their own machine.
 
-   PATH is read here rather than resolved into the command line: what
-   [ssh_command] spells is asserted on elsewhere, and a check is all this needs
-   to be. *)
+   PATH is read rather than resolved into the command line: what [ssh_command]
+   spells is asserted on elsewhere, and a check is all this needs to be. *)
 let ssh_program = "ssh"
 
-let is_executable_file path =
-  match Unix.stat path with
-  | { Unix.st_kind = Unix.S_REG; _ } -> (
-      match Unix.access path [ Unix.X_OK ] with
-      | () -> true
-      | exception Unix.Unix_error _ -> false)
-  | {
-   Unix.st_kind =
-     ( Unix.S_DIR | Unix.S_CHR | Unix.S_BLK | Unix.S_LNK | Unix.S_FIFO
-     | Unix.S_SOCK );
-   _;
-  } ->
-      false
-  | exception Unix.Unix_error _ -> false
-
-let found_on_path program =
-  if String.contains program '/' then is_executable_file program
-  else
-    Option.value (Sys.getenv_opt "PATH") ~default:""
-    |> String.split_on_char ':'
-    |> List.exists (fun directory ->
-        is_executable_file
-          (Filename.concat
-             (if directory = "" then Filename.current_dir_name else directory)
-             program))
-
 let ssh_client_present () =
-  if found_on_path ssh_program then Ok ()
+  if Program.found_on_path ssh_program then Ok ()
   else Error (Ssh_not_found { program = ssh_program })
 
-type session = { key_path : string; timeout_seconds : int }
+(* What a session holds is how a call made over it authenticates, not where the
+   key went. The two are the same thing today -- the options are an [-i] naming
+   the staged path -- and they stop being the same as soon as a key that cannot
+   sign as a file has to be reached through something else. A field spelled
+   [key_path] would then be a field with nothing to put in it, and the runners
+   would each have to decide what to do about that; a session that already
+   carries the options and the environment leaves them nothing to decide. *)
+type session = {
+  staging : staging;
+  environment : string array;
+  timeout_seconds : int;
+}
+
+(* The environment a call over this session is spawned in. The session carries
+   this process's own, unchanged, and the one arm that changes anything changes
+   it here rather than at the staging, so that what a call runs in is derived
+   from what was staged rather than remembered alongside it. *)
+let session_environment session =
+  match session.staging with
+  | No_identity
+  | Staged _ ->
+      session.environment
+  | Agent_held { auth_sock; _ } ->
+      Ssh_agent.client_environment ~auth_sock session.environment
 
 (* [with_temp_key] and the body it is handed raise the same two exceptions, and
    nothing in either one says which of them raised it. The body's fault is
@@ -610,6 +715,22 @@ let as_local_failure f =
                  (Unix.error_message code);
            })
 
+(* The agent's failures said in this module's words. Two of the three are faults
+   nothing else here can produce and are their own arms; the third is this
+   machine failing at its own work -- no directory to put a socket in, no
+   descriptors left -- which is what [Local_failure] already means, so it is not
+   given a second name.
+
+   None of the three is a host's answer, and the rendering below says so. The
+   fault that prompted all of this was a local signing failure wearing the host's
+   authorization error, and an arm that arrived here and then rendered as a
+   command the box refused would be the same defect one layer further in. *)
+let of_agent_failure = function
+  | Ssh_agent.Not_available { program } -> Agent_unavailable { program }
+  | Ssh_agent.Spawn_failed { reason } -> Local_failure { reason }
+  | Ssh_agent.Passphrase_rejected { output } ->
+      Key_passphrase_rejected { output }
+
 (* The one call to [with_temp_key] this module makes. Every remote call reaches
    the key through a session, so how long key material is on disk is a decision
    taken once for a server's whole run rather than once per command -- and a
@@ -618,15 +739,79 @@ let as_local_failure f =
 let with_session ~timeout_seconds (server : Config_file.server) f =
   let* ssh = ssh_config server in
   let* () = ssh_client_present () in
-  match
-    as_local_failure (fun () ->
-        Ok
-          (with_temp_key ssh.Config_file.private_key_contents (fun key_path ->
-               match f { key_path; timeout_seconds } with
-               | value -> value
-               | exception exn ->
-                   raise (Body_raised (exn, Printexc.get_raw_backtrace ())))))
-  with
+  (* The body, run over whatever was staged. The two fields beside the staging
+     are the same on every arm: this process's own environment, read once for
+     the session rather than once per call so that every call made over one
+     connection is made in the same one, and the bound the session was opened
+     at. Each is named here rather than defaulted, so an arm cannot acquire a
+     different one by omission. *)
+  let over staging =
+    let session =
+      { staging; environment = Unix.environment (); timeout_seconds }
+    in
+    match f session with
+    | value -> value
+    | exception exn -> raise (Body_raised (exn, Printexc.get_raw_backtrace ()))
+  in
+  (* Only the arms the resolution built from a declared key reach this, because
+     it answers [Ambient] for every manifest that carries none. The default is
+     unreachable and is here because the resolution's own type does not carry
+     the string it classified. *)
+  let declared =
+    Option.value ~default:"" ssh.Config_file.private_key_contents
+  in
+  (* The resolution is asked for once, here, because this is the one place a
+     server's key is acted on. [Refused] is answered before anything is staged
+     or dialled, in the sentence the configuration reader already refuses on --
+     said again rather than trusted to that reader, because a server value built
+     without passing through it can still arrive here, and a key that cannot
+     sign must not be offered to a host that would then report the failure as
+     its own. *)
+  let staged () =
+    match
+      Private_key.identity ~contents:ssh.Config_file.private_key_contents
+        ~passphrase:ssh.Config_file.private_key_pass
+    with
+    | Private_key.Refused { reason } ->
+        Error
+          (Local_failure
+             {
+               reason =
+                 Private_key.refusal_message
+                   ~server:server.Config_file.ip_address ~reason;
+             })
+    | Private_key.Ambient -> as_local_failure (fun () -> Ok (over No_identity))
+    | Private_key.Staged_key ->
+        as_local_failure (fun () ->
+            Ok
+              (with_temp_key declared (fun key_path ->
+                   over (Staged { key_path }))))
+    | Private_key.Own_agent { passphrase } ->
+        (* The public half is written beside the staged key, out of the agent
+           that now holds the decrypted one. Without it an encrypted container
+           that is not OpenSSH's -- a traditional PEM, a PKCS#8 -- is an
+           identity [ssh] cannot read a public key out of and, under
+           [BatchMode=yes], cannot ask about; named with [IdentitiesOnly=yes]
+           it is then skipped, this agent is never consulted, and the host
+           answers "Permission denied (publickey)" for a fault that never left
+           this machine. An OpenSSH container carries its public half in clear
+           and needs none of this, and gets it anyway: one arm here is one thing
+           to be true of every key that signs through an agent. *)
+        as_local_failure (fun () ->
+            with_temp_key declared (fun key_path ->
+                Result.map_error of_agent_failure
+                  (Ssh_agent.with_agent ~timeout_seconds ~passphrase ~key_path
+                     (fun agent ->
+                       with_public_half ~key_path (Ssh_agent.public_half agent)
+                         (fun () ->
+                           over
+                             (Agent_held
+                                {
+                                  key_path;
+                                  auth_sock = Ssh_agent.auth_sock agent;
+                                }))))))
+  in
+  match staged () with
   | outcome -> outcome
   | exception Body_raised (exn, backtrace) ->
       Printexc.raise_with_backtrace exn backtrace
@@ -651,9 +836,11 @@ let command_output ?session ?input ?standard_error ~timeout_seconds ~command
   let over session =
     as_local_failure (fun () ->
         run_command ?input ?policy:standard_error
+          ~environment:(session_environment session)
           ~timeout_seconds:session.timeout_seconds
           (ssh_command ~user:ssh.Config_file.user ~host:server.ip_address
-             ~key_path:session.key_path command))
+             ~identity_words:(identity_options session.staging)
+             command))
   in
   match session with
   | Some session -> over { session with timeout_seconds }

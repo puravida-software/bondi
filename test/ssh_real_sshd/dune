@@ -1,0 +1,19 @@
+; A daemon has a lifetime, and a cram file cannot own one: a session snapshot's
+; expected output is fixed, while this case must skip where no sshd is installed
+; and fail where one was expected. Neither is expressible as a snapshot, so the
+; test is a script whose exit code is the verdict and whose output is what gets
+; read when it fails.
+
+; CI is named rather than inherited. Passing it through explicitly is what makes
+; it a dependency of this rule: a run that skipped because no sshd was installed
+; is then not the cached answer to the run that must fail because CI is set.
+
+(rule
+ (alias runtest)
+ (deps
+  (:script ssh_real_sshd.sh))
+ (action
+  (setenv
+   CI
+   %{env:CI=}
+   (run bash %{script} %{bin:bondi-client}))))

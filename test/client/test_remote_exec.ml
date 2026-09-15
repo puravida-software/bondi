@@ -28,6 +28,10 @@ let pp_failure fmt (f : Remote_exec.failure) =
   | Remote_exec.Timed_out { seconds; output } ->
       Format.fprintf fmt "Timed_out { seconds = %d; output = %S }" seconds
         output
+  | Remote_exec.Agent_unavailable { program } ->
+      Format.fprintf fmt "Agent_unavailable { program = %S }" program
+  | Remote_exec.Key_passphrase_rejected { output } ->
+      Format.fprintf fmt "Key_passphrase_rejected { output = %S }" output
 
 let failure = testable pp_failure ( = )
 let outcome = result string failure
@@ -164,7 +168,11 @@ let server_with_ssh : Bondi_client.Config_file.server =
     ip_address = "10.0.0.1";
     ssh =
       Some
-        { user = "deploy"; private_key_contents = "KEY"; private_key_pass = "" };
+        {
+          user = "deploy";
+          private_key_contents = Some "KEY";
+          private_key_pass = None;
+        };
     port = None;
   }
 
@@ -183,8 +191,8 @@ let test_unconfigured_server_is_an_arm_not_an_exception () =
     (Ok
        {
          Bondi_client.Config_file.user = "deploy";
-         private_key_contents = "KEY";
-         private_key_pass = "";
+         private_key_contents = Some "KEY";
+         private_key_pass = None;
        })
     (Remote_exec.ssh_config server_with_ssh)
 
@@ -208,7 +216,11 @@ let unroutable_server : Bondi_client.Config_file.server =
     ip_address = "192.0.2.1";
     ssh =
       Some
-        { user = "deploy"; private_key_contents = "KEY"; private_key_pass = "" };
+        {
+          user = "deploy";
+          private_key_contents = Some "KEY";
+          private_key_pass = None;
+        };
     port = None;
   }
 
@@ -475,6 +487,43 @@ let test_both_shapes_of_configured_key_reach_disk () =
   check string "and one that does not is written as it was given" verbatim_key
     (Remote_exec.with_temp_key verbatim_key read_file)
 
+(* ssh looks for the public half of an identity beside it, under one name and no
+   other, so the name is the assertion rather than a detail of it. A key whose
+   container keeps its public half inside the encryption -- a traditional PEM, a
+   PKCS#8 -- is otherwise an identity ssh cannot read a public key out of and,
+   under BatchMode, cannot ask about; named with IdentitiesOnly=yes it is then
+   skipped and the agent holding the decrypted key is never consulted.
+
+   The staged key is what this sits beside, so the pair is written through the
+   two functions together rather than against a path made up here. *)
+let test_the_public_half_is_written_where_ssh_looks_for_it () =
+  let listing = "ssh-ed25519 AAAAsomething a comment\n" in
+  let key_path, public_path, written =
+    Remote_exec.with_temp_key verbatim_key (fun key_path ->
+        Remote_exec.with_public_half ~key_path listing (fun () ->
+            let public_path = key_path ^ ".pub" in
+            (key_path, public_path, read_file public_path)))
+  in
+  check string "beside the key it belongs to, under the name ssh looks under"
+    (key_path ^ ".pub") public_path;
+  check string "carrying what the agent said it holds" listing written;
+  check bool "and gone once the call has returned" false
+    (Sys.file_exists public_path)
+
+(* The path out an implementation forgets is the one nobody drove. A public half
+   is not key material, but it is a file a session made, and a session's files
+   go when the session does. *)
+let test_a_raising_call_leaves_no_public_half () =
+  match
+    Remote_exec.with_temp_key verbatim_key (fun key_path ->
+        Remote_exec.with_public_half ~key_path "ssh-ed25519 AAAA x\n" (fun () ->
+            raise (Raised_from_f (key_path ^ ".pub"))))
+  with
+  | () -> fail "the exception from [f] should have propagated"
+  | exception Raised_from_f public_path ->
+      check bool "the public half does not outlive the call" false
+        (Sys.file_exists public_path)
+
 (* The private key's time on disk is a decision per server rather than per
    remote call: this client makes tens of calls against one box in a run, and a
    staging that comes with each of them is a crash window with each of them.
@@ -585,7 +634,10 @@ let test_ran_on_host_names_the_one_answer_the_host_gave () =
     (Remote_exec.ran_on_host (Remote_exec.Stopped { signal = 19; output = "" }));
   check bool "a call given up on carries none either" false
     (Remote_exec.ran_on_host
-       (Remote_exec.Timed_out { seconds = 60; output = "" }))
+       (Remote_exec.Timed_out { seconds = 60; output = "" }));
+  check bool "nor does a credential this machine could not use" false
+    (Remote_exec.ran_on_host
+       (Remote_exec.Key_passphrase_rejected { output = "" }))
 
 (* Carried across, assertions unchanged, from the suite that covered these
    options while they lived in the module this one replaces.
@@ -753,7 +805,9 @@ let test_a_client_that_cannot_write_its_key_reports_a_value () =
                 | Remote_exec.Command_failed _
                 | Remote_exec.Signalled _
                 | Remote_exec.Stopped _
-                | Remote_exec.Timed_out _ ->
+                | Remote_exec.Timed_out _
+                | Remote_exec.Agent_unavailable _
+                | Remote_exec.Key_passphrase_rejected _ ->
                     false)))
 
 (* The rendered message is printed to a terminal and pasted into reports, and
@@ -818,6 +872,8 @@ let test_exited_with_is_the_hosts_own_code_alone () =
          Remote_exec.Signalled { signal = 127; output = "" };
          Remote_exec.Stopped { signal = 127; output = "" };
          Remote_exec.Timed_out { seconds = 127; output = "" };
+         Remote_exec.Agent_unavailable { program = "ssh-add" };
+         Remote_exec.Key_passphrase_rejected { output = "" };
        ])
 
 (* The connection bounds in [ssh_options] cover a box that refuses and a box
@@ -886,6 +942,260 @@ let test_a_command_that_finishes_inside_its_bound_is_unaffected () =
       check outcome "a command that answers in time answers as it always did"
         (Ok "awake\n") answer
 
+(* The failure that prompted this work read "command failed (255): Permission
+   denied (publickey)" and sent an investigation at server configuration for
+   hours. Nothing about it was the host's: the key was encrypted, ssh offered
+   its public half, the host accepted it, and the signature never came. Both
+   arms this adds are that fault caught where it happens, so neither may be
+   mistaken for an answer the box gave -- not by the predicates a caller
+   branches on, and not by the sentence an operator reads.
+
+   The last arm is the affirmative one. Without it a [ran_on_host] that had
+   stopped saying yes to anything, or an [explain] that had stopped prefixing,
+   would satisfy every absence above. *)
+let test_an_agent_failure_is_not_the_hosts_verdict () =
+  let arms =
+    [
+      Remote_exec.Agent_unavailable { program = "ssh-add" };
+      Remote_exec.Key_passphrase_rejected
+        { output = "Bad passphrase, try again" };
+    ]
+  in
+  check bool "neither is a verdict the host gave" false
+    (List.exists Remote_exec.ran_on_host arms);
+  check bool "and neither carries a code the host exited" false
+    (List.exists (Remote_exec.exited_with ~code:255) arms);
+  List.iter
+    (fun failure ->
+      let rendered = Remote_exec.explain ~subject:"the deploy" failure in
+      check bool "nothing reads as a command the box refused" false
+        (contains ~needle:"command failed" rendered);
+      check bool "and nothing claims the box ran anything" false
+        (contains ~needle:"ran on the host" rendered);
+      check bool "the machine the fault is on is named" true
+        (contains ~needle:"this machine" rendered))
+    arms;
+  check string "while the host's own refusal still reads as the host's"
+    "the deploy ran on the host and failed: command failed (1): boom"
+    (Remote_exec.explain ~subject:"the deploy"
+       (Remote_exec.Command_failed { code = 1; output = "boom" }))
+
+(* Two manifest fields disagreeing is the whole diagnosis, so both are named --
+   the operator is otherwise told a passphrase is wrong without being told which
+   field holds it or which key it was for.
+
+   The bound is not decoration. A credential tool that refuses is exactly what
+   prints a wall of text, and this sentence is written to a terminal and pasted
+   into a report. The second pair of assertions is the bound doing its work; the
+   first is an output within it carried whole, which is what stops the bound
+   from being a truncation of everything. *)
+let test_a_rejected_passphrase_reads_as_a_rejected_passphrase () =
+  check string "both fields are named and the loader's own words are carried"
+    "ssh.private_key_pass did not unlock the private key in \
+     ssh.private_key_contents on this machine, so no command was run: Bad \
+     passphrase, try again"
+    (Remote_exec.message
+       (Remote_exec.Key_passphrase_rejected
+          { output = "  Bad passphrase, try again \n" }));
+  let rendered =
+    Remote_exec.message
+      (Remote_exec.Key_passphrase_rejected { output = String.make 10_000 'x' })
+  in
+  check bool "an output that would scroll a terminal away is bounded" true
+    (String.length rendered < 3_000);
+  check bool "and it says so rather than trailing off" true
+    (contains ~needle:"truncated" rendered)
+
+(* Which of the two programs is missing is the difference between two different
+   installations, so the sentence carries the one that was looked for rather
+   than the pair. Both are asserted because a message that ignored its payload
+   and named one of them always would pass either assertion alone.
+
+   It also says why the program was wanted at all. Nothing needs an agent until
+   a key needs a passphrase, so an operator reading this on a machine that has
+   deployed for years is owed the reason it started mattering. *)
+let test_a_missing_agent_binary_names_the_binary () =
+  check string "the program that loads the key"
+    "ssh-add was not found on this machine's PATH, and the configured key \
+     needs a passphrase to sign with, so no command was run"
+    (Remote_exec.message
+       (Remote_exec.Agent_unavailable { program = "ssh-add" }));
+  check string "and the one that holds it"
+    "ssh-agent was not found on this machine's PATH, and the configured key \
+     needs a passphrase to sign with, so no command was run"
+    (Remote_exec.message
+       (Remote_exec.Agent_unavailable { program = "ssh-agent" }))
+
+(* A key that cannot sign must never be offered to a host. Offered, its public
+   half is accepted, the signature never comes, and the host reports that as an
+   authorization failure of its own -- the misattribution this work exists to
+   close, and the one that cost a real investigation hours.
+
+   The configuration reader refuses such a manifest before a run begins, so
+   nothing an operator types reaches this. A [Config_file.server] built in code
+   does, and this is a library: the arm is what stops a caller that skipped the
+   reader from dialling anyway. The body is the assertion -- it fails the case
+   if it is ever reached, which states "nothing was staged and nothing was
+   dialled" without a stub to count calls on. That it can be reached at all is
+   proved by every session case above, which opens one over a server of the same
+   shape carrying a key that can sign.
+
+   The expected sentence is asked for rather than spelled out. The claim is that
+   this answers in the same words the configuration reader refuses in; a second
+   copy of the text here would be the two wordings the claim is about. *)
+let encrypted_key_with_no_passphrase : Bondi_client.Config_file.server =
+  {
+    ip_address = "10.0.0.1";
+    ssh =
+      Some
+        {
+          user = "deploy";
+          private_key_contents =
+            Some
+              "-----BEGIN RSA PRIVATE KEY-----\n\
+               Proc-Type: 4,ENCRYPTED\n\
+               DEK-Info: AES-128-CBC,00000000000000000000000000000000\n\n\
+               bm90LWEta2V5Cg==\n\
+               -----END RSA PRIVATE KEY-----\n";
+          (* Declared and empty, not absent. This is the shape every manifest in
+             the estate carries and the shape the incident had: the field is
+             there, it holds nothing, and the key it was meant to unlock is
+             encrypted. [None] would model a manifest that never wrote the
+             field, which is a different thing to have refused. *)
+          private_key_pass = Some "";
+        };
+    port = None;
+  }
+
+let test_a_key_that_cannot_sign_is_refused_before_anything_is_dialled () =
+  check outcome "refused in the words the configuration reader refuses in"
+    (Error
+       (Remote_exec.Local_failure
+          {
+            reason =
+              Bondi_client.Private_key.refusal_message ~server:"10.0.0.1"
+                ~reason:
+                  (Bondi_client.Private_key.Encrypted_without_passphrase
+                     { cipher = "pem" });
+          }))
+    (Remote_exec.with_session ~timeout_seconds:unbounded_enough
+       encrypted_key_with_no_passphrase (fun _ ->
+         fail "a key that cannot sign was staged and a session opened over it"))
+
+(* A manifest that declares no key at all, which is the operator's own SSH
+   configuration answering for them: their agent, their [~/.ssh/config], a key
+   in hardware that could never be carried as a string. The same box as the
+   fixture above, so the pair below differ in the one field the contrast is
+   about. *)
+let server_without_a_declared_key : Bondi_client.Config_file.server =
+  {
+    ip_address = "192.0.2.1";
+    ssh =
+      Some
+        {
+          user = "deploy";
+          private_key_contents = None;
+          private_key_pass = None;
+        };
+    port = None;
+  }
+
+(* The words one call was spawned with. The count is asserted before any of them
+   is read, because every assertion below is about what is or is not among these
+   words -- and an absence is equally true of a run that never spawned anything
+   at all, which is the shape a broken substitution takes. *)
+let argv_of_one_call server =
+  let answer, invocations =
+    Client_fixtures.ssh_argv_during (fun () ->
+        Remote_exec.command_output ~timeout_seconds:unbounded_enough
+          ~command:"true" server)
+  in
+  check outcome "the call was spawned and came back" (Ok "") answer;
+  match invocations with
+  | [ argv ] -> argv
+  | [] -> fail "the stub recorded no invocation, so no command line was built"
+  | _ :: _ :: _ -> fail "one call should have spawned one ssh"
+
+let has_word word argv = List.exists (String.equal word) argv
+
+(* A declared key that cannot sign is offered to the host, accepted for its
+   public half, and then never signs -- and the host reports that as an
+   authorization failure of its own. Whether that is what happened, or whether
+   an agent the operator happened to have running answered instead, is the
+   difference between a run that fails and a run that succeeds for a reason
+   nobody declared. So a declared identity is the only one that may answer for
+   the connection.
+
+   Where nothing was declared the option would be this client overriding a
+   configuration it was asked to stay out of: the operator's own agent is the
+   whole mechanism there, and restricting ssh to identity files named on a
+   command line that names none leaves it nothing to try.
+
+   Both fixtures in one case, over the same runner, because either half alone is
+   passed by a client that never reached a spawn. *)
+let test_a_declared_identity_is_used_exclusively () =
+  let declared = argv_of_one_call unroutable_server in
+  let undeclared = argv_of_one_call server_without_a_declared_key in
+  check bool "a declared key is named to ssh" true (has_word "-i" declared);
+  check bool "and nothing the operator did not declare may answer for it" true
+    (has_word "IdentitiesOnly=yes" declared);
+  check bool "a manifest that declared none names no identity" false
+    (has_word "-i" undeclared);
+  check bool "and leaves the operator's own configuration to answer" false
+    (has_word "IdentitiesOnly=yes" undeclared)
+
+(* The two words no run spells twice: the staged key lives in a temporary file
+   whose name is made per call, and the control socket is named after this
+   process. Both are asserted for what they are elsewhere -- the key by the
+   cases that count stagings, the socket by the multiplexing suite -- so here
+   they are stood in for, and every other word is pinned exactly. *)
+let rec without_the_per_run_names argv =
+  match argv with
+  | [] -> []
+  | "-i" :: _staged :: rest ->
+      "-i" :: "<this call's staged key>" :: without_the_per_run_names rest
+  | word :: rest when String.starts_with ~prefix:"ControlPath=" word ->
+      "ControlPath=<this process's socket>" :: without_the_per_run_names rest
+  | word :: rest -> word :: without_the_per_run_names rest
+
+(* Every remote call this client makes goes through the one command line, so a
+   change to how a key that needs no agent is spelled reaches every command at
+   once. The suite asserts the connection options by needle, which says nothing
+   about what else is on the line, in what order, or whether a second [-i]
+   appeared beside the first. This says all of it.
+
+   Written out from what the module spells rather than captured from a run:
+   an expectation produced by printing the answer re-baselines itself on the day
+   the answer changes, which is the one thing this case exists to stop. *)
+let test_an_unencrypted_key_produces_todays_command_line () =
+  check (list string) "every word ssh is given, in the order it is given them"
+    [
+      "-i";
+      "<this call's staged key>";
+      "-o";
+      "IdentitiesOnly=yes";
+      "-o";
+      "BatchMode=yes";
+      "-o";
+      "StrictHostKeyChecking=accept-new";
+      "-o";
+      "ConnectTimeout=10";
+      "-o";
+      "ServerAliveInterval=15";
+      "-o";
+      "ServerAliveCountMax=4";
+      "-o";
+      "ControlMaster=auto";
+      "-o";
+      "ControlPath=<this process's socket>";
+      "-o";
+      "ControlPersist=30";
+      "deploy@192.0.2.1";
+      "--";
+      "true";
+    ]
+    (without_the_per_run_names (argv_of_one_call unroutable_server))
+
 let () =
   run "Remote_exec"
     [
@@ -949,6 +1259,10 @@ let () =
             test_the_key_is_written_readable_by_its_owner_alone;
           test_case "both shapes of configured key reach disk" `Quick
             test_both_shapes_of_configured_key_reach_disk;
+          test_case "the public half is written where ssh looks for it" `Quick
+            test_the_public_half_is_written_where_ssh_looks_for_it;
+          test_case "a raising call leaves no public half" `Quick
+            test_a_raising_call_leaves_no_public_half;
         ] );
       ( "session",
         [
@@ -977,11 +1291,33 @@ let () =
           test_case "exited_with is the host's own code alone" `Quick
             test_exited_with_is_the_hosts_own_code_alone;
         ] );
+      ( "an identity that could not sign",
+        [
+          test_case "an agent failure is not the host's verdict" `Quick
+            test_an_agent_failure_is_not_the_hosts_verdict;
+          test_case "a rejected passphrase reads as a rejected passphrase"
+            `Quick test_a_rejected_passphrase_reads_as_a_rejected_passphrase;
+          test_case "a missing agent binary names the binary" `Quick
+            test_a_missing_agent_binary_names_the_binary;
+          test_case
+            "a key that cannot sign is refused before anything is dialled"
+            `Quick
+            test_a_key_that_cannot_sign_is_refused_before_anything_is_dialled;
+        ] );
       ( "ssh options",
         [
           test_case "bound a host that stops answering" `Quick
             test_ssh_options_bound_a_host_that_stops_answering;
           test_case "never wait on a prompt" `Quick
             test_ssh_options_never_prompt;
+        ] );
+      ( "the identity a call is made with",
+        [
+          test_case
+            "a declared identity is used exclusively and an undeclared one is \
+             not"
+            `Quick test_a_declared_identity_is_used_exclusively;
+          test_case "an unencrypted key produces today's command line" `Quick
+            test_an_unencrypted_key_produces_todays_command_line;
         ] );
     ]

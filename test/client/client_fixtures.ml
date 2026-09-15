@@ -114,3 +114,49 @@ let staged_keys_during f =
           f
       in
       (value, recorded record))
+
+(* One invocation's words, told apart from the next one's by a line no argument
+   of [ssh] can be. The stub writes the marker before it writes anything else,
+   so an invocation that passed no arguments at all is still an invocation
+   rather than nothing -- which matters because "no -i among no words" is also
+   what a run that never spawned anything reports. *)
+let argv_marker = "#invocation"
+
+let rec words_until_marker lines =
+  match lines with
+  | [] -> ([], [])
+  | line :: _ when String.equal line argv_marker -> ([], lines)
+  | line :: rest ->
+      let words, remaining = words_until_marker rest in
+      (line :: words, remaining)
+
+let rec invocations lines =
+  match lines with
+  | [] -> []
+  | line :: rest when String.equal line argv_marker ->
+      let words, remaining = words_until_marker rest in
+      words :: invocations remaining
+  (* A line before the first marker cannot happen -- the stub writes the marker
+     first -- and is dropped rather than guessed at, because attributing it to
+     an invocation nobody recorded is how a word ends up asserted against the
+     wrong command line. *)
+  | _ :: rest -> invocations rest
+
+let ssh_argv_during f =
+  let dir = Filename.temp_dir "bondi-argv-record-" "" in
+  let record = Filename.concat dir "argv" in
+  Fun.protect
+    ~finally:(fun () ->
+      (try Sys.remove record with
+      | Sys_error _ -> ());
+      try Unix.rmdir dir with
+      | Unix.Unix_error _ -> ())
+    (fun () ->
+      let value =
+        with_ssh_stub
+          (Printf.sprintf "#!/bin/sh\nprintf '%%s\\n' %s \"$@\" >> %s\n"
+             (Filename.quote argv_marker)
+             (Filename.quote record))
+          f
+      in
+      (value, invocations (recorded record)))

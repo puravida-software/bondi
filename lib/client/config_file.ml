@@ -1,9 +1,27 @@
 include Bondi_common.Json_utils
 
+(* Both key fields are absent when a manifest declines to carry key material,
+   which is a legitimate shape rather than an omission: a developer should not
+   paste a private key into a configuration file to use a credential they
+   already hold, and a hardware-backed key cannot be carried as a string at all.
+   A block naming only a [user] is what such a manifest looks like, and it is
+   what `bondi init` now scaffolds.
+
+   Declared optional rather than removed, because parsing is strict and every
+   manifest in the estate sets both fields today; a removed field would stop
+   every one of them from decoding.
+
+   [None] is the absence of the field, and it is not the same value as
+   [Some ""]. The alternative -- a plain [string] defaulted to [""] -- would put
+   a sentinel where the absence belongs, which is the distinction between "not
+   set" and "set to empty" placed beyond the type's reach and re-derived by
+   every reader. Nothing here has to collapse the two: [Private_key.passphrase]
+   already answers [None] for the empty string, so an absent field and an empty
+   one reach the same resolution without a second emptiness test. *)
 type server_ssh = {
   user : string;
-  private_key_contents : string;
-  private_key_pass : string;
+  private_key_contents : string option; [@default None]
+  private_key_pass : string option; [@default None]
 }
 [@@deriving yojson]
 
@@ -292,6 +310,49 @@ let validate_alloy_credentials config =
                 contain control characters"
                variable))
 
+(* An encrypted private key with nothing to unlock it cannot sign, and the key
+   file states its own cipher in cleartext, so the configuration is refused
+   where it is read rather than at the connection. Left to the connection, ssh
+   offers the key -- an OpenSSH key file carries its public half in cleartext --
+   the host accepts it, and the signature that never comes is reported by the
+   host as an authorization failure: someone else's verdict on a fault that is
+   entirely local, which is the thing this refusal exists to stop.
+
+   The rule [validate_alloy_credentials] states holds here too: the message
+   names the fields and never their values, one of which is a credential.
+
+   The walk is over [servers], which is the deduplicated list: a cron job whose
+   server block repeats an [ip_address] already seen is dropped there, so an
+   [ssh] block that differs from the one the first occurrence carried is never
+   classified here. What that costs is the early report, not the refusal --
+   [Remote_exec] asks [Private_key.identity] again for the server it is about to
+   open a session to, and refuses in the same sentence before anything is staged
+   or dialled.
+
+   The first refusal ends the read. A file that cannot authenticate to one
+   server is a file to fix, not a run to begin, and repeating the same refusal
+   once per host says nothing the first one did not. *)
+let validate_ssh_identity config =
+  let refusal server =
+    match server.ssh with
+    | None -> None
+    | Some ssh -> (
+        match
+          Private_key.identity ~contents:ssh.private_key_contents
+            ~passphrase:ssh.private_key_pass
+        with
+        | Private_key.Ambient
+        | Private_key.Staged_key
+        | Private_key.Own_agent _ ->
+            None
+        | Private_key.Refused { reason } ->
+            Some (Private_key.refusal_message ~server:server.ip_address ~reason)
+        )
+  in
+  match List.find_map refusal (servers config) with
+  | None -> Ok config
+  | Some message -> Error message
+
 let read () =
   match read_file config_file_name with
   | Error message -> Error message
@@ -316,5 +377,6 @@ let read () =
           in
           let* config = validate_alloy_collect config in
           let* config = validate_alloy_credentials config in
+          let* config = validate_ssh_identity config in
           let* _ = managed_containers config in
           Ok config)
