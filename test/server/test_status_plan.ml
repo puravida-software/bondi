@@ -536,8 +536,8 @@ let test_report_reports_an_escaping_exception () =
         msg
   | Error (Bondi_server__Handler_error.Not_ready msg) ->
       Alcotest.failf
-        "an exception out of the gather is a fault during a request, not a box \
-         that cannot serve, but it answered Not_ready: %s"
+        "an exception out of the gather is a fault during a request on a box \
+         that was ready, but it answered Not_ready: %s"
         msg
   | Error (Bondi_server__Handler_error.Orchestrator_failure msg) ->
       check bool "the failure carries the exception that escaped" true

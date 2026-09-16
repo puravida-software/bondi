@@ -1,4 +1,4 @@
-(** Whether this box is in a state to serve, and what is wrong when it is not.
+(** Whether this box is ready to do its work, and what is wrong when it is not.
 
     The module is the gather/plan sandwich with the plan kept on its own: a
     probe reads the machine and records what it saw, and {!plan} turns those

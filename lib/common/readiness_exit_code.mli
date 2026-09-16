@@ -1,5 +1,5 @@
 (** The process exit code a Bondi server subcommand leaves behind when the box
-    it runs on is not in a state to serve.
+    it runs on is not ready.
 
     Two parties have to agree on this number and neither can detect a
     disagreement on its own: the server, which picks it from the failure class
@@ -12,7 +12,7 @@
     codes because the client library may not depend on the server's. *)
 
 val not_ready : int
-(** The code left behind by a box that is not in a state to serve.
+(** The code left behind by a box that is not ready.
 
     Distinct from every other code the server can leave, and picked away from
     the ones a reader would misattribute: 0 reports a failure as a success, 255

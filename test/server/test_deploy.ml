@@ -749,8 +749,8 @@ let test_deploy_reports_an_escaping_exception () =
         msg
   | Error (Handler_error.Not_ready msg) ->
       Alcotest.failf
-        "an exception out of a strategy is a fault during a request, not a box \
-         that cannot serve, but it answered Not_ready: %s"
+        "an exception out of a strategy is a fault during a request on a box \
+         that was ready, but it answered Not_ready: %s"
         msg
   | Error (Handler_error.Orchestrator_failure msg) ->
       Alcotest.(check bool)

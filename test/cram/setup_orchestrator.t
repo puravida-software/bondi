@@ -1,4 +1,4 @@
-Setup reports whether the orchestrator is actually serving, not merely whether
+Setup reports whether the orchestrator is actually answering, not merely whether
 `docker run -d` accepted the container. A server image whose process dies on
 startup — a missing shared library aborts the loader before main and exits 127 —
 used to present as a clean setup while the host was left with nothing listening.
@@ -8,7 +8,7 @@ used to present as a clean setup while the host was left with nothing listening.
 The stub answers the readings setup takes according to $ORCHESTRATOR_DIES,
 $ORCHESTRATOR_NOT_READY and $ORCHESTRATOR_LOG_SILENT, so the same configuration
 can be run against a healthy image, one that never starts, one that starts and
-cannot serve, and one that serves while nothing it writes reaches its log
+is not ready, and one that is ready while nothing it writes reaches its log
 stream. The
 container listing the report reads afterwards answers from the first of those: a
 run whose image dies leaves an exited container behind, and one that came up
@@ -36,8 +36,8 @@ leaves a running one.
   >       exit 1
   >     fi ;;
   >   # The one reading setup takes off the box, and the two ways it can be
-  >   # refused. $ORCHESTRATOR_NOT_READY is a container that is up and cannot
-  >   # serve, which exits with the readiness code and names the fault. The
+  >   # refused. $ORCHESTRATOR_NOT_READY is a container that is up and not
+  >   # ready, which exits with the readiness code and names the fault. The
   >   # healthy arm has to write a document: a command that exits zero saying
   >   # nothing is a rejection, not a pass.
   >   *'bondi-server check'*)
@@ -79,8 +79,8 @@ leaves a running one.
   >       echo '--- last 50 log lines ---'
   >       if [ -n "$ORCHESTRATOR_NOT_READY" ]; then
   >         echo 'bondi check: the Docker socket at /var/run/docker.sock is not readable'
-  >       else
-  >         echo 'listening on 0.0.0.0:3030'
+  >       elif [ -z "$ORCHESTRATOR_LOG_SILENT" ]; then
+  >         echo 'bondi check: diagnostic sink is writable'
   >       fi
   >     fi ;;
   >   'docker ps -a --format'*)
@@ -151,7 +151,7 @@ sticks and one that does not are the two halves of the assertion below.
   >   version: "0.15.0"
   > EOF
 
-An orchestrator whose own check says the box can serve is reported as serving,
+An orchestrator whose own check says the box is ready is reported as ready,
 naming the image that is actually up, and the run ends on the report of what the
 host holds.
 
@@ -162,7 +162,7 @@ host holds.
   Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 127.0.0.1
   ACME file permissions updated on server 127.0.0.1: /etc/traefik/acme/acme.json
-  bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.15.0
+  bondi-orchestrator is ready on server 127.0.0.1: mlopez1506/bondi-server:0.15.0
   No alloy is configured for server 127.0.0.1: /etc/bondi/alloy is not on the host
   
   Server: 127.0.0.1
@@ -189,7 +189,7 @@ undiagnosable.
   0
   [1]
 
-Starting it is not the same fact as it serving, so the run is followed by the
+Starting it is not the same fact as it answering, so the run is followed by the
 server's own check, taken inside the container it just started. Exactly one
 reading: the check acts on the box every time it is invoked, and the wait ahead
 of it is what makes one enough.
@@ -232,7 +232,7 @@ report has a skipped phase to name rather than staying silent about the
 question.
 
 The run then reports the host itself, which is the reading this failure used to
-need a human for: the container is on the box and not serving, and the source
+need a human for: the container is on the box and not ready, and the source
 that would have said otherwise could not be reached. The phase report says which
 phases did not run; this one says what is on the box now, and both are printed.
 
@@ -272,13 +272,16 @@ phases did not run; this one says what is on the box now, and both are printed.
 
 
 
-Nothing claimed success on that run.
+Nothing claimed success on that run. Asked of what the operator was shown, not of
+what went over the connection: the report is written to this client's own
+standard output and never reaches an ssh argument, so counting it in
+`ssh-argv.log` is `0` on a run that printed it too.
 
-  $ grep -c 'is serving' ssh-argv.log
+  $ grep -c 'is ready on server' out.log
   0
   [1]
 
-An orchestrator that came up and cannot serve is the other refusal, and it is
+An orchestrator that came up and is not ready is the other refusal, and it is
 the one the published health endpoint could not report: that endpoint answered
 204 and named nothing, where the server's own check names the probe that failed.
 The container is running here, so the wait passes and it is the reading that
@@ -291,7 +294,7 @@ refuses -- and the run still quotes the container's own account beside it.
   $ grep -A4 'did not come up' out.log
   Error: bondi-orchestrator did not come up on server 127.0.0.1.
   Image: mlopez1506/bondi-server:0.15.0
-  the box reported it is not in a state to serve: command failed (3): the Docker socket at /var/run/docker.sock is not readable
+  the box reported it is not ready: command failed (3): the Docker socket at /var/run/docker.sock is not readable
   Container state and logs from the server:
   status=running exit=0 oom=false error=
 
@@ -313,11 +316,14 @@ nobody anything afterwards, which is the state this arm refuses.
   $ : > ssh-argv.log
   $ ORCHESTRATOR_LOG_SILENT=1 bondi-client setup > out.log 2>&1
   [1]
-  $ grep -A3 'did not come up' out.log
+  $ grep -A6 'did not come up' out.log
   Error: bondi-orchestrator did not come up on server 127.0.0.1.
   Image: mlopez1506/bondi-server:0.15.0
   the box answered, and the line it writes to its diagnostic sink was not in the container's recent log output -- the sink took the bytes and the stream an operator and a log shipper read is not carrying them
   Container state and logs from the server:
+  status=running exit=0 oom=false error=
+  --- last 50 log lines ---
+  The container was left in place so it can be inspected: run `docker logs bondi-orchestrator` on 127.0.0.1. To restore service, set bondi_server.version in bondi.yaml back to a version known to run on this host and run `bondi setup` again.
 
 The stream was read once, and it was read after the check that writes the line
 being looked for. Read the other way round it would report every orchestrator as
@@ -330,15 +336,15 @@ silent, including the ones that are not.
 
 The affirmative half, on the same fixture: the only thing that differs is
 whether the container's log stream carries the line, and with it there the same
-run reports the orchestrator as serving. Without this arm the refusal above
+run reports the orchestrator as ready. Without this arm the refusal above
 could be a fixture that had stopped reaching the phase at all, and it would read
 as coverage either way.
 
   $ : > "$ORCHESTRATOR_PS"
   $ : > ssh-argv.log
   $ bondi-client setup > out.log 2>&1
-  $ grep 'is serving' out.log
-  bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.15.0
+  $ grep 'is ready on server' out.log
+  bondi-orchestrator is ready on server 127.0.0.1: mlopez1506/bondi-server:0.15.0
   $ grep -c "docker logs --tail 50 'bondi-orchestrator'" ssh-argv.log
   1
 
@@ -358,7 +364,7 @@ operator reaches for to recover — fail too.
   Network bondi-network is present on server 127.0.0.1
   ACME file permissions updated on server 127.0.0.1: /etc/traefik/acme/acme.json
   Removed bondi-orchestrator container on server 127.0.0.1
-  bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.15.0
+  bondi-orchestrator is ready on server 127.0.0.1: mlopez1506/bondi-server:0.15.0
 
 
 The removal asserts the outcome rather than the exit status of `docker rm`: an

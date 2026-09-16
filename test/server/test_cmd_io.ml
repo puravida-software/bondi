@@ -77,7 +77,7 @@ let test_a_readiness_failure_exits_with_its_own_code () =
     status_of
       (Error (Handler_error.Not_ready "the crontab spool is not writable"))
   in
-  check int "a box that is not ready to serve exits 3" 3 code;
+  check int "a box that is not ready exits 3" 3 code;
   check string "a failure writes nothing to stdout" "" written_out;
   check string "the failure's message goes to stderr"
     "the crontab spool is not writable\n" written_err
@@ -117,7 +117,7 @@ let test_a_failure_writes_its_message_to_stderr_alone () =
   let code, written_out, written_err =
     fail (Handler_error.Not_ready "the crontab spool is not writable")
   in
-  check int "a box that is not ready to serve exits 3" 3 code;
+  check int "a box that is not ready exits 3" 3 code;
   check string "the failure write touches no stdout" "" written_out;
   check string "the message goes to stderr, newline-terminated"
     "the crontab spool is not writable\n" written_err
@@ -173,7 +173,7 @@ let test_a_failing_diagnostic_writes_its_document_as_well_as_its_reasons () =
       (Error (Handler_error.Not_ready "the Docker socket is not connectable"))
       ~document:not_ready_document
   in
-  check int "a box that is not ready to serve exits 3" 3 code;
+  check int "a box that is not ready exits 3" 3 code;
   check string "the document a program reads is on stdout on this arm too"
     {|{"ready":false,"probes":[{"name":"docker_socket"}]}|} written_out;
   check string "the reasons an operator reads are on stderr"

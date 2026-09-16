@@ -94,7 +94,7 @@ let log_stream_command ~container_name ~lines =
   Printf.sprintf "docker logs --tail %d %s 2>&1" lines
     (Filename.quote container_name)
 
-type verdict = Serving | Not_ready of string | Unreachable of string
+type verdict = Ready | Not_ready of string | Unreachable of string
 type log_stream = Carrying | Silent | Unreadable of string
 
 (* Every reason an operator reads for a reading that was not taken opens the
@@ -121,12 +121,12 @@ let verdict_of_output reading =
         Unreachable
           (nothing_obtained
              "the check exited without writing a document, and a command that \
-              exited saying nothing is not evidence that the box can serve")
-      else Serving
+              exited saying nothing is not evidence that the box is ready")
+      else Ready
   | Error failure ->
       if is_readiness_status failure then
         Not_ready
-          (Printf.sprintf "the box reported it is not in a state to serve: %s"
+          (Printf.sprintf "the box reported it is not ready: %s"
              (Remote_exec.message failure))
       else
         Unreachable

@@ -115,7 +115,7 @@ without it.
   Network bondi-network is present on server 127.0.0.1
   cron on server 127.0.0.1 resolves docker at /usr/bin/docker
   curl on server 127.0.0.1 can run the crontab lines an older bondi wrote: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
-  bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.15.0
+  bondi-orchestrator is ready on server 127.0.0.1: mlopez1506/bondi-server:0.15.0
   No alloy is configured for server 127.0.0.1: /etc/bondi/alloy is not on the host
   Wrote secret environment file on server 127.0.0.1: /etc/bondi/gateway/env
   bondi-gateway container started on server 127.0.0.1: 
@@ -183,7 +183,7 @@ directory — which holds its secrets — deleted.
   Network bondi-network is present on server 127.0.0.1
   cron on server 127.0.0.1 resolves docker at /usr/bin/docker
   curl on server 127.0.0.1 can run the crontab lines an older bondi wrote: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
-  bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.15.0
+  bondi-orchestrator is ready on server 127.0.0.1: mlopez1506/bondi-server:0.15.0
   No alloy is configured for server 127.0.0.1: /etc/bondi/alloy is not on the host
   Stopped bondi-gateway container on server 127.0.0.1
   Removed bondi-gateway container on server 127.0.0.1
@@ -300,7 +300,7 @@ converge, so the lookup does not matter.
   Network bondi-network is present on server 127.0.0.1
   cron on server 127.0.0.1 resolves docker at /usr/bin/docker
   curl on server 127.0.0.1 can run the crontab lines an older bondi wrote: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
-  bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.15.0
+  bondi-orchestrator is ready on server 127.0.0.1: mlopez1506/bondi-server:0.15.0
   $ unset MANAGED_PS_FAILS
 
 A container that declares no secrets still has its environment file written, so
@@ -342,7 +342,7 @@ old one on disk under a container that no longer references it.
   Network bondi-network is present on server 127.0.0.1
   cron on server 127.0.0.1 resolves docker at /usr/bin/docker
   curl on server 127.0.0.1 can run the crontab lines an older bondi wrote: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
-  bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.15.0
+  bondi-orchestrator is ready on server 127.0.0.1: mlopez1506/bondi-server:0.15.0
   No alloy is configured for server 127.0.0.1: /etc/bondi/alloy is not on the host
   Wrote secret environment file on server 127.0.0.1: /etc/bondi/gateway/env
   bondi-gateway container started on server 127.0.0.1: 
@@ -418,7 +418,7 @@ started.
   Network bondi-network is present on server 127.0.0.1
   cron on server 127.0.0.1 resolves docker at /usr/bin/docker
   curl on server 127.0.0.1 can run the crontab lines an older bondi wrote: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
-  bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.15.0
+  bondi-orchestrator is ready on server 127.0.0.1: mlopez1506/bondi-server:0.15.0
   $ grep -c 'bondi-gateway' ssh-argv.log
   0
   [1]

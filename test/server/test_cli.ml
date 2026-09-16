@@ -199,7 +199,7 @@ let test_check_takes_whether_cron_is_configured_as_an_argument () =
 
    The document is on stdout here as well as on the ready arm above, and that
    is the case a program needs: a script polling this subcommand compares the
-   document it gets, and a box that cannot serve is the only state it has to
+   document it gets, and a box that is not ready is the only state it has to
    act on. Writing the reasons to stderr alone would leave the machine-readable
    report of a failure -- every failing probe, named -- reachable from no
    caller at all. *)
@@ -215,7 +215,7 @@ let test_check_reports_every_failing_probe_and_exits_three () =
     run_cli ~observe ~stdin_contents:""
       [| "bondi-server"; "check"; "--cron-configured" |]
   in
-  check int "a box that cannot serve exits 3" 3 code;
+  check int "a box that is not ready exits 3" 3 code;
   check string "the failing document is on stdout, every probe included"
     {|{"ready":false,"probes":[{"name":"docker_socket","ok":false,"reason":"/var/run/docker.sock: No such file"},{"name":"crontab_spool","ok":true},{"name":"diagnostic_sink","ok":false,"reason":"/proc/1/fd/2: Permission denied"}]}|}
     written_out;

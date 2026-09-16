@@ -13,8 +13,7 @@ let test_failure_message_carries_the_diagnostics () =
     Probe.failure_message ~ip_address:"46.225.53.162"
       ~image:"mlopez1506/bondi-server:0.10.1"
       ~reason:
-        "the box reported it is not in a state to serve: the Docker socket is \
-         not readable"
+        "the box reported it is not ready: the Docker socket is not readable"
       ~diagnostics:
         "exited exit=127\n\
          Error loading shared library libzstd.so.1: No such file or directory"
@@ -47,7 +46,7 @@ let test_the_probe_names_the_container_the_common_module_names () =
 (* The question setup asks changed: not "does something answer HTTP on the port
    the orchestrator published", which needs a fetch tool inside the container
    and a port that a later feature removes, but "does the server's own command
-   surface say this box can serve". The command has to reach the binary inside
+   surface say this box is ready". The command has to reach the binary inside
    the container it just started, because that is the only place the binary
    is. *)
 let test_check_command_runs_the_servers_own_check_inside_the_container () =
@@ -77,8 +76,7 @@ let test_check_command_names_no_published_port_and_runs_no_fetch_tool () =
   check bool "the value under inspection is the real command" true
     (contains ~needle:"docker exec" command
     && contains ~needle:Builtin_container.orchestrator command);
-  check bool "names no published port" false
-    (contains ~needle:(string_of_int Bondi_common.Defaults.server_port) command);
+  check bool "names no published port" false (contains ~needle:"3030" command);
   check bool "addresses no loopback socket" false
     (contains ~needle:"127.0.0.1" command);
   check bool "requests no URL" false (contains ~needle:"http://" command);
@@ -231,12 +229,12 @@ let not_ready_document =
    The reason is read through a second exhaustive function for the same
    reason. *)
 let verdict_name = function
-  | Probe.Serving -> "Serving"
+  | Probe.Ready -> "Ready"
   | Probe.Not_ready _ -> "Not_ready"
   | Probe.Unreachable _ -> "Unreachable"
 
 let verdict_reason = function
-  | Probe.Serving -> ""
+  | Probe.Ready -> ""
   | Probe.Not_ready reason -> reason
   | Probe.Unreachable reason -> reason
 
@@ -252,11 +250,11 @@ let log_stream_reason = function
 
 (* The subcommand writes its document whichever way its verdict goes and the
    transport preserves the remote status, so an exit the transport reports as a
-   success is the box having answered that it can serve. *)
-let test_a_clean_exit_is_serving () =
+   success is the box having answered that it is ready. *)
+let test_a_clean_exit_is_ready () =
   let verdict = Probe.verdict_of_output (Ok ready_document) in
-  check string "a check that exited cleanly is the box saying it can serve"
-    "Serving" (verdict_name verdict)
+  check string "a check that exited cleanly is the box saying it is ready"
+    "Ready" (verdict_name verdict)
 
 (* The status the readiness class leaves behind is the one code that means the
    box ran the check and named faults. Classifying it as anything else sends an
@@ -338,7 +336,7 @@ let test_every_other_failure_says_nothing_was_obtained_from_the_box () =
     cases
 
 (* A remote command that exited saying nothing is the case a stub with no arm
-   for the command produces, and it is not evidence that the box can serve. The
+   for the command produces, and it is not evidence that the box is ready. The
    passing arm is asserted on the same function in the same case, because a body
    that rejected everything would satisfy the rejection on its own. *)
 let test_empty_output_is_a_rejection_not_a_pass () =
@@ -353,7 +351,7 @@ let test_empty_output_is_a_rejection_not_a_pass () =
        (verdict_reason silent));
   check string "whitespace is saying nothing too" "Unreachable"
     (verdict_name (Probe.verdict_of_output (Ok "  \n")));
-  check string "and a check that did answer is still a pass" "Serving"
+  check string "and a check that did answer is still a pass" "Ready"
     (verdict_name (Probe.verdict_of_output (Ok ready_document)))
 
 (* Three outcomes, and the one that matters is the middle: a stream that came
@@ -422,8 +420,7 @@ let () =
         ] );
       ( "verdict_of_output",
         [
-          test_case "a clean exit is serving" `Quick
-            test_a_clean_exit_is_serving;
+          test_case "a clean exit is ready" `Quick test_a_clean_exit_is_ready;
           test_case
             "the readiness exit code is the box reporting faults, and carries \
              them"

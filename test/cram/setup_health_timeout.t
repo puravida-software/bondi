@@ -126,7 +126,7 @@ The bound came back from the host rather than from this client's idea of what it
 asked for, and the plan's own account of the run is unchanged by the failure: it
 converged, and it is the box that did not.
 
-  $ grep -c 'bondi-orchestrator is serving on server 127.0.0.1' out.log
+  $ grep -c 'bondi-orchestrator is ready on server 127.0.0.1' out.log
   1
 
 Only the container that declares a healthcheck is waited on. A container the host

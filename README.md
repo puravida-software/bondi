@@ -135,7 +135,7 @@ ssh YOUR_USER@YOUR_SERVER -- 'docker exec -i bondi-orchestrator bondi-server sta
 - `bondi-server deploy` - Deploy the payload read on standard input, and write its cron jobs.
 - `bondi-server run` - Run the one cron job described by the payload on standard input.
 - `bondi-server status [--service=NAME]` - Report what this box is running, as JSON on standard output.
-- `bondi-server check [--cron-configured]` - Report whether this box is in a state to serve.
+- `bondi-server check [--cron-configured]` - Report whether this box is ready to do its work.
 
 `deploy` and `run` read their payload from standard input and never from the
 command line. Argv is readable by every process on the box, and those payloads
@@ -173,7 +173,7 @@ Every subcommand leaves behind one of these:
 | `0` | Success. |
 | `1` | A failure to carry out a well-formed request. |
 | `2` | A request that was wrong as written — a payload that does not decode, an image with no tag. |
-| `3` | The box is not in a state to serve. |
+| `3` | The box is not ready; it named what is wrong. |
 
 `123`, `124` and `125` belong to the command-line library itself and mean an
 error reported on standard error, a command-line parsing error, and an unexpected

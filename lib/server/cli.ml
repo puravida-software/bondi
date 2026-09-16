@@ -234,7 +234,7 @@ let cron_configured_arg =
 let check_cmd ~observe =
   let info =
     Cmdliner.Cmd.info "check" ~exits
-      ~doc:"Report whether this box is in a state to serve."
+      ~doc:"Report whether this box is ready to do its work."
   in
   Cmdliner.Cmd.v info
     Cmdliner.Term.(const (check_action ~observe) $ cron_configured_arg)

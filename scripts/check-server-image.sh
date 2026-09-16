@@ -162,9 +162,9 @@ if [ -z "$marker" ] || [ "$(printf '%s\n' "$marker" | wc -l)" -ne 1 ]; then
     echo "error: could not derive the check marker from $marker_source" >&2
     exit 1
 fi
-# The exit code a Bondi server subcommand leaves behind when the box is not in a
-# state to serve, taken from the single place it is spelled. A copy here would be
-# a second spelling, and the assertions below cannot tell a code that drifted
+# The exit code a Bondi server subcommand leaves behind when the box is not
+# ready, taken from the single place it is spelled. A copy here would be a
+# second spelling, and the assertions below cannot tell a code that drifted
 # from a code that was always wrong: each of them reads a number back out of a
 # container and compares it to a number this script supplied.
 #

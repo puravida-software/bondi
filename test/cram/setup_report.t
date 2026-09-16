@@ -133,7 +133,7 @@ lines the run printed on its way there are unchanged.
   cron on server 127.0.0.1 resolves docker at /usr/bin/docker
   curl on server 127.0.0.1 can run the crontab lines an older bondi wrote: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
   ACME file permissions updated on server 127.0.0.1: /etc/traefik/acme/acme.json
-  bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.15.0
+  bondi-orchestrator is ready on server 127.0.0.1: mlopez1506/bondi-server:0.15.0
   No alloy is configured for server 127.0.0.1: /etc/bondi/alloy is not on the host
   Wrote secret environment file on server 127.0.0.1: /etc/bondi/gateway/env
   bondi-gateway container started on server 127.0.0.1: a1b2c3d4e5f6
