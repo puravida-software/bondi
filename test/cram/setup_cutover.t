@@ -1,10 +1,10 @@
-The cutover a box makes when the server stops serving, on one fixture holding
-both halves of the hazard at once: an orchestrator from before the binary had
-subcommands, and a crontab whose lines are the `curl` shape an older Bondi
-wrote. Either half alone is survivable. Together they are the window this phase
-exists to close -- a legacy line points at a server that no longer serves, and
-every scheduled job on the box no-ops silently until something replaces the
-line.
+The cutover a box makes when the server it was running stopped serving, on one
+fixture holding both halves of the hazard at once: an orchestrator from before
+the binary had subcommands, and a crontab whose lines are the `curl` shape an
+older Bondi wrote. Either half alone is survivable. Together they are the window
+this phase exists to close -- a legacy line points at a server that no longer
+serves, and every scheduled job on the box no-ops silently until something
+replaces the line.
 
 Two commands close it, in this order. `bondi setup` brings the orchestrator
 current and rescues the jobs' files out of the container before it is replaced;
@@ -195,7 +195,7 @@ subject and is not transcribed here -- what is asserted is the state it left.
   $ bondi-client setup > setup.log 2>&1
   $ echo $?
   0
-  $ grep -c 'bondi-orchestrator is serving on server 127.0.0.1: mlopez1506/bondi-server:0.20.0' setup.log
+  $ grep -c 'bondi-orchestrator is ready on server 127.0.0.1: mlopez1506/bondi-server:0.20.0' setup.log
   1
 
 The box's own account of its orchestrator, which is the end state rather than

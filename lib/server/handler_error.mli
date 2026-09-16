@@ -10,13 +10,13 @@ type t =
   | Orchestrator_failure of string
       (** Bondi could not carry out a well-formed request. *)
   | Not_ready of string
-      (** The box is not in a state to serve: something the orchestrator needs
-          before it can act on anything -- the Docker socket, the crontab spool,
-          the diagnostic sink -- is not usable. Distinct from
+      (** The box is not ready: something the orchestrator needs before it can
+          act on anything -- the Docker socket, the crontab spool, the
+          diagnostic sink -- is not usable. Distinct from
           {!Orchestrator_failure}, which is a fault while carrying out a request
-          on a box that was otherwise able to serve, because the operator's next
-          step differs: one is a machine to repair, the other a request to retry
-          or a log to read. *)
+          on a box that was otherwise ready, because the operator's next step
+          differs: one is a machine to repair, the other a request to retry or a
+          log to read. *)
 
 val message : t -> string
 (** The human-readable half of a failure, without its classification. Never

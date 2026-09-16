@@ -69,7 +69,7 @@ let rec write_all fd s ~offset ~remaining =
 
    O_NONBLOCK because the pipe case has a reader -- the engine's log driver, or
    the shipper behind it -- that can stall, and every caller of this runs on the
-   single domain that also serves requests. A blocking open or write would
+   single domain that also runs the subcommand. A blocking open or write would
    suspend the server until that reader came back; a line dropped down the
    degradation path below does not. It also turns the pipe-with-no-reader open,
    which would otherwise wait forever, into an ENXIO this reports. *)

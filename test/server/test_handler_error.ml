@@ -29,9 +29,10 @@ let test_exit_code_per_class () =
 
 (* The readiness verdict is a third kind of event and is owed a code of its own:
    an operator reading 1 cannot tell a box that failed a probe from a box whose
-   request failed while it was serving, and the two need different next steps. *)
+   request failed while the box was ready, and the two need different next
+   steps. *)
 let test_readiness_failure_has_its_own_exit_code () =
-  check int "a box that is not ready to serve exits 3" 3
+  check int "a box that is not ready exits 3" 3
     (Handler_error.exit_code not_ready);
   check bool "the readiness code is not the general-failure code" true
     (Handler_error.exit_code not_ready <> Handler_error.exit_code orchestrator);

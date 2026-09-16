@@ -24,7 +24,7 @@ let message = function
    [Not_ready] takes the first code the fences above leave free. It is not
    folded onto 1 because an operator reading 1 cannot tell a box that failed a
    readiness probe -- a machine to repair -- from a request that failed while
-   the box was serving, and the two have different next steps. Its number is
+   the box was ready, and the two have different next steps. Its number is
    the one arm a reader outside this library also has to know, because a client
    receives it as a bare status over a transport that carries nothing else, so
    it is taken from the shared library rather than spelled a second time
@@ -43,7 +43,7 @@ let exit_code : t -> int = function
 let exit_doc : t -> string = function
   | Invalid_request _ -> "on a request that was wrong as written."
   | Orchestrator_failure _ -> "on a failure to carry out a well-formed request."
-  | Not_ready _ -> "on a box that is not in a state to serve."
+  | Not_ready _ -> "on a box that is not ready, which named what is wrong."
 
 (* Every class, once. A list is the one thing the compiler cannot check for
    completeness, so the omission is caught by the test that compares this list

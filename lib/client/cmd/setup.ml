@@ -33,7 +33,7 @@ type alloy_state = Alloy_absent | Alloy_present | Alloy_undetermined of string
    a [string option] of the running version. A container that exists but is not
    running is neither "nothing there" nor "the right version is up": read as the
    first, the plan starts a container whose name is already taken; read as the
-   second, setup skips the restart and leaves the host with nothing serving.
+   second, setup skips the restart and leaves the host with nothing ready.
    Both were reachable while presence and version were separate fields. A
    fourth fact is that the listing never ran, which supports none of the three
    and is kept apart from them for the same reason. *)
@@ -346,7 +346,7 @@ let orchestrator_reading_verdict reading reading_output =
                failure))
   | Take_check -> (
       match Orchestrator_probe.verdict_of_output reading_output with
-      | Orchestrator_probe.Serving -> Ok ()
+      | Orchestrator_probe.Ready -> Ok ()
       | Orchestrator_probe.Not_ready reason
       | Orchestrator_probe.Unreachable reason ->
           Error reason)
@@ -593,7 +593,7 @@ let orchestrator_state_of_ps_output output =
                       (String.trim image);
                 }
           (* "created", "restarting", "paused", "exited", "removing" and "dead".
-             None of them is serving, and every one of them holds the container
+             None of them is ready, and every one of them holds the container
              name, so all converge to the same plan: remove it, then run. *)
           | _ -> Orchestrator_not_running)
       (* A line that does not parse still means a container by that name exists.
@@ -945,7 +945,7 @@ let cron_payload_preserve (config : Config_file.t) (ctx : setup_context) :
     [ PreserveCronPayloads { crontab = ctx.crontab } ]
   else []
 
-(* Converge on "the declared version is serving". Every state that is not that
+(* Converge on "the declared version is ready". Every state that is not that
    ends in [RunServer], and every state that leaves a container behind removes
    it first: [docker run] refuses a name that is already taken, and without the
    removal an orchestrator that died on startup would make the next [bondi
@@ -1508,7 +1508,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
                 ~diagnostics)
         in
         print_endline
-          (Printf.sprintf "%s is serving on server %s: %s"
+          (Printf.sprintf "%s is ready on server %s: %s"
              Builtin_container.orchestrator ip_address image);
         Ok ()
     | EnsureAlloyConfig -> (

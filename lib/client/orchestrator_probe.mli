@@ -1,4 +1,4 @@
-(** Whether the orchestrator a [bondi setup] just started is actually serving.
+(** Whether the orchestrator a [bondi setup] just started is actually answering.
 
     [docker run -d] answers with a container id as soon as the container has
     been created. It says nothing about whether the process inside survived, so
@@ -77,7 +77,7 @@ val running_command : container_name:string -> attempts:int -> string
 
 val check_command : container_name:string -> cron_configured:bool -> string
 (** The shell command that asks the server inside [container_name] whether the
-    box it is on is in a state to serve.
+    box it is on is ready.
 
     It runs the server's own check subcommand inside the container that was just
     started, rather than fetching a health endpoint over a published port, which
@@ -126,7 +126,7 @@ val log_stream_command : container_name:string -> lines:int -> string
     moments ago, and an unbounded read pulls a busy orchestrator's whole history
     across the connection to find it. *)
 
-(** What the box said when it was asked whether it can serve.
+(** What the box said when it was asked whether it is ready.
 
     Three outcomes rather than a [(unit, string) result] with two, because a
     check that ran and said no and a check that produced no reading at all send
@@ -135,7 +135,7 @@ val log_stream_command : container_name:string -> lines:int -> string
     collapse them, and the sentence it would collapse them into is the one that
     has to differ. *)
 type verdict =
-  | Serving  (** The box was asked and answered that it can serve. *)
+  | Ready  (** The box was asked and answered that it is ready. *)
   | Not_ready of string
       (** It was asked, and it named faults. The payload is the box's own
           account of them, which is the half of the answer an operator acts on.

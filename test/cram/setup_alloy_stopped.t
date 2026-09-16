@@ -6,7 +6,7 @@ the only way out was a manual `docker rm bondi-alloy` on the host.
 
   $ ROOT="$PWD"
 
-The stub reports a stopped alloy container and an orchestrator already serving
+The stub reports a stopped alloy container and an orchestrator already running
 the declared version, so the run reduces to the alloy phase.
 
   $ mkdir -p "$ROOT/bin"

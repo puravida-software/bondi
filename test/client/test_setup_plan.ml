@@ -279,7 +279,7 @@ let orchestrator_unreachable = Error transport_error
 (* `docker ps -a` reports containers in every state, which is what lets a dead
    orchestrator be seen at all. Reading "exited" as running is the shape of the
    outage this change exists to prevent: setup would skip the restart and leave
-   the host with nothing serving. *)
+   the host with nothing ready. *)
 let test_exited_orchestrator_is_not_read_as_running () =
   check bool "an exited container is not running" true
     (Setup.orchestrator_state_of_ps_output
@@ -332,9 +332,9 @@ let test_no_orchestrator_container_is_absent () =
     (Setup.orchestrator_state_of_ps_output "\n" = Setup.Orchestrator_absent)
 
 (* Docker reports "created" for a container that was never started and
-   "restarting" for one in a crash loop. Neither is serving, and both must be
+   "restarting" for one in a crash loop. Neither is ready, and both must be
    replaced rather than skipped. *)
-let test_non_running_states_are_not_serving () =
+let test_non_running_states_are_not_ready () =
   List.iter
     (fun state ->
       check bool
@@ -948,7 +948,7 @@ let test_each_reading_collapses_to_go_on_or_stop_with_a_sentence () =
      Setup.orchestrator_reading_verdict Setup.Take_check
        (Error named_its_faults)
    with
-  | Ok () -> fail "a box that named its faults is not a box that can serve"
+  | Ok () -> fail "a box that named its faults is not a box that is ready"
   | Error reason ->
       check bool "the box's own account survives the collapse" true
         (contains ~needle:"the Docker socket is not readable" reason));
@@ -1093,8 +1093,8 @@ let test_a_rejected_reading_reports_the_account_and_the_phases_left_unrun () =
     match
       Bondi_client.Orchestrator_probe.verdict_of_output (Error rejected)
     with
-    | Bondi_client.Orchestrator_probe.Serving ->
-        fail "the readiness exit code read as a box that can serve"
+    | Bondi_client.Orchestrator_probe.Ready ->
+        fail "the readiness exit code read as a box that is ready"
     | Bondi_client.Orchestrator_probe.Not_ready reason
     | Bondi_client.Orchestrator_probe.Unreachable reason ->
         reason
@@ -2648,8 +2648,8 @@ let () =
             test_running_orchestrator_from_another_image_reports_the_image;
           test_case "no container is absent" `Quick
             test_no_orchestrator_container_is_absent;
-          test_case "created, restarting, paused and dead are not serving"
-            `Quick test_non_running_states_are_not_serving;
+          test_case "created, restarting, paused and dead are not ready" `Quick
+            test_non_running_states_are_not_ready;
           test_case "a failed listing is undetermined" `Quick
             test_orchestrator_probe_error_is_undetermined;
         ] );

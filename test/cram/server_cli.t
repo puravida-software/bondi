@@ -112,7 +112,7 @@ a manual this file has no business pinning.
   1
   $ grep -c '2 on a request that was wrong as written\.' help-flat.txt
   1
-  $ grep -c '3 on a box that is not in a state to serve\.' help-flat.txt
+  $ grep -c '3 on a box that is not ready, which named what is wrong\.' help-flat.txt
   1
 
 The bare binary is what the image's entrypoint runs, and it is what a client
