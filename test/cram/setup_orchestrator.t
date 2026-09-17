@@ -164,6 +164,7 @@ host holds.
   ACME file permissions updated on server 127.0.0.1: /etc/traefik/acme/acme.json
   bondi-orchestrator is ready on server 127.0.0.1: mlopez1506/bondi-server:0.15.0
   No alloy is configured for server 127.0.0.1: /etc/bondi/alloy is not on the host
+  setup corrected nothing on server 127.0.0.1
   
   Server: 127.0.0.1
   
@@ -254,6 +255,7 @@ phases did not run; this one says what is on the box now, and both are printed.
   Error loading shared library libzstd.so.1: No such file or directory (needed by /usr/local/bin/bondi-server)
   The container was left in place so it can be inspected: run `docker logs bondi-orchestrator` on 127.0.0.1. To restore service, set bondi_server.version in bondi.yaml back to a version known to run on this host and run `bondi setup` again.
   setup stopped part-way through the orchestrator phase on server 127.0.0.1, so these phases did not run: alloy.
+  setup corrected nothing on server 127.0.0.1
   
   Server: 127.0.0.1
   
@@ -436,13 +438,29 @@ accepting the command is not the same fact as the daemon having applied it.
   $ printf 'no\n' > "$RESTART_POLICY"
   $ : > ssh-argv.log
   $ RESTART_UPDATE_STICKS=1 bondi-client setup > out.log 2>&1
+  $ echo $?
+  0
   $ grep 'restart policy' out.log
-  bondi-orchestrator restart policy on server 127.0.0.1 was no, corrected to unless-stopped without restarting it
+  bondi-orchestrator on server 127.0.0.1 was restart policy no, applied unless-stopped
   $ grep -c 'docker update --restart=unless-stopped bondi-orchestrator' ssh-argv.log
   1
   $ grep -c 'RestartPolicy' ssh-argv.log
   2
   $ grep -c 'docker stop\|docker rm\|docker run' ssh-argv.log
+  0
+  [1]
+
+The line is the run's account of what it changed, collected at the end rather
+than written where the correction happened, and it names the container, what the
+host reported and what this run left it at. A run that corrected something must
+not also say it corrected nothing: the two sentences are the two halves of the
+same register and the converged fixture in setup_report.t asserts the other one
+positively, so this absence is this run having something to report rather than a
+needle that went stale. The exit code is asserted above because a correction is a
+write that succeeded -- reporting one must not fail the command that repaired the
+box.
+
+  $ grep -c 'setup corrected nothing' out.log
   0
   [1]
 

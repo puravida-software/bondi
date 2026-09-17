@@ -1,5 +1,8 @@
 open Alcotest
 module Setup = Bondi_client.Cmd.Setup
+module Setup_phases = Bondi_client.Setup_phases
+module Host_answer = Bondi_client.Host_answer
+module Builtin_container = Bondi_common.Builtin_container
 module Config_file = Bondi_client.Config_file
 
 (* What `bondi setup` starts the orchestrator with, and what it reads back from
@@ -182,7 +185,8 @@ let test_convergence_updates_only_when_the_policy_differs () =
      Setup.orchestrator_restart_convergence ~expected:"unless-stopped" "no\n"
    with
   | Setup.Restart_policy_needs_update { observed; command } ->
-      check string "names what the host applied" "no" observed;
+      check string "names what the host applied" "no"
+        (Host_answer.to_string observed);
       check bool "corrects it in place" true
         (contains ~needle:"docker update" command);
       check bool "asks for the declared policy" true
@@ -198,7 +202,7 @@ let test_convergence_updates_only_when_the_policy_differs () =
   | Setup.Restart_policy_already_applied -> ()
   | Setup.Restart_policy_needs_update { observed; command = _ } ->
       failf "a compliant orchestrator must not be updated (observed %s)"
-        observed
+        (Host_answer.to_string observed)
   | Setup.Restart_policy_unreadable ->
       fail "a host that reported the declared policy was read"
 
@@ -218,12 +222,53 @@ let test_convergence_rejects_an_unreadable_inspect () =
     | Setup.Restart_policy_unreadable -> ()
     | Setup.Restart_policy_needs_update { observed; command = _ } ->
         failf "%s must not be corrected as a difference (observed %s)" label
-          observed
+          (Host_answer.to_string observed)
     | Setup.Restart_policy_already_applied ->
         failf "%s must never read as agreement" label
   in
   unreadable "empty output" "";
   unreadable "whitespace-only output" "  \n"
+
+(* The site's correction is a value the run carries out of itself, not a sentence
+   written where the correction happened. A line printed in the middle of a
+   transcript is the thing that went missing when a later phase failed, and it is
+   also the second place a wording could disagree with the account's own. What
+   this case can hold is the value: three arms from one expectation, differing
+   only in what the host reported, so a correction that is present is present
+   because of the reading and not because the function always yields one.
+
+   The rendering goes through [Setup_phases.corrections_report] rather than
+   through an accessor, because the report is the only thing the operator sees
+   and a correction carrying the right two values into the wrong sentence is the
+   defect worth catching. *)
+let test_restart_policy_correction_is_a_value_not_a_print () =
+  let expected = "unless-stopped" in
+  let corrections_for reported =
+    Setup.restart_policy_corrections ~expected
+      (Setup.orchestrator_restart_convergence ~expected reported)
+  in
+  let rendered =
+    String.concat "\n"
+      (Setup_phases.corrections_report ~server:"10.0.0.1"
+         (corrections_for "no\n"))
+  in
+  check int "one correction for one divergence" 1
+    (List.length (corrections_for "no\n"));
+  check bool "names the container it corrected" true
+    (contains ~needle:Builtin_container.orchestrator rendered);
+  check bool "names the policy the host reported" true
+    (contains ~needle:"was restart policy no" rendered);
+  check bool "names the policy this run applied" true
+    (contains ~needle:"applied unless-stopped" rendered);
+  (* Both negative arms, against the affirmative one above on the same
+     expectation: a host already carrying the policy was not corrected, and a
+     host that reported nothing was never corrected either -- that arm fails the
+     run, and a correction claimed there would report a write that did not
+     happen. *)
+  check int "a host already carrying the policy corrects nothing" 0
+    (List.length (corrections_for "unless-stopped\n"));
+  check int "a policy that could not be read corrects nothing" 0
+    (List.length (corrections_for ""))
 
 let () =
   run "orchestrator bind"
@@ -258,5 +303,7 @@ let () =
             test_convergence_updates_only_when_the_policy_differs;
           test_case "convergence rejects an unreadable inspect" `Quick
             test_convergence_rejects_an_unreadable_inspect;
+          test_case "the restart policy correction is a value" `Quick
+            test_restart_policy_correction_is_a_value_not_a_print;
         ] );
     ]

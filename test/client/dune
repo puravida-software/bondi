@@ -5,6 +5,7 @@
   test_config_file
   test_setup_plan
   test_setup_phases
+  test_host_answer
   test_deploy_helpers
   test_status_format
   test_curl_version

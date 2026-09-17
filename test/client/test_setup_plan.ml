@@ -2438,7 +2438,7 @@ let unroutable_server : Config_file.server =
    exact number of commands a setup run issues would make every change to the
    plan a failure here. *)
 let test_a_servers_setup_run_stages_the_key_once () =
-  let outcome, staged =
+  let (corrections, outcome), staged =
     Client_fixtures.staged_keys_during (fun () ->
         Setup.setup_server (Client_fixtures.mk_config ()) unroutable_server)
   in
@@ -2449,6 +2449,12 @@ let test_a_servers_setup_run_stages_the_key_once () =
      from the one this case is about. *)
   check bool "the run reported what it could not converge" true
     (Result.is_error outcome);
+  (* The run's other register, asserted for the same reason rather than dropped
+     on the floor: a host that answered nothing had nothing corrected on it, and
+     a correction claimed here would be one for a write this run never saw
+     applied. *)
+  check int "a run that converged nothing corrected nothing" 0
+    (List.length corrections);
   check bool "the run made more than one remote call" true
     (List.length staged > 1);
   check int "over one staged key" 1
@@ -2513,13 +2519,19 @@ let test_restart_policy_converges_where_docker_was_not_installed () =
           ~docker_status:
             (Setup.Docker_not_installed "bash: docker: command not found")
       with
-      | Ok () ->
+      | _, Ok () ->
           Alcotest.fail
             "the run that installed Docker returned without reading the \
              orchestrator's restart policy"
-      | Error message ->
+      | corrections, Error message ->
           check bool "the failure names the reading that was taken" true
-            (contains ~needle:"restart policy" message))
+            (contains ~needle:"restart policy" message);
+          (* A policy the host never reported is not a policy that was
+             corrected, so the account is empty on this path -- and a correction
+             claimed beside a failure would say the run repaired something it
+             refused to touch. *)
+          check int "a reading that failed corrected nothing" 0
+            (List.length corrections))
 
 (* A Docker state nobody could read is not a state to act on. An inspect issued
    here would be issued against a host whose version probe never answered, so
@@ -2533,12 +2545,84 @@ let test_restart_policy_is_not_read_where_docker_was_undetermined () =
         Setup.converge_restart_policy unroutable_server
           ~docker_status:(Setup.Docker_undetermined "connection timed out")
       with
-      | Ok () -> ()
-      | Error message ->
+      (* The reading was skipped, so there is nothing it could have corrected:
+         the empty account here is the arm not having run rather than a host that
+         agreed. *)
+      | corrections, Ok () ->
+          check int "a reading that was skipped corrected nothing" 0
+            (List.length corrections)
+      | _, Error message ->
           Alcotest.fail
             (Printf.sprintf
                "a Docker state that could not be read was acted on anyway: %s"
                message))
+
+(* A host whose reading disagrees, for the two cases above to be read against.
+   It answers the inspect off a marker it writes when it sees the update, which
+   is the whole of what this phase asks a host for: a policy that differs, the
+   write, then the policy the run asked for, so the read-back agrees and the
+   account carries what was corrected.
+
+   The stub drains its standard input for the reason the silent one does: the
+   runner writes the command there, and a stub that exits without reading leaves
+   the writer holding a closed pipe. *)
+let disagreeing_restart_policy_stub ~marker =
+  Printf.sprintf
+    {|#!/bin/sh
+cat > /dev/null
+while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done
+shift
+case "$1" in
+  *'docker update --restart='*) : > %s ;;
+  *'docker inspect'*)
+    if [ -f %s ]; then printf 'unless-stopped\n'; else printf 'no\n'; fi ;;
+esac
+exit 0
+|}
+    marker marker
+
+(* The affirmative arm the two cases above are absences of, taken at their own
+   layer rather than one below it. Without it an implementation that read the
+   verdict and dropped its account on the way out of this phase satisfies every
+   zero they assert, and the three of them would be readings of a function
+   nothing here shows returning anything else.
+
+   The rendering is asserted beside the count for the reason the site's own case
+   asserts it: a correction carrying the right two values into the wrong
+   sentence is what an operator would be handed. *)
+let test_restart_policy_reports_the_divergence_it_corrected () =
+  let marker = Filename.temp_file "bondi-restart-policy-marker-" "" in
+  Sys.remove marker;
+  Fun.protect
+    ~finally:(fun () ->
+      try Sys.remove marker with
+      | Sys_error _ -> ())
+    (fun () ->
+      Client_fixtures.with_ssh_stub (disagreeing_restart_policy_stub ~marker)
+        (fun () ->
+          match
+            Setup.converge_restart_policy unroutable_server
+              ~docker_status:
+                (Setup.Docker_installed "Docker version 29.2.1, build 1234567")
+          with
+          | _, Error message ->
+              Alcotest.fail
+                (Printf.sprintf
+                   "a policy that was corrected and read back agreeing was \
+                    reported as a failure: %s"
+                   message)
+          | corrections, Ok () ->
+              check int "one divergence corrected is one entry" 1
+                (List.length corrections);
+              let rendered =
+                String.concat "\n"
+                  (Setup_phases.corrections_report ~server:"192.0.2.1"
+                     corrections)
+              in
+              check bool "naming the policy the host reported" true
+                (contains ~needle:"was restart policy no" rendered);
+              check bool "and the policy this run applied" true
+                (contains ~needle:"applied unless-stopped" rendered)))
 
 (* What the client says about configuration it still parses and no longer acts
    on. [setup] is a command that acts on the file, so it says it; the wording
@@ -2821,6 +2905,8 @@ let () =
             `Quick test_restart_policy_converges_where_docker_was_not_installed;
           test_case "a Docker state that could not be read is not acted on"
             `Quick test_restart_policy_is_not_read_where_docker_was_undetermined;
+          test_case "the divergence a run corrected reaches its account" `Quick
+            test_restart_policy_reports_the_divergence_it_corrected;
         ] );
       ( "alloy_river_config",
         [

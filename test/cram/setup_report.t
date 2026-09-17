@@ -137,6 +137,7 @@ lines the run printed on its way there are unchanged.
   No alloy is configured for server 127.0.0.1: /etc/bondi/alloy is not on the host
   Wrote secret environment file on server 127.0.0.1: /etc/bondi/gateway/env
   bondi-gateway container started on server 127.0.0.1: a1b2c3d4e5f6
+  setup corrected nothing on server 127.0.0.1
   
   Server: 127.0.0.1
   
@@ -170,6 +171,28 @@ a run that succeeded reports about itself.
   $ bondi-client setup > /dev/null 2>&1
   $ echo $?
   0
+
+A run whose host agreed everywhere says so, in a sentence of its own. An account
+with nothing in it and an account that was never taken are different facts about
+a box, and an absent sentence is how they came to read alike. The line claims
+nothing about why: a run that found a divergence and failed before it could
+correct it prints this same sentence, beside the failure that says what happened.
+It is said exactly once for the one server, and it changes no exit code -- both
+asserted on the same run, because a sentence printed by a command that then
+failed would be a different fact from this one.
+
+  $ : > ssh-argv.log
+  $ bondi-client setup > out.log 2>&1
+  $ echo $?
+  0
+  $ grep -c 'setup corrected nothing on server 127.0.0.1' out.log
+  1
+
+That this run corrected nothing rather than merely failing to say what it
+corrected is pinned by the whole of its output above, where the sentence stands
+between the last line the plan printed and the table. The affirmative arm for a
+run that does correct something is in setup_orchestrator.t, on the same code and
+a host that reports a different policy.
 
 The report is taken after the plan has run, so it is the final state it describes
 rather than the one the plan started from. The three reads are independent and

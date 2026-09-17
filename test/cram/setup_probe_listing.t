@@ -76,6 +76,7 @@ and are taken whether or not the plan ran.
   Setting up the servers...
   Processing server: 127.0.0.1
   Error: server 127.0.0.1: could not list the bondi-orchestrator container on the server, so setup will not act on whether it is running: the host was not reached (255): Connection closed by 10.0.0.1 port 22
+  setup corrected nothing on server 127.0.0.1
   
   Server: 127.0.0.1
   
@@ -108,3 +109,55 @@ command against the same name and not this phase.
   $ grep -c -F -- '--name bondi-orchestrator' ssh-argv.log
   0
   [1]
+
+Two servers, which is what the account's wording is for. Every sentence this run
+prints about a correction names its server, and the reason it has to is here: the
+accounts are collected and printed together, after every server's error and
+before the one table, so the line that announced which server was being processed
+is several servers away by the time an account is read. A single-server fixture
+cannot tell a line that names its server from one that had no need to.
+
+  $ cat > bondi.yaml <<'EOF'
+  > service:
+  >   name: my-service
+  >   image: acme/app
+  >   port: 8080
+  >   env_vars: {}
+  >   servers:
+  >     - ip_address: 127.0.0.1
+  >       port: 9
+  >       ssh:
+  >         user: deploy
+  >         private_key_contents: "not-a-real-key"
+  >         private_key_pass: ""
+  >     - ip_address: 127.0.0.2
+  >       port: 9
+  >       ssh:
+  >         user: deploy
+  >         private_key_contents: "not-a-real-key"
+  >         private_key_pass: ""
+  > bondi_server:
+  >   version: "0.15.0"
+  > EOF
+
+  $ bondi-client setup > out.log 2>&1
+  [1]
+  $ head -7 out.log
+  Setting up the servers...
+  Processing server: 127.0.0.1
+  Processing server: 127.0.0.2
+  Error: server 127.0.0.1: could not list the bondi-orchestrator container on the server, so setup will not act on whether it is running: the host was not reached (255): Connection closed by 10.0.0.1 port 22
+  Error: server 127.0.0.2: could not list the bondi-orchestrator container on the server, so setup will not act on whether it is running: the host was not reached (255): Connection closed by 10.0.0.1 port 22
+  setup corrected nothing on server 127.0.0.1
+  setup corrected nothing on server 127.0.0.2
+
+Both accounts are printed before the table, which is the arrangement the wording
+assumes: an account read after the table would be read beside the box it is about
+and the server in the sentence would be the thing said twice. Pinned by line
+position, because a report that printed the accounts underneath each server's
+section would carry the same two sentences.
+
+  $ LAST_ACCOUNT=$(grep -n -F -- 'setup corrected nothing on server 127.0.0.2' out.log | head -1 | cut -d: -f1)
+  $ FIRST_TABLE=$(grep -n -F -- 'Server: 127.0.0.1' out.log | head -1 | cut -d: -f1)
+  $ test "$LAST_ACCOUNT" -lt "$FIRST_TABLE" && echo "every account precedes the table"
+  every account precedes the table
