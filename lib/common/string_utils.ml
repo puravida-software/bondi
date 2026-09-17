@@ -40,3 +40,20 @@ let starts_with ~prefix value =
 
 let has_control_char value =
   String.exists (fun c -> Char.code c < 0x20 || Char.code c = 0x7f) value
+
+let bounded ~limit value =
+  let length = String.length value in
+  if length <= limit then value
+  else
+    (* Walking back off a continuation byte -- one whose top two bits are 10 --
+       to the lead byte that began the sequence it belongs to. A byte offset
+       lands wherever the arithmetic puts it, and half of a multi-byte sequence
+       is not a character. *)
+    let rec boundary index =
+      if index <= 0 then 0
+      else if Char.code value.[index] land 0xc0 = 0x80 then boundary (index - 1)
+      else index
+    in
+    let cut = if String.is_valid_utf_8 value then boundary limit else limit in
+    Printf.sprintf "%s ... (truncated, %d bytes in all)"
+      (String.sub value 0 cut) length

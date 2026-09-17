@@ -23,6 +23,19 @@ the declared version, so the run reduces to the alloy phase.
   >     printf 'running\tmlopez1506/bondi-server:0.15.0\n' ;;
   >   *'ps -a --filter name=^/bondi-alloy$'*'{{.State}}'*)
   >     printf 'exited\tgrafana/alloy:v1.8.0\n' ;;
+  >   # The mode the host reports for the config file *before* setup writes it,
+  >   # answered from $ALLOY_MODE_BEFORE, and separately from the read-back below
+  >   # so that a box whose mode this run corrected is one variable away from a
+  >   # box that already agreed. One arm answering both readings would have the
+  >   # host reporting the same mode before and after the write, which is the
+  >   # failure path and not a correction -- a fixture meant to show a mode being
+  >   # corrected would then pass while asserting the opposite.
+  >   #
+  >   # It selects on the absent marker, which only the earlier reading carries:
+  >   # the read-back has no use for an answer saying the file is not there, so
+  >   # the two cannot be told apart by accident and no ordering of these arms
+  >   # decides which one matches.
+  >   *BONDI_ALLOY_MODE_ABSENT*) echo "${ALLOY_MODE_BEFORE-0640}" ;;
   >   # The mode the host reports for the config file after it was written,
   >   # answered from $ALLOY_MODE so that a box agreeing with the declaration
   >   # and a box disagreeing with it are the same fixture with one variable
@@ -52,7 +65,17 @@ the declared version, so the run reduces to the alloy phase.
   >   # The host's applied restart policy. Without this arm the command falls
   >   # through to *) and answers nothing, which setup reads as a refusal to
   >   # report rather than as agreement.
-  >   *'RestartPolicy'*) echo unless-stopped ;;
+  >   #
+  >   # Answered from a file rather than from a variable because the policy is
+  >   # read twice in one run -- once to decide, once to confirm what `docker
+  >   # update` applied -- and a host that reported the same policy both times
+  >   # is a correction the daemon refused, not a correction. The update arm
+  >   # below is what moves the box between the two readings, which is the only
+  >   # way a run on this stub reaches a restart-policy correction at all.
+  >   *'RestartPolicy'*) cat "$RESTART_POLICY_FILE" ;;
+  >   'docker update'*)
+  >     printf 'unless-stopped\n' > "$RESTART_POLICY_FILE"
+  >     echo bondi-orchestrator ;;
   >   # The orchestrator's image on its own, which is the version the report's
   >   # orchestrator read holds this box to before running a subcommand inside
   >   # its container. Without this arm the command falls through to *) and
@@ -86,6 +109,13 @@ the declared version, so the run reduces to the alloy phase.
 
   $ export SSH_ARGV_LOG="$PWD/ssh-argv.log"
   $ : > "$SSH_ARGV_LOG"
+
+The policy this box is holding, written to a file so that the stub's update arm
+can change it mid-run. It starts at the declared value, so every run below is a
+box whose restart policy already agrees until one of them says otherwise.
+
+  $ export RESTART_POLICY_FILE="$PWD/restart-policy.txt"
+  $ printf 'unless-stopped\n' > "$RESTART_POLICY_FILE"
 
 Everything the client sends a remote command on standard input is captured too,
 so a payload that is kept out of `argv` can still be shown to have reached the
@@ -265,6 +295,18 @@ mode, because there was nothing to correct.
   0
   [1]
 
+It said nothing about the mode in the account either, and the account was still
+taken: a host that already had the declared mode before the write corrected
+nothing, which is a different fact from a run whose account nobody printed. The
+affirmative arm for both absences is the run at the end of this file, on this
+same stub with one variable changed.
+
+  $ grep -c 'was mode' out.log
+  0
+  [1]
+  $ grep -c -F -- 'setup corrected nothing on server 127.0.0.1' out.log
+  1
+
 The affirmative half of that pair: the same stub and the same bondi.yaml,
 differing only in what the host reports the mode to be. Now the read-back
 disagrees, the run fails on it, and the message names both what was asked for
@@ -301,3 +343,146 @@ one path.
   Error: could not read back the mode of /etc/bondi/alloy/config.alloy on server 127.0.0.1 after writing it at 0640, so whether the mode was applied is unknown: the host could not read it and answered BONDI_ALLOY_MODE_UNREADABLE
   $ grep -o -F -- '/etc/bondi/alloy/config.alloy' out.log | wc -l
   1
+
+The whole point of taking a reading before the write, on the same stub and the
+same manifest as every run above: the host had 0644 -- the mode a bare redirect
+left on the boxes this was written from -- the write narrowed it, and the run says
+so. It names what the host had and what it applied, because a line saying only
+what a run changed something to is the reassurance this account replaces. And it
+exits 0: a correction is a write that succeeded, so refusing on one would block
+the command that repairs the host.
+
+  $ : > "$SSH_ARGV_LOG"
+  $ ALLOY_MODE_BEFORE=0644 bondi-client setup > out.log 2>&1
+  $ grep -c -F -- '/etc/bondi/alloy/config.alloy on server 127.0.0.1 was mode 0644, applied 0640' out.log
+  1
+  $ grep -c -F -- 'setup corrected nothing on server 127.0.0.1' out.log
+  0
+  [1]
+
+The reading really was taken before the write, which is the one thing about it
+that cannot be inferred from the line it produces: after the write the file sits
+at the mode just asked for, so a reading taken afterwards agrees with whatever it
+was told and reports nothing. Pinned by position in the command log rather than by
+the value, because both readings ask about the same file and only their order
+distinguishes what they can see.
+
+  $ BEFORE=$(grep -n -F -- 'BONDI_ALLOY_MODE_ABSENT' ssh-argv.log | head -1 | cut -d: -f1)
+  $ WRITE=$(grep -n -E -- "cat > [^&]*config[.]alloy" ssh-argv.log | head -1 | cut -d: -f1)
+  $ test "$BEFORE" -lt "$WRITE" && echo "the mode is read before it is written"
+  the mode is read before it is written
+
+None of the three credentials this manifest declares reaches the account block on
+this run. What that is worth is uneven, and the uneven part is the point of
+saying it here rather than leaving the greps to speak for themselves.
+
+The selecting expression is every shape of line the block can print -- a
+correction, a reading nobody could take, and the sentence saying nothing
+diverged -- so no line of the account is outside the scan. What is scanned for is
+three specific values, and that is where the claim stops. The subject of a
+correction is derived from its site, so no path and no container name can be
+handed to one at all; the host's own answer has to be declared a host's answer at
+a constructor named for that boundary, which a caller can still do with a value
+read out of a manifest, because a string carries nothing that says where it came
+from. So this is not an assertion that no declared value can reach a line. A
+fourth declared value -- the alloy endpoint, an image reference, a service name
+-- would pass these three greps untouched.
+
+Its affirmative arm is the line counted above: the account is non-empty on this
+run, so these counts are zero because nothing declared reached it and not because
+there was nothing to search.
+
+  $ grep -E -- 'was mode |was restart policy |could not read the |setup corrected' out.log | grep -c -F -- glc_secret
+  0
+  [1]
+  $ grep -E -- 'was mode |was restart policy |could not read the |setup corrected' out.log | grep -c -F -- not-a-real-key
+  0
+  [1]
+  $ grep -E -- 'was mode |was restart policy |could not read the |setup corrected' out.log | grep -c -F -- 123456
+  0
+  [1]
+
+A box with no config file at all is the ordinary first setup, and a creation is
+not a correction: there was no mode to diverge from, so the account says the run
+corrected nothing and the run says nothing about a reading it could not take. The
+distinction matters because collapsing it onto the unreadable answer would report
+every first setup as a box whose posture could not be established.
+
+  $ ALLOY_MODE_BEFORE=BONDI_ALLOY_MODE_ABSENT bondi-client setup > out.log 2>&1
+  $ grep -c 'was mode' out.log
+  0
+  [1]
+  $ grep -c 'could not read the mode' out.log
+  0
+  [1]
+  $ grep -c -F -- 'setup corrected nothing on server 127.0.0.1' out.log
+  1
+
+The affirmative arm for that second absence, and the other half of the earlier
+reading's negative space: a host that would not report the mode at all. Nothing
+was corrected, because nothing was read -- but the run says it could not read it,
+rather than being silent, because a transcript in which a run that could not look
+reads like a run that looked and agreed is the whole defect. It still exits 0: the
+reading was taken for the account's sake and the write is what the run is judged
+on.
+
+  $ ALLOY_MODE_BEFORE=BONDI_ALLOY_MODE_UNREADABLE bondi-client setup > out.log 2>&1
+  $ grep 'could not read the mode' out.log
+  could not read the mode of /etc/bondi/alloy/config.alloy on server 127.0.0.1, so this run cannot say what it found: the host could not read it and answered BONDI_ALLOY_MODE_UNREADABLE
+  $ grep -c 'was mode' out.log
+  0
+  [1]
+  $ grep -c -F -- 'setup corrected nothing on server 127.0.0.1' out.log
+  1
+
+Two corrections in one run, and the order the account puts them in. The Alloy
+config mode is read back inside the plan the interpreter applies; the restart
+policy is converged only once that plan has finished, so a run that corrects
+both reaches them in that order and the account is accumulated in the order the
+run reached them. Asserted by line position and not by presence: an accumulator
+turned over the wrong way, or joined the other way round, prints both of these
+lines and prints them backwards, and two presence counts would pass for it.
+
+  $ printf 'no\n' > "$RESTART_POLICY_FILE"
+  $ ALLOY_MODE_BEFORE=0644 bondi-client setup > out.log 2>&1
+  $ grep -c -F -- '/etc/bondi/alloy/config.alloy on server 127.0.0.1 was mode 0644, applied 0640' out.log
+  1
+  $ grep -c -F -- 'bondi-orchestrator on server 127.0.0.1 was restart policy no, applied unless-stopped' out.log
+  1
+  $ grep -c -F -- 'setup corrected nothing on server 127.0.0.1' out.log
+  0
+  [1]
+  $ MODE=$(grep -n -F -- 'was mode 0644, applied 0640' out.log | head -1 | cut -d: -f1)
+  $ POLICY=$(grep -n -F -- 'was restart policy no, applied unless-stopped' out.log | head -1 | cut -d: -f1)
+  $ test "$MODE" -lt "$POLICY" && echo "the mode correction is accounted before the restart policy"
+  the mode correction is accounted before the restart policy
+
+The same order over the other thing the pre-write reading can produce. The
+reading is taken before the write so that whatever it has to say enters the
+account where the run took it; a notice about a reading nobody could take is
+accumulated at that same point, ahead of a convergence that happens after the
+plan. Its position is the claim -- the line itself says nothing about when it
+was taken -- so it is pinned the way the pair above is.
+
+  $ printf 'no\n' > "$RESTART_POLICY_FILE"
+  $ ALLOY_MODE_BEFORE=BONDI_ALLOY_MODE_UNREADABLE bondi-client setup > out.log 2>&1
+  $ grep -c -F -- 'could not read the mode of /etc/bondi/alloy/config.alloy on server 127.0.0.1' out.log
+  1
+  $ grep -c -F -- 'bondi-orchestrator on server 127.0.0.1 was restart policy no, applied unless-stopped' out.log
+  1
+  $ UNREADABLE=$(grep -n -F -- 'could not read the mode of' out.log | head -1 | cut -d: -f1)
+  $ POLICY=$(grep -n -F -- 'was restart policy no, applied unless-stopped' out.log | head -1 | cut -d: -f1)
+  $ test "$UNREADABLE" -lt "$POLICY" && echo "the unreadable reading is accounted before the restart policy"
+  the unreadable reading is accounted before the restart policy
+
+The same three greps over the two shapes of line the run above could not produce.
+This account holds a reading nobody could take and a restart-policy correction,
+which is where the widened selecting expression earns its keep: a credential
+carried into either of them is caught here and would have been outside the scan
+entirely while the expression named only the mode correction. Combined into one
+count because the question is the same one three times and the affirmative arm is
+the pair of lines counted above, not any one of the values.
+
+  $ grep -E -- 'was mode |was restart policy |could not read the |setup corrected' out.log | grep -c -E -- 'glc_secret|not-a-real-key|123456'
+  0
+  [1]

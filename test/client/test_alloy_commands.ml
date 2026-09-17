@@ -1,5 +1,7 @@
 open Alcotest
 module Setup = Bondi_client.Cmd.Setup
+module Setup_phases = Bondi_client.Setup_phases
+module Host_answer = Bondi_client.Host_answer
 
 let contains ~needle s = Bondi_common.String_utils.contains ~needle s
 let index_of ~needle s = Bondi_common.String_utils.index_of ~needle s
@@ -97,7 +99,8 @@ let test_declared_mode_is_applied () =
   match Setup.alloy_config_mode_of_probe ~expected:"0640" "0640\n" with
   | Setup.Alloy_mode_applied -> ()
   | Setup.Alloy_mode_differs { observed } ->
-      failf "the declared mode must satisfy the check, got %s" observed
+      failf "the declared mode must satisfy the check, got %s"
+        (Host_answer.to_string observed)
   | Setup.Alloy_mode_unreadable _ ->
       fail "a host that reported 0640 was read as unreadable"
 
@@ -106,7 +109,8 @@ let test_declared_mode_is_applied () =
 let test_different_mode_reports_what_was_observed () =
   match Setup.alloy_config_mode_of_probe ~expected:"0640" "0644\n" with
   | Setup.Alloy_mode_differs { observed } ->
-      check string "reports what the host applied" "0644" observed
+      check string "reports what the host applied" "0644"
+        (Host_answer.to_string observed)
   | Setup.Alloy_mode_applied -> fail "0644 must not satisfy a 0640 expectation"
   | Setup.Alloy_mode_unreadable _ ->
       fail "a host that reported 0644 was read as unreadable"
@@ -123,7 +127,8 @@ let test_observed_mode_arrives_on_one_line () =
   with
   | Setup.Alloy_mode_differs { observed } ->
       check string "collapses the host's answer onto one line"
-        "sudo: unable to resolve host 0644" observed
+        "sudo: unable to resolve host 0644"
+        (Host_answer.to_string observed)
   | Setup.Alloy_mode_applied ->
       fail "a host that did not report 0640 must not read as agreement"
   | Setup.Alloy_mode_unreadable _ -> fail "a host that reported a mode was read"
@@ -141,7 +146,7 @@ let test_unreadable_probe_is_not_a_difference_and_not_a_match () =
     | Setup.Alloy_mode_applied -> failf "%s must never read as agreement" label
     | Setup.Alloy_mode_differs { observed } ->
         failf "%s must not be reported as a mode the host applied (%s)" label
-          observed
+          (Host_answer.to_string observed)
   in
   (* A host that answered the marker did answer, and what it answered is carried
      so that the message quotes the host rather than paraphrasing it. *)
@@ -151,7 +156,8 @@ let test_unreadable_probe_is_not_a_difference_and_not_a_match () =
    with
   | Setup.Alloy_mode_read_refused { observed } ->
       check string "carries what the host answered"
-        "BONDI_ALLOY_MODE_UNREADABLE" observed
+        "BONDI_ALLOY_MODE_UNREADABLE"
+        (Host_answer.to_string observed)
   | Setup.Alloy_mode_not_reported ->
       fail "a host that answered the marker did answer");
   (* Nothing read is a different thing from a read the host refused: there is no
@@ -161,7 +167,8 @@ let test_unreadable_probe_is_not_a_difference_and_not_a_match () =
     match unreadable label output with
     | Setup.Alloy_mode_not_reported -> ()
     | Setup.Alloy_mode_read_refused { observed } ->
-        failf "%s is not an answer the host gave, got %s" label observed
+        failf "%s is not an answer the host gave, got %s" label
+          (Host_answer.to_string observed)
   in
   not_reported "empty output" "";
   not_reported "whitespace-only output" "  \n";
@@ -171,9 +178,191 @@ let test_unreadable_probe_is_not_a_difference_and_not_a_match () =
   match Setup.alloy_config_mode_of_probe ~expected:"0640" "0640\n" with
   | Setup.Alloy_mode_applied -> ()
   | Setup.Alloy_mode_differs { observed } ->
-      failf "the declared mode must still be recognised, got %s" observed
+      failf "the declared mode must still be recognised, got %s"
+        (Host_answer.to_string observed)
   | Setup.Alloy_mode_unreadable _ ->
       fail "the declared mode must still be recognised"
+
+(* The reading taken before the write is the whole of what lets a run say what it
+   found. After the write the file exists at the mode just asked for, so the
+   read-back above can only ever agree, and the mode the host had is already
+   gone. A reading taken before the write has a fourth answer the read-back has
+   no use for -- the file is not there yet -- and that answer must not arrive as
+   the value an unreadable file arrives as. A first setup on a box with no
+   /etc/bondi/alloy and a setup on a box whose stat was refused are opposite
+   facts: one is a creation, the other is a run that cannot say whether it
+   converged.
+
+   The command and the verdict are pinned in one case deliberately. The verdict's
+   absent arm is reachable only if some command actually emits the marker, so the
+   arm asserted on its own stays green against a pre-write command that can never
+   produce it.
+
+   The absence is a constructor of this reading's own type and of no other. The
+   read-back's type has three arms, so the file-is-not-there answer is not
+   something it can be handed and not something a caller can write an arm for:
+   an arm for a state its own probe cannot reach is an arm no test reaches and no
+   operator ever reads. *)
+let test_alloy_config_mode_before_the_write () =
+  let cmd = Setup.alloy_config_pre_write_mode_command in
+  check bool "reads the mode at the declared width" true
+    (contains ~needle:"stat -c %04a" cmd);
+  check bool "names the River config file" true
+    (contains ~needle:"/etc/bondi/alloy/config.alloy" cmd);
+  (* The needles carry the `echo ` in front of the marker, not the marker alone.
+     A marker the shell runs as one word with the command that should have
+     printed it is a probe whose absent answer never reaches standard output, and
+     the marker on its own is present in that command too. *)
+  check bool "says so when the file is not there" true
+    (contains ~needle:"else echo BONDI_ALLOY_MODE_ABSENT" cmd);
+  check bool "says so when the file cannot be read" true
+    (contains ~needle:"|| echo BONDI_ALLOY_MODE_UNREADABLE" cmd);
+  check bool "keeps the failure off standard output" true
+    (contains ~needle:"2>/dev/null" cmd);
+  (* Rendered to a label so that every constructor is named by an exhaustive
+     match here, on both types: a catch-all would let the next answer either of
+     them learns pass as one of these four. The absence is a constructor of the
+     pre-write reading alone -- the read-back's type has no such arm, which is
+     what stops an arm being written for an answer its own probe cannot
+     produce. *)
+  let reading output =
+    match
+      Setup.alloy_config_pre_write_mode_of_probe ~expected:"0640" output
+    with
+    | Setup.Alloy_pre_write_absent -> "absent"
+    | Setup.Alloy_pre_write_read Setup.Alloy_mode_applied -> "applied"
+    | Setup.Alloy_pre_write_read (Setup.Alloy_mode_differs { observed }) ->
+        "differs: " ^ Host_answer.to_string observed
+    | Setup.Alloy_pre_write_read
+        (Setup.Alloy_mode_unreadable Setup.Alloy_mode_not_reported) ->
+        "unreadable: nothing reported"
+    | Setup.Alloy_pre_write_read
+        (Setup.Alloy_mode_unreadable
+           (Setup.Alloy_mode_read_refused { observed })) ->
+        "unreadable: " ^ Host_answer.to_string observed
+  in
+  (* The affirmative arm the three rejections below need: the same function on
+     the same expectation still recognises a host that already agrees, so a
+     verdict that had stopped recognising anything would not pass here. *)
+  check string "a host already at the declared mode has nothing to correct"
+    "applied" (reading "0640\n");
+  (* 0644 is the mode the old bare redirect left on the box this was written
+     from, and reporting it is the incident the account exists for. *)
+  check string "a host at another mode is what a correction names"
+    "differs: 0644" (reading "0644\n");
+  check string "a file that is not there yet is a creation, not a correction"
+    "absent"
+    (reading "BONDI_ALLOY_MODE_ABSENT\n");
+  check string "a file the host could not stat is neither of those"
+    "unreadable: BONDI_ALLOY_MODE_UNREADABLE"
+    (reading "BONDI_ALLOY_MODE_UNREADABLE\n");
+  check string "a host that said nothing has no answer to quote"
+    "unreadable: nothing reported" (reading "")
+
+(* Two commands now ask one host about one file, and a host -- or a cram stub
+   standing in for one -- has to be able to answer them differently: the whole
+   point of the earlier reading is that it reports a mode the read-back will not
+   see. Collapsed into one answer, a fixture written to show a mode being
+   corrected has the host reporting the same mode before and after the write,
+   which is the failure path and not a correction -- so the fixture would pass
+   while asserting the opposite of what it says.
+
+   Differing somewhere is therefore not enough; they have to differ where
+   something selects on them. Each command carries a string the other does not,
+   and the read-back keeps the one the existing stubs already match. *)
+let test_the_two_mode_commands_are_not_the_same_string () =
+  let pre_write = Setup.alloy_config_pre_write_mode_command in
+  let read_back = Setup.alloy_config_mode_command in
+  check bool "the two readings are not one command" true (pre_write <> read_back);
+  check bool "only the earlier reading can report an absent file" true
+    (contains ~needle:"BONDI_ALLOY_MODE_ABSENT" pre_write
+    && not (contains ~needle:"BONDI_ALLOY_MODE_ABSENT" read_back));
+  check bool "the read-back is the sudo stat a stub already selects on" true
+    (contains ~needle:"sudo stat -c %04a" read_back);
+  check bool "and the earlier reading is not that string" true
+    (not (contains ~needle:"sudo stat -c %04a" pre_write))
+
+(* Taking the reading is only half of it: a value read and then dropped is the
+   same silence as never reading it. This case pins what each of the four answers
+   means for the account rather than what the verdict is called, which is the
+   question the verdict's own case above answers.
+
+   Three of the four correct nothing, and they correct nothing for three different
+   reasons. A host already at the declared mode had no divergence. A host with no
+   file at all has a creation ahead of it, which is not a divergence either. A host
+   that would not report the mode leaves the run with nothing it can claim -- and
+   that one is said out loud, because a run that could not look and did not say so
+   reads exactly like a run that looked and found agreement.
+
+   Read through [Setup_phases.corrections_report] and through nothing else,
+   because that block is the whole of what an operator sees: both kinds of line
+   are worded there, both name the server there, and a correction holding the
+   right pair in the wrong sentence is invisible to a length check. It is also
+   the only register now -- the line about a reading nobody could take used to be
+   printed where it was taken, which is where it went missing on a run that
+   stopped two phases later. *)
+let test_the_pre_write_reading_feeds_the_account () =
+  let rendered output =
+    String.concat "\n"
+      (Setup_phases.corrections_report ~server:"10.0.0.1"
+         (Setup.alloy_config_pre_write_account ~expected:"0640"
+            (Setup.alloy_config_pre_write_mode_of_probe ~expected:"0640" output)))
+  in
+  (* The affirmative arm the three absences below need: this fixture does produce a
+     correction, and it carries the mode the host had, the mode the run applied and
+     the file both are about. 0644 is the mode the bare redirect left on the box
+     this was written from, which is the reading the account exists to print. *)
+  let corrected = rendered "0644\n" in
+  check bool "names the file the mode belongs to" true
+    (contains ~needle:"/etc/bondi/alloy/config.alloy" corrected);
+  check bool "names the mode the host had" true
+    (contains ~needle:"was mode 0644" corrected);
+  check bool "names the mode this run applied" true
+    (contains ~needle:"applied 0640" corrected);
+  check bool "and does not also say the run corrected nothing" false
+    (contains ~needle:"corrected nothing" corrected);
+  check bool "and has nothing it could not read" false
+    (contains ~needle:"could not read" corrected);
+  let agreed = rendered "0640\n" in
+  check bool "a host already at the declared mode corrects nothing" true
+    (contains ~needle:"setup corrected nothing on server 10.0.0.1" agreed);
+  check bool "and says nothing about a reading it took" false
+    (contains ~needle:"mode" agreed);
+  let absent = rendered "BONDI_ALLOY_MODE_ABSENT\n" in
+  check bool "a file that is not there is a creation, not a correction" true
+    (contains ~needle:"setup corrected nothing on server 10.0.0.1" absent);
+  check bool "and a creation is not something the host refused" false
+    (contains ~needle:"could not read" absent);
+  check bool "and it is not reported as a mode either" false
+    (contains ~needle:"mode" absent);
+  (* Unreadable is the one absence that is not silence. No correction, because a
+     mode nobody read is not a mode this run replaced -- and a line saying so,
+     carrying the host's own answer, because the alternative is a transcript in
+     which a run that could not look is indistinguishable from one that found
+     agreement. *)
+  let refused = rendered "BONDI_ALLOY_MODE_UNREADABLE\n" in
+  check bool "the run says it could not read it" true
+    (contains ~needle:"could not read the mode of /etc/bondi/alloy/config.alloy"
+       refused);
+  check bool "names the server it could not read it on" true
+    (contains ~needle:"on server 10.0.0.1" refused);
+  check bool "and carries the host's own answer" true
+    (contains ~needle:"answered BONDI_ALLOY_MODE_UNREADABLE" refused);
+  check bool "a mode the host would not report corrects nothing" true
+    (contains ~needle:"setup corrected nothing on server 10.0.0.1" refused);
+  check bool "and claims no mode the host never reported" false
+    (contains ~needle:"was mode" refused);
+  let silent = rendered "" in
+  check bool "a host that said nothing is the same kind of answer" true
+    (contains ~needle:"setup corrected nothing on server 10.0.0.1" silent);
+  check bool "worded without a value to quote" true
+    (contains ~needle:"the host reported nothing" silent);
+  (* The account says what the box "was", never what it "is": a fixture elsewhere
+     counts the present tense at zero to prove a converged run said nothing about
+     the mode, and a line here wording it that way would turn that count into an
+     assertion about nothing. *)
+  check bool "nothing in the account reads as a present-tense mode" false
+    (contains ~needle:"is mode" (corrected ^ refused))
 
 (* The credentials file gets the same treatment as the config file, from a
    builder of its own rather than a Printf inside the interpreter: the mode it
@@ -368,6 +557,12 @@ let () =
             test_observed_mode_arrives_on_one_line;
           test_case "unreadable is neither a difference nor a match" `Quick
             test_unreadable_probe_is_not_a_difference_and_not_a_match;
+          test_case "the reading taken before the write" `Quick
+            test_alloy_config_mode_before_the_write;
+          test_case "the two readings are distinguishable" `Quick
+            test_the_two_mode_commands_are_not_the_same_string;
+          test_case "the earlier reading feeds the account" `Quick
+            test_the_pre_write_reading_feeds_the_account;
         ] );
       ( "run command",
         [

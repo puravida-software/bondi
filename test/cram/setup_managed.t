@@ -240,6 +240,7 @@ either source, which is the state the next run is being asked to converge.
   Setting up the servers...
   Processing server: 127.0.0.1
   Error: server 127.0.0.1: could not list managed containers on the server, so the declared ones cannot be converged: command failed (7): 
+  setup corrected nothing on server 127.0.0.1
   
   Server: 127.0.0.1
   

@@ -139,6 +139,7 @@ the report's own reads, so every row reads as not found.
   Processing server: 127.0.0.1
   Error: could not read the Docker version, so Docker will not be installed: the host was not reached (255): Connection closed by 10.0.0.1 port 22
   setup stopped part-way through the Docker phase on server 127.0.0.1, so these phases did not run: network, ACME file, orchestrator, alloy.
+  setup corrected nothing on server 127.0.0.1
   
   Server: 127.0.0.1
   
@@ -377,6 +378,7 @@ container terminates TLS for every site on the box.
   Network bondi-network is present on server 127.0.0.1
   ACME file permissions updated on server 127.0.0.1: /etc/traefik/acme/acme.json
   No alloy is configured for server 127.0.0.1: /etc/bondi/alloy is not on the host
+  setup corrected nothing on server 127.0.0.1
   
   Server: 127.0.0.1
   

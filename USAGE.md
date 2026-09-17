@@ -245,6 +245,30 @@ You only need to run `bondi setup` once per server, or again when you change the
 
 The table is reached on every exit path, including a run that aborted part-way through. A run that stopped early still prints what it managed on its way there, then the failure, then the state of the box — so "which phases did not run" and "what is actually on the server now" are both answered instead of the second being left to a manual check. See [Checking status](#checking-status) for how to read the table.
 
+Between the failure and the table, the run prints its account of what it corrected on each server: one line per divergence, naming the server, what the server reported and what Bondi applied. A run that corrected nothing says so in a sentence of its own —
+
+```
+setup corrected nothing on server 203.0.113.10
+```
+
+— so a run whose account was empty and a run whose account was never taken do not read alike. The sentence claims nothing about why it was empty: a run that found a divergence and failed before it could correct it prints the same sentence, beside the failure that says what happened. The account is printed for every server and on every exit path, including a run that stopped part-way — what such a run managed to change is exactly when it matters most — and it changes no exit code, because a correction is a write that succeeded.
+
+Two divergences can appear there today. One is the orchestrator's restart policy, described below. The other is the mode of the Alloy configuration file, which `setup` reads before it rewrites the file, so that the mode the server had is reported rather than the one the write just set:
+
+```
+/etc/bondi/alloy/config.alloy on server 203.0.113.10 was mode 0644, applied 0640
+```
+
+A reading `setup` could not take at all is reported in the same block, as a line of its own. It corrects nothing and it claims no value — it says only what could not be read — so a run that was unable to look does not read like a run that looked and found agreement:
+
+```
+could not read the mode of /etc/bondi/alloy/config.alloy on server 203.0.113.10, so this run cannot say what it found: the host could not read it and answered BONDI_ALLOY_MODE_UNREADABLE
+```
+
+A run whose account holds only lines of that kind still says it corrected nothing, because it did, and it still exits zero: that reading is taken for the account's sake, and the write is what the run is judged on.
+
+The account is meant to be safe to paste into a ticket, and it is worth knowing exactly how far that goes. The file or the container a line names is one of Bondi's own constants, picked from the reading itself — there is no parameter for it, so nothing out of your `bondi.yaml` can arrive there at all. The value reported as what the server had is the server's own answer, flattened onto one line and, if it is long, cut with a note of how many bytes there were. The value reported as what Bondi applied is the value Bondi declares for itself. Beyond those three, nothing is enforced: these lines are built from ordinary strings, and a reading added later could carry a declared value into one. None of the readings above does, which is a fact about them rather than something the format prevents.
+
 #### Restart policy
 
 Docker's default restart policy is `no`: the container is neither started when the daemon starts nor restarted when its process dies. A host reboot, a `docker-ce` upgrade or a daemon crash therefore takes the container down and leaves it down until somebody notices.
@@ -258,10 +282,10 @@ Two kinds of container are exempt, both deliberately:
 
 There is no setting for the policy on the orchestrator, the reverse proxy or your service, and no environment variable for it. The only thing a knob there could do is set it wrong.
 
-`setup` does not treat the flag on a `docker run` as evidence that the flag took. On every run it reads back what the server applied to the orchestrator. If that differs, it corrects it in place with `docker update` — the orchestrator is not stopped, removed or re-run, so no site on the box loses TLS while a flag changes — and says so:
+`setup` does not treat the flag on a `docker run` as evidence that the flag took. On every run it reads back what the server applied to the orchestrator. If that differs, it corrects it in place with `docker update` — the orchestrator is not stopped, removed or re-run, so no site on the box loses TLS while a flag changes — and says so in the account it prints at the end of the run:
 
 ```
-bondi-orchestrator restart policy on server 203.0.113.10 was no, corrected to unless-stopped without restarting it
+bondi-orchestrator on server 203.0.113.10 was restart policy no, applied unless-stopped
 ```
 
 It then reads the policy a second time, because a server accepting the correction is not the same fact as a server having applied it. If the second read still disagrees, **the run exits non-zero**:

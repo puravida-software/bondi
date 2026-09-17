@@ -22,6 +22,18 @@ succeeds, so the failure is genuinely mid-plan.
   >   *'name=^/bondi-orchestrator$'*'{{.State}}'*)
   >     printf 'running\tmlopez1506/bondi-server:0.15.0\n' ;;
   >   *'ps -a --filter name=^/bondi-alloy$'*'{{.State}}'*) : ;;
+  >   # The mode the host reports for the config file *before* setup writes it,
+  >   # answered from $ALLOY_MODE_BEFORE. The declared value is the default, so
+  >   # the run this file is about carries no correction and the arm at the end --
+  >   # which is about a correction surviving the abort -- is this same fixture
+  >   # with one variable changed. Without it the reading falls through to *) and
+  >   # answers nothing, which the run reports as a mode it could not read, in a
+  >   # fixture that is about something else.
+  >   #
+  >   # It selects on the absent marker, which only the earlier reading carries,
+  >   # so it cannot swallow the read-back below and no ordering of the two arms
+  >   # decides which one matches.
+  >   *BONDI_ALLOY_MODE_ABSENT*) echo "${ALLOY_MODE_BEFORE-0640}" ;;
   >   # The mode the host reports for the config file after it was written. This
   >   # file is not about the mode, so the arm answers the declared value and the
   >   # run carries on to the conflict it exists to cover. Without it the probe
@@ -140,6 +152,7 @@ rather than a phase name they have to translate into one.
   Wrote Alloy credentials file on server 127.0.0.1: /etc/bondi/alloy/env
   Error: command failed (125): docker: Error response from daemon: Conflict. The container name "/bondi-alloy" is already in use by container "d671990dc231".
   setup stopped part-way through the alloy phase on server 127.0.0.1, so these phases did not run: managed containers.
+  setup corrected nothing on server 127.0.0.1
   
   Server: 127.0.0.1
   
@@ -196,3 +209,61 @@ never declared it.
   $ bondi-client setup > /dev/null 2>&1
   $ grep -c -F -- 'bondi-gateway' ssh-argv.log
   1
+
+A run that stopped part-way is exactly when what it already changed matters most,
+and this is the fixture where a correction is applied and a later action then
+fails. The same manifest and the same stub as the run at the top of this file, with
+the mode the host had before the write moved off the declared value: the write
+narrows it, the `docker run` two actions later fails on the name conflict, and the
+correction is reported beside the failure rather than lost with it.
+
+  $ cat > bondi.yaml <<'YAML'
+  > service:
+  >   name: my-service
+  >   image: acme/app
+  >   port: 8080
+  >   env_vars: {}
+  >   servers:
+  >     - ip_address: 127.0.0.1
+  >       port: 9
+  >       ssh:
+  >         user: deploy
+  >         private_key_contents: "not-a-real-key"
+  >         private_key_pass: ""
+  > bondi_server:
+  >   version: "0.15.0"
+  > alloy:
+  >   grafana_cloud:
+  >     instance_id: "123456"
+  >     api_key: "glc_secret"
+  >     endpoint: "https://logs-prod.grafana.net/loki/api/v1/push"
+  > managed_containers:
+  >   - name: gateway
+  >     image: example.com/ib-gateway
+  >     tag: "10.48.1e"
+  >     restart: unless-stopped
+  > YAML
+  $ : > "$SSH_ARGV_LOG"
+  $ ALLOY_MODE_BEFORE=0644 bondi-client setup > out.log 2>&1
+  [1]
+  $ grep -c -F -- '/etc/bondi/alloy/config.alloy on server 127.0.0.1 was mode 0644, applied 0640' out.log
+  1
+  $ grep -c -F -- 'setup corrected nothing on server 127.0.0.1' out.log
+  0
+  [1]
+
+Its affirmative arm is the run at the top of this file, which fails at the same
+action and whose account says the run corrected nothing -- so the line above is
+there because a correction was applied and carried out of a run that stopped, not
+because the account prints something on every failure.
+
+The three registers stay in the order an operator reads them: what failed, then
+what was corrected, then what is on the box now. Pinned by position rather than by
+presence, because an account printed before the failure it survived would satisfy
+every count above while telling the story backwards.
+
+  $ FAILED=$(grep -n -F -- 'setup stopped part-way through the alloy phase' out.log | head -1 | cut -d: -f1)
+  $ ACCOUNT=$(grep -n -F -- 'was mode 0644, applied 0640' out.log | head -1 | cut -d: -f1)
+  $ TABLE=$(grep -n -F -- 'Server: 127.0.0.1' out.log | head -1 | cut -d: -f1)
+  $ test "$FAILED" -lt "$ACCOUNT" && test "$ACCOUNT" -lt "$TABLE" && echo "what failed, what was corrected, what is on the box"
+  what failed, what was corrected, what is on the box

@@ -116,6 +116,34 @@ let test_has_control_char_delete () =
 let test_has_control_char_empty () =
   check bool "the empty string has none" false (S.has_control_char "")
 
+let test_bounded_leaves_a_short_value_alone () =
+  check string "a value within the limit is itself" "short"
+    (S.bounded ~limit:10 "short")
+
+let test_bounded_leaves_a_value_of_exactly_the_limit_alone () =
+  check string "a value the length of the limit is itself" "0123456789"
+    (S.bounded ~limit:10 "0123456789")
+
+let test_bounded_cuts_a_long_ascii_value () =
+  check string "the cut value carries the marker and the whole byte count"
+    "aaaaaaaaaa ... (truncated, 300 bytes in all)"
+    (S.bounded ~limit:10 (String.make 300 'a'))
+
+let test_bounded_cuts_on_a_codepoint_boundary () =
+  check string "the multi-byte codepoint the limit falls inside is dropped"
+    "abcd ... (truncated, 26 bytes in all)"
+    (S.bounded ~limit:5 ("abcd\xc3\xa9" ^ String.make 20 'z'))
+
+let test_bounded_cut_value_is_still_valid_utf_8 () =
+  check bool "a cut that fell mid-codepoint leaves valid UTF-8" true
+    (String.is_valid_utf_8
+       (S.bounded ~limit:5 ("abcd\xc3\xa9" ^ String.make 20 'z')))
+
+let test_bounded_cuts_invalid_utf_8_at_the_byte_limit () =
+  check string "a value that is not UTF-8 is cut where the bytes run out"
+    "\xff\xfez ... (truncated, 22 bytes in all)"
+    (S.bounded ~limit:3 ("\xff\xfe" ^ String.make 20 'z'))
+
 let () =
   run "String_util"
     [
@@ -175,5 +203,20 @@ let () =
           test_case "an ordinary value" `Quick test_has_control_char_plain_value;
           test_case "a DEL byte" `Quick test_has_control_char_delete;
           test_case "an empty string" `Quick test_has_control_char_empty;
+        ] );
+      ( "bounded",
+        [
+          test_case "a value within the limit" `Quick
+            test_bounded_leaves_a_short_value_alone;
+          test_case "a value of exactly the limit" `Quick
+            test_bounded_leaves_a_value_of_exactly_the_limit_alone;
+          test_case "a long ASCII value" `Quick
+            test_bounded_cuts_a_long_ascii_value;
+          test_case "a limit falling inside a codepoint" `Quick
+            test_bounded_cuts_on_a_codepoint_boundary;
+          test_case "the cut value's encoding" `Quick
+            test_bounded_cut_value_is_still_valid_utf_8;
+          test_case "a value that is not UTF-8" `Quick
+            test_bounded_cuts_invalid_utf_8_at_the_byte_limit;
         ] );
     ]

@@ -55,3 +55,23 @@ val has_control_char : string -> bool
     in a value is not data but a second record. Callers reject rather than
     escape, and each phrases its own message, because the value under inspection
     is often a credential that must not appear in one. *)
+
+val bounded : limit:int -> string -> string
+(** [bounded ~limit value] is [value] when it is [limit] bytes or fewer, and
+    otherwise as much of it as fits followed by
+    [" ... (truncated, N bytes in all)"], where [N] is the whole length of
+    [value].
+
+    One rendering of a cut rather than one per module that needed a bound. The
+    size is the only thing a caller chooses, and it chooses it for its own
+    reasons — a payload carrying a failed [docker logs] and a payload carrying a
+    file mode are not cut to the same length — but the notation an operator
+    learns to read is then the same notation wherever this tool cut, which is
+    what a copy of the [Printf] call at each site could only assert.
+
+    The cut lands on a codepoint boundary, so a value that is not ASCII is
+    carried short rather than carried broken: a byte offset can fall inside a
+    multi-byte sequence, and the half left behind is a replacement character in
+    whatever reads the line. The count stays in bytes, because bytes are what
+    the bound is in. A value that is not valid UTF-8 has no boundaries to find
+    and is cut at [limit]. *)

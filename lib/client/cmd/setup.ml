@@ -253,7 +253,10 @@ let declared_restart_matches ~expected output =
    rather than deciding again. *)
 type restart_convergence =
   | Restart_policy_already_applied
-  | Restart_policy_needs_update of { observed : string; command : string }
+  | Restart_policy_needs_update of {
+      observed : Host_answer.t;
+      command : string;
+    }
   | Restart_policy_unreadable
 
 let orchestrator_restart_convergence ~expected observed =
@@ -269,9 +272,29 @@ let orchestrator_restart_convergence ~expected observed =
     | Error got ->
         Restart_policy_needs_update
           {
-            observed = got;
+            observed = Host_answer.of_host_output got;
             command = orchestrator_restart_update_command ~policy:expected;
           }
+
+(* What the restart-policy site has to say about a reading, decided here rather
+   than in the arm that acts on it -- the same split the verdict above already
+   is, and the reason the arm can be a sequence of round trips with nothing to
+   choose. A list rather than an option because it is what the account
+   accumulates, and because a site that grew a second thing to say would extend
+   this and not its caller.
+
+   Only a difference is a correction. Agreement is a box that needed nothing, and
+   a policy that could not be read is a container the host never reported: that
+   arm fails the run, and a correction claimed on it would report a write that
+   never happened. *)
+let restart_policy_corrections ~expected = function
+  | Restart_policy_already_applied
+  | Restart_policy_unreadable ->
+      []
+  | Restart_policy_needs_update { observed; command = _ } ->
+      [
+        Setup_phases.restart_policy_corrected ~found:observed ~applied:expected;
+      ]
 
 (* One reading the orchestrator phase takes off the box after it has started
    the container, and the order the phase takes them in.
@@ -382,8 +405,13 @@ let orchestrator_reading_verdict reading reading_output =
    of band. Declaring the same value makes a converging setup leave those boxes
    where they are instead of undoing the fix in the other direction. *)
 let alloy_config_declared_mode = "0640"
-let alloy_config_dir = "/etc/bondi/alloy"
-let alloy_config_path = alloy_config_dir ^ "/config.alloy"
+
+(* Read through [Defaults] rather than spelled here: the account of what a run
+   corrected names this file too, and it is built in a module that cannot see
+   this one. Two spellings would let the report name a file the run never
+   touched. *)
+let alloy_config_dir = Bondi_common.Defaults.alloy_config_dir
+let alloy_config_path = Bondi_common.Defaults.alloy_config_path
 
 (* The file the Grafana Cloud credentials live in on the host. It sits inside
    [alloy_config_dir] deliberately: both [RemoveAlloy] and [CleanAlloyConfig]
@@ -490,6 +518,38 @@ let alloy_config_mode_command =
     (Filename.quote alloy_config_path)
     alloy_config_mode_unreadable_marker
 
+(* What the pre-write reading answers when there is no file there at all. *)
+let alloy_config_mode_absent_marker = "BONDI_ALLOY_MODE_ABSENT"
+
+(* What the host reports the config file's mode as *before* setup writes it, so a
+   run can say what it found and not only what it asked for. The write recreates
+   the file, so by the time the read-back above runs the mode the host had is
+   gone and the answer can only ever be the one just requested.
+
+   A reading taken before the write has an answer the read-back has no use for:
+   the file is not there yet. That is the ordinary case on a first setup, it is
+   not a divergence, and it is not the same fact as a stat the host refused --
+   one is a creation and the other is a run that cannot say whether it converged.
+   Collapsing the two onto the unreadable marker reports every first setup as a
+   failure to read.
+
+   The existence test runs under the same sudo the stat does. Asked as the login
+   user it would answer "absent" for a file sitting in a directory that user
+   cannot traverse, which is the dangerous direction of the two: it would report
+   a creation where the truth is a refusal.
+
+   Always exits zero, on all three answers, for the reason
+   [alloy_config_mode_command] gives. *)
+let alloy_config_pre_write_mode_command =
+  Printf.sprintf "sudo sh -c %s"
+    (Filename.quote
+       (Printf.sprintf
+          "if [ -e %s ]; then stat -c %%04a %s 2>/dev/null || echo %s; else \
+           echo %s; fi"
+          (Filename.quote alloy_config_path)
+          (Filename.quote alloy_config_path)
+          alloy_config_mode_unreadable_marker alloy_config_mode_absent_marker))
+
 (* Why the mode could not be read, as data rather than as a sentence. The two
    cases are genuinely different -- a host that said nothing has no answer to
    quote, a host that answered the marker does -- and the caller that words the
@@ -498,16 +558,33 @@ let alloy_config_mode_command =
    same line for the same reason. *)
 type alloy_mode_unreadable =
   | Alloy_mode_not_reported
-  | Alloy_mode_read_refused of { observed : string }
+  | Alloy_mode_read_refused of { observed : Host_answer.t }
 
-(* What reading the mode back established. Unreadable is not a difference and
+(* What a bare `stat` of the file established. Unreadable is not a difference and
    not a match: there is nothing to compare against, so reporting it as a wrong
    mode states something about the host the host never said, and reading it as
-   agreement is the silent success the read-back exists to prevent. *)
-type alloy_config_mode =
+   agreement is the silent success the read-back exists to prevent.
+
+   Three answers and not four. A file that is not there is not among them,
+   because this is what the command that reads the mode -- either of them -- can
+   say, and neither has an arm that reports an absence: the read-back's `stat`
+   simply fails, which is the refusal above. The absence is the pre-write
+   command's own answer and it lives in the type that command produces, so the
+   read-back has no arm for a state its own probe cannot reach. *)
+type alloy_mode_reading =
   | Alloy_mode_applied
-  | Alloy_mode_differs of { observed : string }
+  | Alloy_mode_differs of { observed : Host_answer.t }
   | Alloy_mode_unreadable of alloy_mode_unreadable
+
+(* What the reading taken before the write established: everything a stat can
+   say, and the one thing only this reading can -- that there is no file yet. A
+   type of its own rather than a fourth constructor on the reading above, so that
+   the read-back matches on three arms and the state it cannot produce is not
+   representable in what it sees. An arm for an impossible answer is an arm no
+   test can reach and no operator can ever read. *)
+type alloy_pre_write_reading =
+  | Alloy_pre_write_absent
+  | Alloy_pre_write_read of alloy_mode_reading
 
 let alloy_config_mode_of_probe ~expected output =
   (* single_line rather than trim: what a host writes on standard output is free
@@ -524,9 +601,68 @@ let alloy_config_mode_of_probe ~expected output =
   else if
     Bondi_common.String_utils.contains
       ~needle:alloy_config_mode_unreadable_marker got
-  then Alloy_mode_unreadable (Alloy_mode_read_refused { observed = got })
+  then
+    Alloy_mode_unreadable
+      (Alloy_mode_read_refused { observed = Host_answer.of_host_output got })
   else if got = expected then Alloy_mode_applied
-  else Alloy_mode_differs { observed = got }
+  else Alloy_mode_differs { observed = Host_answer.of_host_output got }
+
+(* The absence is tested here and the rest is the reading above, which is the
+   split the two commands already are: only this one has an arm that can print
+   the absent marker.
+
+   Neither marker is a substring of the other, so no answer can match both and
+   the order they are tried in -- absent here, unreadable in the shared reading
+   -- decides nothing. Were one a prefix of the other, the shorter would be found
+   inside the longer and that order would silently become the whole rule. *)
+let alloy_config_pre_write_mode_of_probe ~expected output =
+  if
+    Bondi_common.String_utils.contains ~needle:alloy_config_mode_absent_marker
+      (Bondi_common.String_utils.single_line output)
+  then Alloy_pre_write_absent
+  else Alloy_pre_write_read (alloy_config_mode_of_probe ~expected output)
+
+(* Why a mode could not be read, worded once for both readings that can fail to
+   get one. Two sites asking one host about one file must not describe the same
+   refusal differently, and the difference between a host that said nothing and a
+   host that answered the marker is the only thing either of them has to add. *)
+let alloy_mode_unreadable_detail = function
+  | Alloy_mode_not_reported -> "the host reported nothing"
+  | Alloy_mode_read_refused { observed } ->
+      Printf.sprintf "the host could not read it and answered %s"
+        (Host_answer.to_string observed)
+
+(* What the reading taken before the write means for the run's account, decided
+   here rather than in the arm that carries it out -- the split
+   [alloy_config_mode_of_probe] above and [restart_policy_corrections] already
+   are, and the reason the arm can be a sequence of round trips with nothing to
+   choose.
+
+   One list and not a pair. The reading has two kinds of thing to say, but they
+   are two entries in one account and not two registers: a mode the host had and
+   this run replaced is a correction, a mode the host would not report is not --
+   nothing was replaced, and claiming one would report a write against a value
+   nobody read -- but it is not silence either, because a run that could not look
+   reads exactly like a run that looked and found agreement. Both go through
+   [Setup_phases], which words them, names the server and bounds what the host
+   said, and both are printed in the block at the end rather than where they were
+   taken. A file that is not there is neither: a creation has nothing to diverge
+   from, and reporting every first setup as a correction would make the account
+   noise on the boxes that need it least.
+
+   Lines, never a verdict. Nothing here fails a run: the mode was read for the
+   account's sake, and refusing on a reading taken only to report would block the
+   command that repairs the host. *)
+let alloy_config_pre_write_account ~expected = function
+  | Alloy_pre_write_absent -> []
+  | Alloy_pre_write_read Alloy_mode_applied -> []
+  | Alloy_pre_write_read (Alloy_mode_differs { observed }) ->
+      [ Setup_phases.config_mode_corrected ~found:observed ~applied:expected ]
+  | Alloy_pre_write_read (Alloy_mode_unreadable reason) ->
+      [
+        Setup_phases.unreadable_reading ~site:Setup_phases.Alloy_config_mode
+          ~detail:(alloy_mode_unreadable_detail reason);
+      ]
 
 (* The `docker run` that starts the sidecar. The Grafana Cloud credentials are
    read out of the file [WriteAlloyEnv] wrote rather than interpolated here.
@@ -1221,12 +1357,15 @@ let alloy_river_config (config : Config_file.t) (alloy : Config_file.alloy) :
 (* ------------------------------------------------------------------------- *)
 
 let interpret ?session ~cron_payload_needed (server : Config_file.server)
-    (config : Config_file.t) (actions : action list) : (unit, string) result =
+    (config : Config_file.t) (actions : action list) :
+    Setup_phases.correction list * (unit, string) result =
   let ip_address = server.Config_file.ip_address in
-  (* One action, applied. No arm here knows what follows it: the plan stops at
-     the first failure, and saying what that leaves undone is [run]'s job
-     below. *)
-  let step : action -> (unit, string) result = function
+  (* One action, applied, and whatever divergence applying it corrected. No arm
+     here knows what follows it: the plan stops at the first failure, and saying
+     what that leaves undone is [run]'s job below. Most arms correct nothing and
+     say so with the empty list -- a write with no read-back after it has nothing
+     to report, which is a different fact from a read-back that agreed. *)
+  let step : action -> (Setup_phases.correction list, string) result = function
     | EnsureDocker -> (
         (* The version is read again here rather than taken from the gathered
            context: this is a separate SSH round trip, and a host can change
@@ -1243,7 +1382,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
             print_endline
               (Printf.sprintf "Docker is already installed on server %s: %s"
                  ip_address version);
-            Ok ()
+            Ok []
         | Docker_install ->
             print_endline
               (Printf.sprintf
@@ -1261,7 +1400,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
             print_endline
               (Printf.sprintf "Docker installed on server %s: %s" ip_address
                  (String.trim output));
-            Ok ())
+            Ok [])
     | EnsureAcmeFile ->
         let acme_dir = "/etc/traefik/acme" in
         let acme_file = acme_dir ^ "/acme.json" in
@@ -1310,7 +1449,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
                    (String.trim output));
               Ok ()
         in
-        Ok ()
+        Ok []
     | EnsureNetwork network_name ->
         let cmd =
           Printf.sprintf
@@ -1326,7 +1465,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
         print_endline
           (Printf.sprintf "Network %s is present on server %s" network_name
              ip_address);
-        Ok ()
+        Ok []
     | RequireCronDocker ->
         (* What counts as the host having answered is decided in
            [cron_docker_state_of_probe]; this arm only obtains the reply and
@@ -1361,7 +1500,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
         print_endline
           (Printf.sprintf "cron on server %s resolves docker at %s" ip_address
              path);
-        Ok ()
+        Ok []
     | RequireCronCurl ->
         (* The version comparison is a pure decision in [Curl_version] and what
            counts as curl having answered is one in [cron_curl_verdict_of_probe];
@@ -1391,7 +1530,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
                 (match String.split_on_char '\n' output with
                 | [] -> output
                 | line :: _ -> line)));
-        Ok ()
+        Ok []
     | PreserveCronPayloads { crontab } ->
         (* The copy runs on the box and the files never come here. What is
            preserved is a run payload and a credential file, and a client that
@@ -1424,7 +1563,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
         in
         List.iter print_endline
           (Cron_payload.report ~server:ip_address ~crontab listing);
-        Ok ()
+        Ok []
     | StopOrchestrator ->
         let* _ =
           Remote_exec.docker_command_output_text ?session
@@ -1435,7 +1574,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
         print_endline
           (Printf.sprintf "Stopped %s container on server %s"
              Builtin_container.orchestrator ip_address);
-        Ok ()
+        Ok []
     | RemoveOrchestrator ->
         (* Asserts the outcome rather than the command's exit status: an
            orchestrator started by an older Bondi ran with --rm, so [docker
@@ -1457,7 +1596,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
         print_endline
           (Printf.sprintf "Removed %s container on server %s"
              Builtin_container.orchestrator ip_address);
-        Ok ()
+        Ok []
     | RunServer ->
         let image = "mlopez1506/bondi-server:" ^ config.bondi_server.version in
         let run_cmd = orchestrator_run_command ~cron_payload_needed config in
@@ -1510,14 +1649,50 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
         print_endline
           (Printf.sprintf "%s is ready on server %s: %s"
              Builtin_container.orchestrator ip_address image);
-        Ok ()
+        Ok []
     | EnsureAlloyConfig -> (
         match config.alloy with
-        | None -> Ok ()
+        | None -> Ok []
         | Some alloy ->
             let river_config =
               Bondi_common.Alloy_river.generate
                 (alloy_river_config config alloy)
+            in
+            (* The mode the host has is read before the write and not after,
+               because the write recreates the file: by the time the read-back
+               below runs, the only mode there is the one just asked for, so a
+               run can say what it applied and never what it found. This is the
+               one moment the reading exists at all.
+
+               Read here rather than alongside the rest of the gathered context:
+               nothing at that point knows whether alloy is declared, and asking
+               every host about a file most of them do not have spends a round
+               trip per server for an answer no account uses. Read even so on a
+               box that has no such file -- an absent file is an answer, and it
+               is a different one from a stat the host refused.
+
+               What the answer means is decided in
+               [alloy_config_pre_write_account]; this carries that out, and it
+               carries it out before the write so that the notices it may hold
+               reach the transcript in the order the run took them. *)
+            let pre_write_output =
+              (* Not bound with [let*]. This reading changes no exit code and
+                 stops no run: a host that answers the unreadable marker produces
+                 a line of the account, and an ssh call that failed is the same
+                 fact about the same reading, so it takes the same route. Ending
+                 the run on it would fail a setup over a reading taken only to
+                 report -- and the empty string is exactly the answer the reading
+                 already reads as "nothing was reported". *)
+              Result.value ~default:""
+                (Remote_exec.command_output_text ?session
+                   ~timeout_seconds:host_command_seconds
+                   ~command:alloy_config_pre_write_mode_command server)
+            in
+            let pre_write_corrections =
+              alloy_config_pre_write_account
+                ~expected:alloy_config_declared_mode
+                (alloy_config_pre_write_mode_of_probe
+                   ~expected:alloy_config_declared_mode pre_write_output)
             in
             (* The config travels on standard input rather than inside a
                heredoc in the command, which is what lets the write be a single
@@ -1562,16 +1737,11 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
                        "%s on server %s is mode %s after being written at %s \
                         -- refusing to report success on a posture that was \
                         not applied"
-                       alloy_config_path ip_address observed
+                       alloy_config_path ip_address
+                       (Host_answer.to_string observed)
                        alloy_config_declared_mode)
               | Alloy_mode_unreadable reason ->
-                  let detail =
-                    match reason with
-                    | Alloy_mode_not_reported -> "the host reported nothing"
-                    | Alloy_mode_read_refused { observed } ->
-                        Printf.sprintf
-                          "the host could not read it and answered %s" observed
-                  in
+                  let detail = alloy_mode_unreadable_detail reason in
                   Error
                     (Printf.sprintf
                        "could not read back the mode of %s on server %s after \
@@ -1583,10 +1753,16 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
             print_endline
               (Printf.sprintf "Alloy config written on server %s: %s" ip_address
                  alloy_config_path);
-            Ok ())
+            (* Yielded here and not where the reading was taken: a correction is a
+               write that succeeded, and every path between the reading and this
+               line -- the write, and the read-back that proves the mode was
+               applied -- returns [Error] instead. A correction reported for a
+               mode the host refused to take would be the reassurance this
+               account replaces. *)
+            Ok pre_write_corrections)
     | WriteAlloyEnv -> (
         match config.alloy with
-        | None -> Ok ()
+        | None -> Ok []
         | Some alloy ->
             let contents =
               Bondi_common.Alloy_river.env_file_contents
@@ -1613,10 +1789,10 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
             print_endline
               (Printf.sprintf "Wrote Alloy credentials file on server %s: %s"
                  ip_address alloy_env_path);
-            Ok ())
+            Ok [])
     | RunAlloy -> (
         match config.alloy with
-        | None -> Ok ()
+        | None -> Ok []
         | Some alloy ->
             let image =
               Option.value alloy.image
@@ -1630,7 +1806,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
             print_endline
               (Printf.sprintf "%s container started on server %s: %s"
                  Builtin_container.alloy ip_address (String.trim output));
-            Ok ())
+            Ok [])
     | StopAlloy ->
         let* _ =
           Remote_exec.docker_command_output_text ?session
@@ -1641,7 +1817,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
         print_endline
           (Printf.sprintf "Stopped %s container on server %s"
              Builtin_container.alloy ip_address);
-        Ok ()
+        Ok []
     | RemoveAlloy ->
         let* _ =
           Remote_exec.docker_command_output_text ?session
@@ -1657,7 +1833,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
         print_endline
           (Printf.sprintf "Removed %s container and config on server %s"
              Builtin_container.alloy ip_address);
-        Ok ()
+        Ok []
     | CleanAlloyConfig ->
         let* _ =
           Remote_exec.command_output_text ?session
@@ -1668,7 +1844,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
           (Printf.sprintf
              "No alloy is configured for server %s: %s is not on the host"
              ip_address alloy_config_dir);
-        Ok ()
+        Ok []
     | WriteManagedEnv spec ->
         let env_path = Managed_container.env_file_path spec in
         (* umask 077 makes the file mode 600 as it is created, rather than
@@ -1695,7 +1871,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
         print_endline
           (Printf.sprintf "Wrote secret environment file on server %s: %s"
              ip_address env_path);
-        Ok ()
+        Ok []
     | RunManaged spec ->
         let args = Managed_container.run_args spec |> List.map Filename.quote in
         let* output =
@@ -1707,7 +1883,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
           (Printf.sprintf "%s container started on server %s: %s"
              (Managed_container.container_name spec)
              ip_address (String.trim output));
-        Ok ()
+        Ok []
     | StopManaged name ->
         let container = Managed_container.container_name_of name in
         let* _ =
@@ -1719,7 +1895,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
         print_endline
           (Printf.sprintf "Stopped %s container on server %s" container
              ip_address);
-        Ok ()
+        Ok []
     | RemoveManaged name ->
         let container = Managed_container.container_name_of name in
         let* _ =
@@ -1731,7 +1907,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
         print_endline
           (Printf.sprintf "Removed %s container on server %s" container
              ip_address);
-        Ok ()
+        Ok []
     | CleanManagedConfig name ->
         let dir = Managed_container.config_dir_of name in
         let* _ =
@@ -1743,7 +1919,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
         print_endline
           (Printf.sprintf "Removed config directory on server %s: %s" ip_address
              dir);
-        Ok ()
+        Ok []
   in
   (* [plan]'s concatenation is docker, network, cron curl, ACME, orchestrator,
      alloy, managed — so an action that fails half way down it leaves every
@@ -1754,17 +1930,29 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
      Naming the server is part of that wording, which is why no [step] arm above
      prefixes its own error: attribution belongs to whatever reports the
      failure, and every failure passes through here. *)
-  let rec run = function
-    | [] -> Ok ()
+  (* The account and the outcome are a pair rather than a result carrying
+     corrections in one arm, because a run that stopped part-way is exactly when
+     what it already changed matters most: reachable only through [Ok], the
+     corrections applied before a failure would be the same silence this account
+     exists to remove, arriving by another route. So both are returned on both
+     paths, in plan order, and the failing path returns everything the actions
+     above it corrected.
+
+     Accumulated reversed and turned over once at the end: an accumulator
+     appended to on every action copies itself on every action, and the plan is
+     as long as the box's declared containers make it. *)
+  let rec run corrected = function
+    | [] -> (List.rev corrected, Ok ())
     | action :: rest -> (
         match step action with
-        | Ok () -> run rest
+        | Ok corrections -> run (List.rev_append corrections corrected) rest
         | Error reason ->
-            Error
-              (action_failure_report ~server:ip_address ~failed:action
-                 ~remaining:rest ~reason))
+            ( List.rev corrected,
+              Error
+                (action_failure_report ~server:ip_address ~failed:action
+                   ~remaining:rest ~reason) ))
   in
-  run actions
+  run [] actions
 
 (* Docker's default restart policy is `no`, so creation is not the only moment a
    container's policy can be wrong: a docker-ce upgrade, a daemon crash or a
@@ -1785,53 +1973,59 @@ let converge_orchestrator_restart_policy ?session (server : Config_file.server)
     =
   let ip_address = server.Config_file.ip_address in
   let expected = Bondi_common.Defaults.bondi_restart_policy in
-  let* reported =
-    Remote_exec.command_output_text ?session
-      ~timeout_seconds:host_command_seconds
-      ~command:orchestrator_restart_command server
+  (* One fallible sequence, turned into the pair once at the end. Nothing here
+     can fail after a correction exists -- the correction is what the final
+     read-back agreeing means -- so a failing path has an empty account, and the
+     pair is built from the sequence rather than threaded through it. *)
+  let attempt () =
+    let* reported =
+      Remote_exec.command_output_text ?session
+        ~timeout_seconds:host_command_seconds
+        ~command:orchestrator_restart_command server
+    in
+    match orchestrator_restart_convergence ~expected reported with
+    | Restart_policy_already_applied -> Ok []
+    (* Nothing was read, so there is nothing to correct: a `docker update` here
+       would be issued against a container the host never reported, and the run
+       would fail on whatever raw text Docker returned instead of on what setup
+       was attempting. *)
+    | Restart_policy_unreadable ->
+        Error
+          (Printf.sprintf
+             "%s restart policy on server %s could not be read -- `%s` \
+              reported nothing, which is what a removed or unreadable \
+              container looks like, so its restart policy was left alone \
+              rather than corrected blind"
+             Builtin_container.orchestrator ip_address
+             orchestrator_restart_command)
+    | Restart_policy_needs_update { command; _ } as verdict ->
+        let* _ =
+          Remote_exec.command_output_text ?session
+            ~timeout_seconds:host_command_seconds ~command server
+        in
+        let* applied =
+          Remote_exec.command_output_text ?session
+            ~timeout_seconds:host_command_seconds
+            ~command:orchestrator_restart_command server
+        in
+        let* () =
+          declared_restart_matches ~expected applied
+          |> Result.map_error (fun got ->
+              Printf.sprintf
+                "%s restart policy on server %s is still %s after asking for \
+                 %s -- refusing to report success on a posture that was not \
+                 applied"
+                Builtin_container.orchestrator ip_address got expected)
+        in
+        (* What the host reported reaches the account through the verdict, which
+           is the one place it is read from: a sentence written here as well would
+           be a second wording for the same disagreement, and the reason the two
+           sites had different ones. *)
+        Ok (restart_policy_corrections ~expected verdict)
   in
-  match orchestrator_restart_convergence ~expected reported with
-  | Restart_policy_already_applied -> Ok ()
-  (* Nothing was read, so there is nothing to correct: a `docker update` here
-     would be issued against a container the host never reported, and the run
-     would fail on whatever raw text Docker returned instead of on what setup
-     was attempting. *)
-  | Restart_policy_unreadable ->
-      Error
-        (Printf.sprintf
-           "%s restart policy on server %s could not be read -- `%s` reported \
-            nothing, which is what a removed or unreadable container looks \
-            like, so its restart policy was left alone rather than corrected \
-            blind"
-           Builtin_container.orchestrator ip_address
-           orchestrator_restart_command)
-  | Restart_policy_needs_update { observed; command } ->
-      let* _ =
-        Remote_exec.command_output_text ?session
-          ~timeout_seconds:host_command_seconds ~command server
-      in
-      let* applied =
-        Remote_exec.command_output_text ?session
-          ~timeout_seconds:host_command_seconds
-          ~command:orchestrator_restart_command server
-      in
-      let* () =
-        declared_restart_matches ~expected applied
-        |> Result.map_error (fun got ->
-            Printf.sprintf
-              "%s restart policy on server %s is still %s after asking for %s \
-               -- refusing to report success on a posture that was not applied"
-              Builtin_container.orchestrator ip_address got expected)
-      in
-      (* Operator-visible on purpose: a box that needed correcting is a box
-         whose containers would not have come back, and naming both policies is
-         what makes the line a reading rather than a reassurance. *)
-      print_endline
-        (Printf.sprintf
-           "%s restart policy on server %s was %s, corrected to %s without \
-            restarting it"
-           Builtin_container.orchestrator ip_address observed expected);
-      Ok ()
+  match attempt () with
+  | Ok corrections -> (corrections, Ok ())
+  | Error message -> ([], Error message)
 
 (* The run that creates the container reads the policy too. The `--restart` on
    the `docker run` this tool issues is a request; what the daemon applied is
@@ -1854,7 +2048,7 @@ let converge_restart_policy ?session server ~docker_status =
   | Docker_installed _
   | Docker_not_installed _ ->
       converge_orchestrator_restart_policy ?session server
-  | Docker_undetermined _ -> Ok ()
+  | Docker_undetermined _ -> ([], Ok ())
 
 (* ------------------------------------------------------------------------- *)
 (* Entry point                                                               *)
@@ -1867,7 +2061,7 @@ let setup_server config server =
   match Remote_exec.ssh_config server with
   | Error failure ->
       prerr_endline (Remote_exec.message failure);
-      Error "missing ssh configuration"
+      ([], Error "missing ssh configuration")
   (* The credentials are read again by the session below, which is the module
      that owns the key on disk. What is decided here is only whether there are
      any: a server with no [ssh] block is reported once, by name, rather than
@@ -1876,52 +2070,76 @@ let setup_server config server =
      that asks it. *)
   | Ok _ -> (
       let converge ?session () =
-        let* context = gather_context ?session server in
-        (* [plan_for_config] refuses a reading it could not take, and it does
-           not know which host it was taken from. Every failure the interpreter
-           reports names its server, and [run] below prints them all at the end
-           of a multi-server run, far from the "Processing server" line that
-           would otherwise have to identify them. *)
-        let* actions =
-          plan_for_config config context
-          |> Result.map_error (fun message ->
-              Printf.sprintf "server %s: %s" ip_address message)
+        (* Nothing is read back before there is a plan, so a run that never got
+           one has an empty account rather than no account -- which is what
+           [Setup_phases.corrections_report] has a sentence for, and why the pair
+           is returned from here too. *)
+        let planned =
+          let* context = gather_context ?session server in
+          (* [plan_for_config] refuses a reading it could not take, and it does
+             not know which host it was taken from. Every failure the interpreter
+             reports names its server, and [run] below prints them all at the end
+             of a multi-server run, far from the "Processing server" line that
+             would otherwise have to identify them. *)
+          let* actions =
+            plan_for_config config context
+            |> Result.map_error (fun message ->
+                Printf.sprintf "server %s: %s" ip_address message)
+          in
+          Ok (context, actions)
         in
-        (* Log skip/restart reason when a container is already there *)
-        (match context.orchestrator with
-        | Orchestrator_absent -> ()
-        (* Nothing to report: [plan_for_config] above has already refused a
-           listing that never ran, so this line is never reached with one. *)
-        | Orchestrator_undetermined _ -> ()
-        | Orchestrator_not_running ->
-            print_endline
-              (Printf.sprintf
-                 "%s on server %s exists but is not running, replacing it..."
-                 Builtin_container.orchestrator ip_address)
-        | Orchestrator_running { version = running } ->
-            if not (List.mem RunServer actions) then
-              print_endline
-                (Printf.sprintf
-                   "%s container is already running on server %s: %s, \
-                    skipping..."
-                   Builtin_container.orchestrator ip_address running)
-            else
-              let reason =
-                if running <> config.bondi_server.version then
-                  Printf.sprintf "version mismatch: running %s, want %s" running
-                    config.bondi_server.version
-                else "adding cron job support"
-              in
-              print_endline
-                (Printf.sprintf "%s on server %s: %s, stopping to restart..."
-                   Builtin_container.orchestrator ip_address reason));
-        let* () =
-          interpret ?session
-            ~cron_payload_needed:(cron_payload_needed config context)
-            server config actions
-        in
-        converge_restart_policy ?session server
-          ~docker_status:context.docker_status
+        match planned with
+        | Error message -> ([], Error message)
+        | Ok (context, actions) -> (
+            (* Log skip/restart reason when a container is already there *)
+            (match context.orchestrator with
+            | Orchestrator_absent -> ()
+            (* Nothing to report: [plan_for_config] above has already refused
+               a listing that never ran, so this line is never reached with
+               one. *)
+            | Orchestrator_undetermined _ -> ()
+            | Orchestrator_not_running ->
+                print_endline
+                  (Printf.sprintf
+                     "%s on server %s exists but is not running, replacing \
+                      it..."
+                     Builtin_container.orchestrator ip_address)
+            | Orchestrator_running { version = running } ->
+                if not (List.mem RunServer actions) then
+                  print_endline
+                    (Printf.sprintf
+                       "%s container is already running on server %s: %s, \
+                        skipping..."
+                       Builtin_container.orchestrator ip_address running)
+                else
+                  let reason =
+                    if running <> config.bondi_server.version then
+                      Printf.sprintf "version mismatch: running %s, want %s"
+                        running config.bondi_server.version
+                    else "adding cron job support"
+                  in
+                  print_endline
+                    (Printf.sprintf
+                       "%s on server %s: %s, stopping to restart..."
+                       Builtin_container.orchestrator ip_address reason));
+            let interpreted, applied =
+              interpret ?session
+                ~cron_payload_needed:(cron_payload_needed config context)
+                server config actions
+            in
+            (* The plan's own corrections are kept whichever way it went, and
+               the restart-policy convergence is only reached when it went
+               through: [interpret] has already left the host part-way and said
+               which phases did not run, and issuing an inspect after that would
+               report the policy of a box this run had stopped working on. *)
+            match applied with
+            | Error message -> (interpreted, Error message)
+            | Ok () ->
+                let converged, outcome =
+                  converge_restart_policy ?session server
+                    ~docker_status:context.docker_status
+                in
+                (interpreted @ converged, outcome))
       in
       (* One staged key for the whole of a server's run, rather than one with
          every command in it. This is the client's longest sequence of remote
@@ -1940,13 +2158,15 @@ let setup_server config server =
       | Ok outcome -> outcome
       | Error _ -> converge ())
 
-(* What one server's run produced: whether it converged, and what the host holds
-   afterwards. They are separate because a run that stopped part-way is exactly
-   when the second is worth reading, so neither may stand in for the other — the
-   plan's account of what it executed is the thing that was never a report of
-   the box. *)
+(* What one server's run produced: whether it converged, what it corrected on the
+   way, and what the host holds afterwards. Three registers, kept apart because a
+   run that stopped part-way is exactly when the second and third are worth
+   reading, so none of them may stand in for another -- the plan's account of what
+   it executed is the thing that was never a report of the box, and a divergence
+   the run repaired is neither of those. *)
 type server_outcome = {
   converged : (unit, string) result;
+  corrections : Setup_phases.correction list;
   report : Status_report.server_report;
 }
 
@@ -1959,7 +2179,7 @@ type server_outcome = {
    begins, because a run that stopped part-way is exactly when the report is
    worth taking, so this opens a second one rather than extending the first. *)
 let setup_and_report ~fetch config (server : Config_file.server) =
-  let converged = setup_server config server in
+  let corrections, converged = setup_server config server in
   let taken ?session () =
     let reading =
       Status_gather.gather ?session ~timeout_seconds:host_command_seconds
@@ -1993,6 +2213,7 @@ let setup_and_report ~fetch config (server : Config_file.server) =
   in
   {
     converged;
+    corrections;
     report =
       Status_gather.report_of_reading ~config ~address:server.ip_address ~waits
         reading;
@@ -2048,6 +2269,23 @@ let run () =
           outcomes
       in
       List.iter (fun msg -> prerr_endline ("Error: " ^ msg)) errors;
+      (* The run's second register, collected here rather than printed where each
+         correction happened: a line written mid-transcript is scattered through
+         the output of every other phase, and it is lost from view altogether on
+         the run that stopped after it -- which is the run whose repairs matter
+         most. Printed for every server, including one whose run never started,
+         because an account nobody took and an account with nothing in it are
+         different facts and the sentence is what tells them apart.
+
+         Nothing here reads [errors] or [health_failed] and nothing here decides
+         an exit code: a correction is a write that succeeded, and refusing on one
+         would block the command that repairs the host. *)
+      List.iter
+        (fun outcome ->
+          List.iter print_endline
+            (Setup_phases.corrections_report ~server:outcome.report.address
+               outcome.corrections))
+        outcomes;
       (* The failure above says which phases did not run; this says what is on
          the box now. Both are printed, and this one last, because it is the
          reading the operator acts on — and it is printed on the successful path

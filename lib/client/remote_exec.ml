@@ -75,13 +75,8 @@ type standard_error = Merged_on_failure | Merged_always
 let message_output_limit = 2048
 
 let carried output =
-  let trimmed = String.trim output in
-  let length = String.length trimmed in
-  if length <= message_output_limit then trimmed
-  else
-    Printf.sprintf "%s ... (truncated, %d bytes in all)"
-      (String.sub trimmed 0 message_output_limit)
-      length
+  Bondi_common.String_utils.bounded ~limit:message_output_limit
+    (String.trim output)
 
 let message = function
   | Not_configured { server } ->
