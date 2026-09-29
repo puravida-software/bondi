@@ -27,6 +27,8 @@ without reading the usage guide.
   1
   $ grep -c '^# managed_containers:' bondi.yaml
   1
+  $ grep -c '^  # volumes:' bondi.yaml
+  1
 
 Both a cron job and a managed container can declare a network, so the two
 examples each show it.

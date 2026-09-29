@@ -33,7 +33,13 @@ let test_another_policy_does_not_match () =
     (Restart_policy.applied_matches (Some (applied "no")))
 
 let mk_host_config restart_policy : Docker.host_config =
-  { binds = None; port_bindings = None; network_mode = None; restart_policy }
+  {
+    binds = None;
+    port_bindings = None;
+    network_mode = None;
+    restart_policy;
+    mounts = None;
+  }
 
 let inspect_with host_config : Docker.inspect_response =
   Server_test_helpers.mk_inspect ~created_at:"2026-09-02T00:00:00Z"

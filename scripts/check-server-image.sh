@@ -493,6 +493,15 @@ no_cron_command="$(run_command_for no-cron)"
 cron_command="$(run_command_for cron)"
 
 printf '{"image": 5}' > "$work/invalid-deploy.json"
+# A relative host path is the malformed volumes entry: the client's floor
+# assumes this image decodes `volumes` and refuses it. No mounts, no containers.
+printf '{"volumes": [{"host": "relative/dir", "container": "/data", "read_only": false}]}' \
+    > "$work/invalid-volumes.json"
+# The affirmative arm for the malformed entry above: a well-formed volumes array
+# on an image that cannot be pulled. A build that refused every `volumes` entry
+# would exit 2 here as well, so the assertion is that it does not.
+printf '{"service_name": "image-gate-volumes", "image": "absent.invalid/absent:0.0.1", "port": 8080, "volumes": [{"host": "/srv/data", "container": "/data", "read_only": false}]}' \
+    > "$work/wellformed-volumes.json"
 # Well formed, and Bondi cannot carry it out: `.invalid` is reserved by RFC 2606
 # and resolves nowhere, so the pull fails at once rather than being waited out.
 #
@@ -568,6 +577,24 @@ run_subcommand "$work/payload.json" deploy
 expect_code "deploy" 2
 expect_stream_contains "deploy" stderr 'invalid deploy payload'
 
+echo "==> $image: a deploy payload with a malformed volumes entry"
+cp "$work/invalid-volumes.json" "$work/payload.json"
+run_subcommand "$work/payload.json" deploy
+expect_code "deploy" 2
+expect_stream_contains "deploy" stderr 'is not a well-formed bind mount'
+
+echo "==> $image: a deploy payload with a well-formed volumes entry is decoded"
+cp "$work/wellformed-volumes.json" "$work/payload.json"
+run_subcommand "$work/payload.json" deploy
+if [ "$subcommand_status" = 2 ]; then
+    echo "error: deploy with a well-formed volumes entry was refused as a request (exit 2)" >&2
+    show_subcommand
+    exit 1
+fi
+echo "ok: deploy exited $subcommand_status, not the decode refusal"
+expect_stream_lacks "deploy" stderr 'is not a well-formed bind mount'
+expect_stream_lacks "deploy" stderr 'invalid deploy payload'
+
 echo "==> $image: a well-formed request Bondi cannot carry out"
 cp "$work/unrunnable-run.json" "$work/payload.json"
 run_subcommand "$work/payload.json" run
@@ -595,6 +622,27 @@ if ! docker pull "$run_image" > /dev/null; then
     exit 1
 fi
 echo "ok: $run_image is on the engine"
+
+echo "==> the engine refuses a bind mount whose source is missing"
+# The backstop behind "Bondi never creates a host path": Bondi sends bind
+# mounts as HostConfig.Mounts with Type = "bind", and that form, unlike Binds,
+# makes the daemon refuse rather than create a missing source. It was observed
+# once by hand [Engine 29.8.1, 2026-09-27]; this asserts it on the engine the
+# check runs against. `--mount type=bind` is the CLI's spelling of exactly that
+# API field.
+missing_source="$work/bind-source-that-does-not-exist"
+if docker create --name image-gate-missing-bind \
+    --mount "type=bind,source=$missing_source,target=/data" \
+    "$run_image" > /dev/null 2> "$work/bind-stderr"; then
+    docker rm -f image-gate-missing-bind > /dev/null 2>&1 || true
+    echo "error: the engine created a container over a missing bind source" >&2
+    exit 1
+fi
+if [ -e "$missing_source" ]; then
+    echo "error: the engine created $missing_source" >&2
+    exit 1
+fi
+echo "ok: the engine refused the missing source and created nothing"
 printf '{"job": "%s", "image": "%s"}' "$run_job" "$run_image" \
     > "$work/run-job.json"
 run_subcommand "$work/run-job.json" run

@@ -12,5 +12,6 @@
   test_alert
   test_check_marker
   test_cron_divergence
-  test_test_helpers)
- (libraries alcotest bondi.common test_helpers unix))
+  test_test_helpers
+  test_bind_mount)
+ (libraries alcotest bondi.common test_helpers unix yojson))

@@ -89,6 +89,7 @@ let mk_service name : Config_file.user_service =
     health_timeout = None;
     poll_interval = None;
     logs = None;
+    volumes = None;
   }
 
 let mk_cron_job name image ip : Config_file.cron_job =

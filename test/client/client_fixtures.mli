@@ -87,3 +87,19 @@ val ssh_argv_during : (unit -> 'a) -> 'a * string list list
     and is what the cases counting stagings are written against. Recording every
     word there would make each of those cases read a command line to find a
     path. *)
+
+val run_on_this_machine :
+  sudo:string ->
+  cwd:string ->
+  string ->
+  (string, Bondi_client.Remote_exec.failure) result
+(** [run_on_this_machine ~sudo ~cwd command] runs [command] through a real
+    [/bin/sh -c] in [cwd], the way a box's shell receives it over ssh, and
+    classifies the outcome as the ssh runner does.
+
+    [sudo] is a shell function definition put ahead of the command, so a test
+    never asks this machine's sudo anything and what that function answers is
+    the fixture — [sudo() { return 1; }] is a box that refuses [sudo -n]. Shared
+    because the host-path check is asserted against a real run both on its own
+    and inside the deploy's gate, and two copies would be two answers to what
+    "the box" is. *)

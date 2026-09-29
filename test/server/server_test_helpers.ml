@@ -17,3 +17,17 @@ let mk_inspect ~created_at ~restart_count ~status ?(exit_code = 0)
     state = { status; exit_code; health };
     host_config;
   }
+
+let mount_testable : Docker.mount Alcotest.testable =
+  Alcotest.testable
+    (fun fmt (m : Docker.mount) ->
+      Format.fprintf fmt "{%s %s -> %s ro=%b}" m.type_ m.source m.target
+        m.read_only)
+    ( = )
+
+let host_config_testable : Docker.host_config Alcotest.testable =
+  Alcotest.testable
+    (fun fmt host_config ->
+      Format.pp_print_string fmt
+        (Yojson.Safe.to_string (Docker.host_config_to_yojson host_config)))
+    ( = )

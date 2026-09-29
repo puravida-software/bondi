@@ -67,6 +67,7 @@ let get_docker_config (config : alloy_config) : docker_config =
       network_mode = None;
       restart_policy =
         Some { Client.name = "unless-stopped"; maximum_retry_count = None };
+      mounts = None;
     }
   in
   { container_config; host_config }

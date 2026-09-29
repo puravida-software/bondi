@@ -215,6 +215,104 @@ let test_inspect_response_without_host_config_decodes () =
   Alcotest.check Alcotest.bool "host config is absent" false
     (Option.is_some response.host_config)
 
+(* One fixture for both arms of the Mounts encoding, differing only in
+   [mounts]: the absence arm below is only evidence while the same record, given
+   mounts, puts a Mounts key on the wire. *)
+let workload_host_config ~(mounts : Docker.mount list option) :
+    Docker.host_config =
+  {
+    binds = None;
+    port_bindings = None;
+    network_mode = None;
+    restart_policy =
+      Some { Docker.name = "unless-stopped"; maximum_retry_count = None };
+    mounts;
+  }
+
+let test_host_config_encodes_bind_mounts () =
+  let mounts : Docker.mount list =
+    [
+      {
+        type_ = "bind";
+        source = "/srv/comalito/invoices";
+        target = "/app/invoices";
+        read_only = false;
+      };
+      {
+        type_ = "bind";
+        source = "/etc/comalito";
+        target = "/app/config";
+        read_only = true;
+      };
+    ]
+  in
+  Alcotest.check Alcotest.string "host config body"
+    ({|{"RestartPolicy":{"Name":"unless-stopped"},"Mounts":[|}
+   ^ {|{"Type":"bind","Source":"/srv/comalito/invoices","Target":"/app/invoices","ReadOnly":false},|}
+   ^ {|{"Type":"bind","Source":"/etc/comalito","Target":"/app/config","ReadOnly":true}]}|}
+    )
+    (Yojson.Safe.to_string
+       (Docker.host_config_to_yojson
+          (workload_host_config ~mounts:(Some mounts))))
+
+let test_host_config_without_mounts_has_no_mounts_key () =
+  Alcotest.check Alcotest.string "host config body"
+    {|{"RestartPolicy":{"Name":"unless-stopped"}}|}
+    (Yojson.Safe.to_string
+       (Docker.host_config_to_yojson (workload_host_config ~mounts:None)))
+
+(* HostConfig.Mounts as the Engine reports it back, captured from Engine 29.8.1
+   (API 1.56) on 2026-09-27 by inspecting a container created with one
+   read-write and one read-only bind mount [observed]. The read-write entry
+   carries no ReadOnly key at all: the Engine omits a false one. A decode that
+   required the key would fail every inspect of a container Bondi mounted
+   read-write, and the blue-green health wait inspects exactly that container.
+   The BindOptions key is not from that capture: it stands for any key of a
+   mount entry this client does not model, which must not fail the decode. *)
+let host_config_with_reported_mounts : string =
+  {|,
+        "HostConfig": {
+          "NetworkMode": "bridge",
+          "RestartPolicy": {"Name": "unless-stopped", "MaximumRetryCount": 0},
+          "Mounts": [
+            {"Type": "bind", "Source": "/srv/comalito/invoices",
+             "Target": "/app/invoices"},
+            {"Type": "bind", "Source": "/etc/comalito", "Target": "/app/config",
+             "ReadOnly": true, "BindOptions": {"Propagation": "rprivate"}}
+          ]
+        }|}
+
+let mount_testable = Server_test_helpers.mount_testable
+
+let test_inspect_response_decodes_reported_mounts () =
+  let json =
+    Yojson.Safe.from_string
+      (inspect_payload ~host_config:host_config_with_reported_mounts)
+  in
+  let response = Docker.inspect_response_of_yojson json |> unwrap in
+  match response.host_config with
+  | None -> Alcotest.fail "inspect response carries no host config"
+  | Some host_config ->
+      Alcotest.check
+        (Alcotest.option (Alcotest.list mount_testable))
+        "reported mounts"
+        (Some
+           [
+             {
+               type_ = "bind";
+               source = "/srv/comalito/invoices";
+               target = "/app/invoices";
+               read_only = false;
+             };
+             {
+               type_ = "bind";
+               source = "/etc/comalito";
+               target = "/app/config";
+               read_only = true;
+             };
+           ])
+        host_config.mounts
+
 let test_update_container_serialises_the_restart_policy () =
   let request : Docker.update_container_request =
     {
@@ -314,6 +412,15 @@ let () =
             test_inspect_response_without_host_config_decodes;
           Alcotest.test_case "update serialises the policy" `Quick
             test_update_container_serialises_the_restart_policy;
+        ] );
+      ( "mounts",
+        [
+          Alcotest.test_case "host config encodes bind mounts" `Quick
+            test_host_config_encodes_bind_mounts;
+          Alcotest.test_case "host config without mounts has no Mounts key"
+            `Quick test_host_config_without_mounts_has_no_mounts_key;
+          Alcotest.test_case "inspect decodes mounts as the Engine reports them"
+            `Quick test_inspect_response_decodes_reported_mounts;
         ] );
       ( "request bound",
         [

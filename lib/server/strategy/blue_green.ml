@@ -15,6 +15,10 @@ type blue_green_config = {
   container_name : string;
   temp_container_name : string;
   config : Docker.Client.container_config;
+  host_config : Docker.Client.host_config;
+      (* One value for both [RunNewContainer] sites, so the colour started
+         beside a running workload and the one started on a first deploy
+         cannot mount differently. *)
   networking_conf : Docker.Client.networking_config;
   network_name : string;
   poll_interval : float;
@@ -53,14 +57,6 @@ let ( let* ) = Result.bind
 
 let plan (config : blue_green_config) (context : blue_green_context) :
     deploy_plan =
-  let host_config : Docker.Client.host_config =
-    {
-      binds = None;
-      port_bindings = None;
-      network_mode = None;
-      restart_policy = Some Docker.Restart_policy.bondi_managed;
-    }
-  in
   let cleanup =
     match context.orphaned_new_container with
     | Some container ->
@@ -75,7 +71,7 @@ let plan (config : blue_green_config) (context : blue_green_context) :
             {
               container_name = config.temp_container_name;
               config = config.config;
-              host_config;
+              host_config = config.host_config;
               networking_conf = config.networking_conf;
             };
           WaitForHealthy
@@ -100,7 +96,7 @@ let plan (config : blue_green_config) (context : blue_green_context) :
             {
               container_name = config.container_name;
               config = config.config;
-              host_config;
+              host_config = config.host_config;
               networking_conf = config.networking_conf;
             };
           WaitForHealthy
@@ -250,8 +246,11 @@ let gather_context ~client ~net ~container_name ~temp_container_name :
 (* Entry point                                                               *)
 (* ------------------------------------------------------------------------- *)
 
-let deploy ~clock ~client ~net ~(input : Simple.deploy_input) :
-    (unit, string) result =
+(** The strategy's whole configuration, read purely from the deploy input.
+    Separate from [deploy] so that what a switch runs with, its host config
+    included, is reachable without a Docker Engine. *)
+let config_of_input (input : Simple.deploy_input) :
+    (blue_green_config, string) result =
   let container_name =
     match input.service_name with
     | Some name -> name
@@ -268,20 +267,25 @@ let deploy ~clock ~client ~net ~(input : Simple.deploy_input) :
   let health_timeout =
     Option.value ~default:default_health_timeout input.health_timeout
   in
-  let config : blue_green_config =
+  Ok
     {
       container_name;
       temp_container_name;
       config = service_cfg;
+      host_config = Workload_host_config.of_volumes input.volumes;
       networking_conf = Simple.default_networking_config;
       network_name = Bondi_common.Defaults.network_name;
       poll_interval;
       health_timeout;
       drain_grace_period;
     }
-  in
+
+let deploy ~clock ~client ~net ~(input : Simple.deploy_input) :
+    (unit, string) result =
+  let* config = config_of_input input in
   let* context =
-    gather_context ~client ~net ~container_name ~temp_container_name
+    gather_context ~client ~net ~container_name:config.container_name
+      ~temp_container_name:config.temp_container_name
   in
   let deploy_plan = plan config context in
   interpret ~clock ~client ~net deploy_plan

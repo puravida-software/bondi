@@ -126,6 +126,7 @@ let config : Config_file.t =
           health_timeout = None;
           poll_interval = None;
           logs = None;
+          volumes = None;
         };
     bondi_server = { version = "0.10.3"; bind_address = None; api_token = None };
     traefik = None;

@@ -2,6 +2,7 @@ open Alcotest
 module Blue_green = Bondi_server__Strategy__Blue_green
 module Docker = Bondi_server__Docker__Client
 module Simple = Bondi_server__Strategy__Simple
+module Workload_host_config = Bondi_server__Strategy__Workload_host_config
 
 let traefik_labels =
   [
@@ -29,6 +30,7 @@ let base_config =
         labels = Some traefik_labels;
         exposed_ports = None;
       };
+    host_config = Workload_host_config.of_volumes None;
     networking_conf = Simple.default_networking_config;
     network_name = "bondi-network";
     poll_interval = 1.0;
@@ -248,6 +250,120 @@ let test_run_new_container_carries_restart_policy () =
   check_restart_policy_for "replacing a running workload" context_with_workload;
   check_restart_policy_for "no existing workload" empty_context
 
+(* Volumes
+
+   The config below is assembled from a deploy input by the same function
+   [Blue_green.deploy] uses, so these cases see the host config the strategy
+   actually runs with rather than one this file built. *)
+
+let mount_testable = Server_test_helpers.mount_testable
+let host_config_testable = Server_test_helpers.host_config_testable
+let bind_mount = Test_helpers.bind_mount
+
+let input_with_volumes : Simple.deploy_input =
+  {
+    service_name = Some "my-service";
+    image = Some "myapp:v1";
+    port = Some 8080;
+    registry_user = None;
+    registry_pass = None;
+    env_vars = None;
+    traefik_domain_name = Some "example.com";
+    traefik_image = None;
+    traefik_acme_email = None;
+    force_traefik_redeploy = None;
+    cron_jobs = None;
+    drain_grace_period = None;
+    deployment_strategy = Some "blue-green";
+    health_timeout = None;
+    poll_interval = None;
+    logs = None;
+    volumes =
+      Some
+        [
+          bind_mount ~host:"/srv/comalito/invoices" ~container:"/app/invoices"
+            ~read_only:false;
+          bind_mount ~host:"/etc/comalito" ~container:"/app/config"
+            ~read_only:true;
+        ];
+  }
+
+let declared_mounts : Docker.mount list =
+  [
+    {
+      type_ = "bind";
+      source = "/srv/comalito/invoices";
+      target = "/app/invoices";
+      read_only = false;
+    };
+    {
+      type_ = "bind";
+      source = "/etc/comalito";
+      target = "/app/config";
+      read_only = true;
+    };
+  ]
+
+let new_container_host_config msg input context =
+  match Blue_green.config_of_input input with
+  | Error e -> Alcotest.fail (msg ^ ": config refused: " ^ e)
+  | Ok config -> (
+      let plan = Blue_green.plan config context in
+      match extract_new_container_host_config plan.success_path with
+      | None -> Alcotest.fail (msg ^ ": expected a RunNewContainer action")
+      | Some host_config -> host_config)
+
+(* The temp-container site, taken when a workload is already running: the
+   incoming colour mounts what the outgoing one does. *)
+let test_new_container_carries_mounts_when_replacing_a_workload () =
+  check
+    (option (list mount_testable))
+    "incoming colour's mounts" (Some declared_mounts)
+    (new_container_host_config "replacing" input_with_volumes
+       context_with_workload)
+      .mounts
+
+(* The direct-name site, taken when nothing is running yet. *)
+let test_new_container_carries_mounts_on_first_deploy () =
+  check
+    (option (list mount_testable))
+    "first container's mounts" (Some declared_mounts)
+    (new_container_host_config "first deploy" input_with_volumes empty_context)
+      .mounts
+
+let simple_workload_host_config (input : Simple.deploy_input) =
+  let context = { Simple.current_traefik = None; current_workload = None } in
+  match Simple.plan input context with
+  | Error e -> Alcotest.fail ("simple plan failed: " ^ e)
+  | Ok actions -> (
+      match
+        List.find_map
+          (function
+            | Simple.RunWorkload { host_config; _ } -> Some host_config
+            | Simple.CreateNetwork _
+            | Simple.EnsureTraefik _
+            | Simple.StopAndRemoveContainer _
+            | Simple.PullImage _ ->
+                None)
+          actions
+      with
+      | None -> Alcotest.fail "expected a RunWorkload action"
+      | Some host_config -> host_config)
+
+(* For one deploy input, the simple strategy's container and both blue-green
+   sites get the same host config. The first check is the affirmative arm:
+   equality between two configs that both carry no mounts would prove nothing. *)
+let test_simple_and_blue_green_mount_identically () =
+  let simple = simple_workload_host_config input_with_volumes in
+  check
+    (option (list mount_testable))
+    "simple carries the declared mounts" (Some declared_mounts) simple.mounts;
+  check host_config_testable "blue-green replacing a workload" simple
+    (new_container_host_config "replacing" input_with_volumes
+       context_with_workload);
+  check host_config_testable "blue-green first deploy" simple
+    (new_container_host_config "first deploy" input_with_volumes empty_context)
+
 let test_plan_orphan_cleanup () =
   let orphan =
     Server_test_helpers.mk_container ~id:"orphan-id" ~image:"myapp:v0.8"
@@ -353,6 +469,15 @@ let () =
         [
           test_case "new container carries the policy" `Quick
             test_run_new_container_carries_restart_policy;
+        ] );
+      ( "volumes",
+        [
+          test_case "new container carries mounts when replacing a workload"
+            `Quick test_new_container_carries_mounts_when_replacing_a_workload;
+          test_case "new container carries mounts on first deploy" `Quick
+            test_new_container_carries_mounts_on_first_deploy;
+          test_case "simple and blue-green mount identically" `Quick
+            test_simple_and_blue_green_mount_identically;
         ] );
       ( "orphan cleanup",
         [

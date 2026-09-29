@@ -8,6 +8,12 @@ let sample_config_yaml project_name =
   registry_pass: "{{REGISTRY_PASS}}"
   env_vars:
     ENV: "prod"
+  # Optional: bind-mount host directories into the service. Each host
+  # directory must already exist on the server; bondi does not create it.
+  # volumes:
+  #   - host: /srv/data
+  #     container: /data
+  #     read_only: false
   # Every server needs an ssh block, and `user` is the only field it must
   # carry. There are three ways to authenticate and the first is what this
   # file starts with:
