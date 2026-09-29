@@ -1,15 +1,17 @@
 (** Whether the orchestrator a box is running is new enough for what the client
     is about to ask of it.
 
-    There are two floors here, not one, because there are two capabilities and
-    they arrived a release apart. Reading them as one number refuses boxes that
-    work, or accepts boxes that answer with silence; both have happened.
-    {!answers_command_surface} names the earlier and weaker one -- a binary with
-    subcommands, which is what a command reaching the box over [docker exec]
-    needs. {!writes_exec_lines} names the later and stronger one -- a server
-    that writes the exec-shaped cron line and the run file beside it. A box can
-    satisfy the first and not the second, and that is the normal case for one
-    release, not a corner.
+    There is more than one floor here because there is more than one capability,
+    and each arrived in a release of its own. Reading them as one number refuses
+    boxes that work, or accepts boxes that answer with silence; both have
+    happened. {!answers_command_surface} names the earlier and weaker one -- a
+    binary with subcommands, which is what a command reaching the box over
+    [docker exec] needs. {!writes_exec_lines} names the later and stronger one
+    -- a server that writes the exec-shaped cron line and the run file beside
+    it. A box can satisfy the first and not the second, and that is the normal
+    case for one release, not a corner. {!mounts_volumes} names a third and
+    highest floor, for a service that mounts volumes, which a box can miss while
+    clearing the other two.
 
     A generated cron line runs [bondi-server run] inside the orchestrator
     container. That subcommand arrived in 0.15.0; an older image ignores its
@@ -96,3 +98,25 @@ val answers_command_surface : string -> (unit, string) result
     the arguments and starts serving, so the caller waits on a command that was
     never going to answer. That is what this gate is taken before the call to
     avoid. *)
+
+val minimum_for_volumes : string
+(** The oldest orchestrator release whose server mounts a service's volumes.
+
+    The highest of the three floors: the release that carries volumes carries
+    the subcommands and the exec-line writer by construction. Named for the same
+    reason the others are -- so the caller reporting the requirement and the
+    caller deciding against it cannot drift apart. *)
+
+val mounts_volumes : string -> (unit, string) result
+(** [mounts_volumes version] decides whether an orchestrator reporting [version]
+    is one whose server reads the volumes a deploy payload declares and mounts
+    them into the service's container.
+
+    An older server reads its payload strictly, so a payload carrying volumes is
+    refused as a whole on the box. That failure is loud, but it arrives after
+    the payload has been sent and it names a field rather than a release. This
+    gate is taken before anything is sent, and refuses in the same shape as
+    {!writes_exec_lines}: what the box reported, what is required, and the
+    command that fixes it. The comparison is the same ordering against the same
+    reading of a version, so an empty answer, a [latest] tag, or a fork's image
+    name is a refusal rather than a pass. *)

@@ -143,6 +143,7 @@ let minimal_user_service =
     Config_file.health_timeout = None;
     Config_file.poll_interval = None;
     Config_file.logs = None;
+    Config_file.volumes = None;
   }
 
 let make_config ?(alloy = None) ?(managed_containers = None) ~user_service

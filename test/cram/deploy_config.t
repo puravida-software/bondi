@@ -172,3 +172,52 @@ gate and the second arm stops being 0.
   $ grep -c 'cron job nightly-report on server' refused.log
   0
   [1]
+
+A volume whose host path is relative refuses the file when it is read, so the
+run stops before any server is contacted. The ssh put first on PATH here only
+writes down each call it gets. The two runs below differ in the host path
+alone: the absolute one reaches ssh, which is what makes the empty log of the
+relative one mean the run never got that far.
+
+  $ mkdir -p "$ROOT/logging-bin"
+  $ cat > "$ROOT/logging-bin/ssh" <<'STUB'
+  > #!/bin/sh
+  > echo "$@" >> "$SSH_ARGV_LOG"
+  > STUB
+  $ chmod +x "$ROOT/logging-bin/ssh"
+  $ volume_config() {
+  >   cat > bondi.yaml <<EOF
+  > service:
+  >   name: web
+  >   image: myimg
+  >   port: 8080
+  >   env_vars: {}
+  >   volumes:
+  >     - host: $1
+  >       container: /data/invoices
+  >       read_only: false
+  >   servers:
+  >     - ip_address: 127.0.0.1
+  >       ssh:
+  >         user: deploy
+  >         private_key_contents: "not-a-real-key"
+  >         private_key_pass: ""
+  > bondi_server:
+  >   version: "0.20.0"
+  > EOF
+  > }
+
+  $ volume_config srv/comalito/invoices
+  $ rm -f "$ROOT/relative.argv" && touch "$ROOT/relative.argv"
+  $ SSH_ARGV_LOG="$ROOT/relative.argv" PATH="$ROOT/logging-bin:$PATH" bondi-client deploy web:v1 2>&1
+  Deployment process initiated...
+  Error reading configuration: invalid bondi.yaml: volume host path "srv/comalito/invoices" is not absolute: it must start with /
+  [1]
+  $ wc -l < "$ROOT/relative.argv"
+  0
+
+  $ volume_config /srv/comalito/invoices
+  $ rm -f "$ROOT/absolute.argv" && touch "$ROOT/absolute.argv"
+  $ SSH_ARGV_LOG="$ROOT/absolute.argv" PATH="$ROOT/logging-bin:$PATH" bondi-client deploy web:v1 > absolute.log 2>&1 || :
+  $ test -s "$ROOT/absolute.argv" && echo ssh was called
+  ssh was called

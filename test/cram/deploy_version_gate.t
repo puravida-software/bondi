@@ -1,8 +1,9 @@
 The version a box reports for its orchestrator is what decides whether a deploy
 is sent to it at all, and the whole of that decision runs against a real
 [docker ps] read over a real ssh invocation. What is stubbed here is the box,
-not the reading of it: the stub answers the listing and the deploy and nothing
-else, and every arm below differs only in what the listing says.
+not the reading of it: the stub answers the listing, the host-path check and
+the deploy and nothing else, and every arm below differs only in what the
+listing says.
 
 The fixtures are removed first so the file is re-runnable in a directory a
 previous run has already written to.
@@ -10,14 +11,17 @@ previous run has already written to.
   $ ROOT="$PWD"
   $ rm -f ssh-argv.log refused.log proceeded.log unreadable.log empty.log
 
-A stub ssh that answers two commands and records what it was asked. The two
-arms are disjoint by construction: the listing's pattern is anchored at the
-start of the command and the deploy's is the whole of it, so neither can
-swallow the other. Anything else falls through to *) and comes back empty --
-which is a failure and not an unstubbed command, so a run that reaches a third
-remote command fails here rather than passing quietly.
+A stub ssh that answers three commands and records what it was asked. The
+arms are disjoint by construction: the listing's and the host-path check's
+patterns are anchored at the start of the command and the deploy's is the whole
+of it, so none can swallow another. The check is answered as a box on which
+every path is there; what it says when one is not is its own session's to
+show. Anything else falls through to *) and comes back empty -- which is a
+failure and not an unstubbed command, so a run that reaches a fourth remote
+command fails here rather than passing quietly.
 
 $ORCHESTRATOR_TAG is what the box reports its orchestrator image to be.
+$DEPLOY_PAYLOAD_LOG, when set, is where the deploy's stdin is kept.
 $LISTING_FAILS makes the listing exit non-zero instead, which is the box
 refusing to answer rather than answering something old.
 
@@ -31,8 +35,10 @@ refusing to answer rather than answering something old.
   >   'docker ps -a --filter name=^/bondi-orchestrator$'*)
   >     if [ -n "$LISTING_FAILS" ]; then echo 'permission denied' >&2; exit 7; fi
   >     echo "mlopez1506/bondi-server:${ORCHESTRATOR_TAG}" ;;
+  >   '[ -e '*)
+  >     echo 'BONDI_VOLUME_CHECK_DONE' ;;
   >   'docker exec -i bondi-orchestrator bondi-server deploy')
-  >     cat > /dev/null
+  >     cat > "${DEPLOY_PAYLOAD_LOG:-/dev/null}"
   >     echo 'deployed' ;;
   >   *) : ;;
   > esac
@@ -131,3 +137,91 @@ having been refused and not the pattern being wrong.
   1
   $ cat ssh-argv.log
   docker ps -a --filter name=^/bondi-orchestrator$ --format '{{.Image}}'
+
+The same service, now mounting a volume. A box that clears every other floor
+but predates volumes is refused naming the release that mounts them, and the
+listing that refused it is still the only thing the box was asked -- so the
+payload carrying the volume never left.
+
+  $ rm -f volumes-refused.log volumes-proceeded.log
+  $ cat > bondi.yaml <<'EOF'
+  > service:
+  >   name: web
+  >   image: acme/web
+  >   port: 8080
+  >   env_vars: {}
+  >   volumes:
+  >     - host: /srv/web/data
+  >       container: /data
+  >       read_only: false
+  >   servers:
+  >     - ip_address: 127.0.0.1
+  >       port: 9
+  >       ssh:
+  >         user: deploy
+  >         private_key_contents: "not-a-real-key"
+  >         private_key_pass: ""
+  > bondi_server:
+  >   version: "0.20.0"
+  > EOF
+  $ : > ssh-argv.log
+  $ ORCHESTRATOR_TAG=0.22.0 bondi-client deploy web:v1 > volumes-refused.log 2>&1
+  [1]
+  $ cat volumes-refused.log
+  Deployment process initiated...
+  Error on server 127.0.0.1: the server is running bondi-server 0.22.0, but the service declares volumes, which requires 0.23.0 or later. An older server does not know the field and refuses the whole deploy. Set bondi_server.version in bondi.yaml to 0.23.0 or later, run bondi setup, then deploy again.
+  $ cat ssh-argv.log
+  docker ps -a --filter name=^/bondi-orchestrator$ --format '{{.Image}}'
+
+The same file against the release that mounts volumes: the gate passes, the
+box is asked whether the path is there, and the deploy is posted, which is what
+makes the refusal above the volume's and not the fixture's.
+
+  $ : > ssh-argv.log
+  $ ORCHESTRATOR_TAG=0.23.0 bondi-client deploy web:v1 > volumes-proceeded.log 2>&1
+  $ cat volumes-proceeded.log
+  Deployment process initiated...
+  Deploying to server: 127.0.0.1
+  Deployment initiated on server 127.0.0.1
+  $ cat ssh-argv.log
+  docker ps -a --filter name=^/bondi-orchestrator$ --format '{{.Image}}'
+  [ -e '/srv/web/data' ] || { sudo -n true 2>/dev/null && { sudo -n test -e '/srv/web/data' 2>/dev/null || printf '%s%s\n' 'BONDI_VOLUME_MISSING ' '/srv/web/data'; }; } || printf '%s%s\n' 'BONDI_VOLUME_UNCHECKED ' '/srv/web/data'; printf '%s\n' BONDI_VOLUME_CHECK_DONE; exit 0
+  docker exec -i bondi-orchestrator bondi-server deploy
+
+The paired arm the refusal needs at the other end: the same file against the
+release just below the one that mounts volumes is refused, and a service that
+declares none against that same release is not. It proceeds, and the payload it
+posts carries no volumes key, so a box that would refuse the field never
+receives it.
+
+  $ cat > bondi.yaml <<'EOF'
+  > service:
+  >   name: web
+  >   image: acme/web
+  >   port: 8080
+  >   env_vars: {}
+  >   servers:
+  >     - ip_address: 127.0.0.1
+  >       port: 9
+  >       ssh:
+  >         user: deploy
+  >         private_key_contents: "not-a-real-key"
+  >         private_key_pass: ""
+  > bondi_server:
+  >   version: "0.20.0"
+  > EOF
+  $ : > ssh-argv.log
+  $ rm -f novolumes.log novolumes-payload.json
+  $ DEPLOY_PAYLOAD_LOG=novolumes-payload.json ORCHESTRATOR_TAG=0.22.0 bondi-client deploy web:v1 > novolumes.log 2>&1
+  $ cat novolumes.log
+  Deployment process initiated...
+  Deploying to server: 127.0.0.1
+  Deployment initiated on server 127.0.0.1
+  $ cat ssh-argv.log
+  docker ps -a --filter name=^/bondi-orchestrator$ --format '{{.Image}}'
+  docker exec -i bondi-orchestrator bondi-server deploy
+  $ grep -c '"image":"acme/web:v1"' novolumes-payload.json
+  1
+  $ grep -c 'volumes' novolumes-payload.json
+  0
+  [1]

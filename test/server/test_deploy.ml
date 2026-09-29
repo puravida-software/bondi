@@ -26,6 +26,7 @@ let minimal_input =
     health_timeout = None;
     poll_interval = None;
     logs = None;
+    volumes = None;
   }
 
 (* The action carries no name, so the one network it may ever create is printed
@@ -622,6 +623,109 @@ let test_deploy_input_logs_flag () =
     "logs defaults to None" None decoded2.logs
 
 (* ------------------------------------------------------------------------- *)
+(* Volumes on the wire                                                       *)
+(* ------------------------------------------------------------------------- *)
+
+let mount_fields = Test_helpers.mount_fields
+
+(* The body is what the client's own encoder emits for a payload declaring two
+   mounts, so the decoder is asked to read the client's wire shape rather than
+   one this file wrote. *)
+let test_decode_input_accepts_volumes () =
+  let mount = Test_helpers.bind_mount in
+  let payload : Client_deploy.deploy_payload =
+    {
+      service_name = Some "my-service";
+      image = Some "myapp:v1";
+      port = Some 8080;
+      env_vars = [];
+      traefik_domain_name = Some "example.com";
+      traefik_image = None;
+      traefik_acme_email = None;
+      registry_user = None;
+      registry_pass = None;
+      force_traefik_redeploy = None;
+      cron_jobs = None;
+      drain_grace_period = None;
+      deployment_strategy = None;
+      health_timeout = None;
+      poll_interval = None;
+      logs = None;
+      volumes =
+        Some
+          [
+            mount ~host:"/srv/comalito/invoices" ~container:"/app/invoices"
+              ~read_only:false;
+            mount ~host:"/etc/comalito" ~container:"/app/config" ~read_only:true;
+          ];
+    }
+  in
+  let body =
+    Yojson.Safe.to_string (Client_deploy.deploy_payload_to_yojson payload)
+  in
+  match Deploy.decode_input body with
+  | Error e ->
+      Alcotest.failf "the client's payload was refused: %s"
+        (Handler_error.message e)
+  | Ok (input : Simple.deploy_input) ->
+      Alcotest.(check (option (list (triple string string bool))))
+        "both mounts, in order, with their flags"
+        (Some
+           [
+             ("/srv/comalito/invoices", "/app/invoices", false);
+             ("/etc/comalito", "/app/config", true);
+           ])
+        (Option.map (List.map mount_fields) input.volumes)
+
+(* A malformed volume is refused as the caller's mistake. The message says
+   which field was at fault but not what it held: a refusal's message never
+   carries a value from the payload, on any error branch. *)
+let check_volume_refused ~what ~leaked body =
+  match Deploy.decode_input body with
+  | Ok _ -> Alcotest.failf "%s was accepted" what
+  | Error (Handler_error.Orchestrator_failure msg) ->
+      Alcotest.failf
+        "a malformed volume is the caller's mistake, but it answered \
+         Orchestrator_failure: %s"
+        msg
+  | Error (Handler_error.Not_ready msg) ->
+      Alcotest.failf
+        "a malformed volume is the caller's mistake, but it answered \
+         Not_ready: %s"
+        msg
+  | Error (Handler_error.Invalid_request msg) ->
+      Alcotest.(check bool)
+        (what ^ ": the message names the field at fault")
+        true
+        (Bondi_common.String_utils.contains ~needle:"volumes" msg);
+      List.iter
+        (fun needle ->
+          Alcotest.(check bool)
+            (what ^ ": the message does not echo " ^ needle)
+            false
+            (Bondi_common.String_utils.contains ~needle msg))
+        leaked
+
+let test_decode_input_rejects_relative_volume () =
+  check_volume_refused ~what:"a relative host path" ~leaked:[ "comalito" ]
+    {|{"service_name":"my-service","volumes":[{"host":"srv/comalito/invoices","container":"/app/invoices","read_only":false}]}|}
+
+let test_decode_input_rejects_duplicate_container_path () =
+  check_volume_refused ~what:"a duplicate container path"
+    ~leaked:[ "/app/dupe"; "comalito" ]
+    {|{"service_name":"my-service","volumes":[{"host":"/srv/comalito/a","container":"/app/dupe","read_only":false},{"host":"/srv/comalito/b","container":"/app/dupe","read_only":true}]}|}
+
+let test_decode_input_rejects_unknown_volume_key () =
+  check_volume_refused ~what:"an unknown entry key"
+    ~leaked:[ "comalito"; "/app/invoices"; "sekrit_key" ]
+    {|{"service_name":"my-service","volumes":[{"host":"/srv/comalito/invoices","container":"/app/invoices","read_only":false,"sekrit_key":true}]}|}
+
+let test_decode_input_rejects_control_character_volume () =
+  check_volume_refused ~what:"a control character in a path"
+    ~leaked:[ "comalito"; "/app/invoices" ]
+    {|{"service_name":"my-service","volumes":[{"host":"/srv/comalito\u0001/invoices","container":"/app/invoices","read_only":false}]}|}
+
+(* ------------------------------------------------------------------------- *)
 (* Traefik restart policy                                                    *)
 (* ------------------------------------------------------------------------- *)
 
@@ -820,6 +924,19 @@ let () =
         [
           Alcotest.test_case "deploy_input logs flag" `Quick
             test_deploy_input_logs_flag;
+        ] );
+      ( "volumes",
+        [
+          Alcotest.test_case "decode input accepts volumes" `Quick
+            test_decode_input_accepts_volumes;
+          Alcotest.test_case "decode input rejects a relative volume" `Quick
+            test_decode_input_rejects_relative_volume;
+          Alcotest.test_case "decode input rejects a duplicate container path"
+            `Quick test_decode_input_rejects_duplicate_container_path;
+          Alcotest.test_case "decode input rejects an unknown volume key" `Quick
+            test_decode_input_rejects_unknown_volume_key;
+          Alcotest.test_case "decode input rejects a control character" `Quick
+            test_decode_input_rejects_control_character_volume;
         ] );
       ( "strategy dispatch",
         [

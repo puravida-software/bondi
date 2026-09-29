@@ -160,6 +160,55 @@ let test_an_unreadable_answer_is_a_refusal () =
         (unanswered version))
     [ ""; "0" ]
 
+let mounted version =
+  accepted_by Server_version.mounts_volumes ~gate_name:"mounts_volumes" version
+
+let unmounted version =
+  refused_by Server_version.mounts_volumes ~gate_name:"mounts_volumes" version
+
+(* The third floor, and the highest: the release whose server reads a service's
+   volumes. 0.22.x is the case that matters, because it clears both other floors
+   -- it runs subcommands and writes exec lines -- and it still cannot mount a
+   volume. It is refused naming both numbers and the command that fixes it, and
+   so is the rest of 0.22 and everything older. *)
+let test_mounts_volumes_refuses_0_22_naming_0_23_0 () =
+  List.iter
+    (fun version ->
+      let msg = unmounted version in
+      names ~what:"the version it refused" version msg;
+      names ~what:"what is required" "0.23.0" msg;
+      names ~what:"the command that fixes it" "bondi setup" msg)
+    [ "0.22.0"; "0.22.9"; "0.16.0"; "0.15.0" ];
+  answered "0.22.0";
+  accepted "0.22.0"
+
+(* The boundary from the other side, so the case above pins the floor and not
+   only a gate that refuses everything. *)
+let test_mounts_volumes_accepts_0_23_0 () =
+  Alcotest.(check string)
+    "the floor is the release that carries volumes" "0.23.0"
+    Server_version.minimum_for_volumes;
+  mounted Server_version.minimum_for_volumes;
+  mounted "0.23.0";
+  mounted "0.23.4";
+  mounted "0.100.0";
+  mounted "1.0.0"
+
+(* An answer with no ordering in it is no evidence of a server that mounts
+   volumes, so it is a refusal, and it still tells the operator what is
+   required. A fork's image is quoted back because it is the only thing they can
+   recognise. *)
+let test_mounts_volumes_unreadable_version_refuses () =
+  names ~what:"what the box reported" "latest" (unmounted "latest");
+  let image = "ghcr.io/acme/bondi-server:2024-06-01" in
+  names ~what:"the fork's image" image
+    (unmounted (Server_version.orchestrator_version_of_image image));
+  List.iter
+    (fun version ->
+      names ~what:"what is required" Server_version.minimum_for_volumes
+        (unmounted version))
+    [ ""; "0"; "latest" ]
+
 let () =
   Alcotest.run "Server_version"
     [
@@ -196,5 +245,14 @@ let () =
             test_a_box_at_the_command_surface_floor_is_accepted_while_below_the_exec_line_floor;
           Alcotest.test_case "an unreadable answer is a refusal" `Quick
             test_an_unreadable_answer_is_a_refusal;
+        ] );
+      ( "mounts_volumes",
+        [
+          Alcotest.test_case "0.22 is refused, naming 0.23.0" `Quick
+            test_mounts_volumes_refuses_0_22_naming_0_23_0;
+          Alcotest.test_case "0.23.0 is accepted" `Quick
+            test_mounts_volumes_accepts_0_23_0;
+          Alcotest.test_case "an unreadable version is a refusal" `Quick
+            test_mounts_volumes_unreadable_version_refuses;
         ] );
     ]

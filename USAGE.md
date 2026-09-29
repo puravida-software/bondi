@@ -13,6 +13,7 @@ The example service throughout this guide is a web API called `my-api`, publishe
   - [SSH configuration](#ssh-configuration)
   - [Environment variables](#environment-variables)
   - [Private registries](#private-registries)
+  - [Persistent data (volumes)](#persistent-data-volumes)
   - [Set up the server](#set-up-the-server)
   - [Deploy](#deploy)
   - [Check the status](#check-the-status)
@@ -93,6 +94,7 @@ Key fields:
 | `service.name` | Name for the Docker container on the server. Also used as the deploy target in `bondi deploy my-api:v1.0.0`. |
 | `service.image` | Base image **without a tag**. The tag is provided at deploy time. |
 | `service.port` | The port your application listens on inside the container. Traefik routes HTTPS traffic to this port. |
+| `service.volumes` | Optional. Host directories to mount into the service's container so that what it writes survives a deploy. Each entry has `host`, `container` and `read_only`. Omit it for no mounts. See [Persistent data (volumes)](#persistent-data-volumes). |
 | `traefik.domain_name` | Your domain. Traefik will request a TLS certificate from Let's Encrypt and route traffic for both `my-api.example.com` and `www.my-api.example.com`. |
 | `traefik.acme_email` | Email for Let's Encrypt certificate notifications. |
 | `bondi_server.version` | Version of the bondi-orchestrator image to run on the server. |
@@ -219,6 +221,84 @@ export REGISTRY_PASS="ghp_xxxxxxxxxxxxxxxxxxxx"
 ```
 
 Bondi uses these credentials to `docker pull` the image on the server. For GitHub Container Registry, use a personal access token with `read:packages` scope as the password.
+
+### Persistent data (volumes)
+
+Every deploy replaces the service's container, so anything the service writes inside it is lost at the next deploy. To keep it, mount a host directory into the container with `volumes`:
+
+```yaml
+service:
+  name: my-api
+  image: ghcr.io/acme/my-api
+  port: 8080
+  env_vars:
+    ENV: "production"
+  volumes:
+    - host: /srv/my-api/uploads
+      container: /app/uploads
+      read_only: false
+    - host: /srv/my-api/reference
+      container: /app/reference
+      read_only: true
+  servers:
+    - ip_address: "203.0.113.10"
+      ssh:
+        user: root
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `host` | yes | Absolute path on the server. It must already exist when you deploy — see [Create the host directory first](#create-the-host-directory-first). |
+| `container` | yes | Absolute path inside the container. It may not be `/`, and no two entries may use the same one. |
+| `read_only` | yes | `true` to mount it read-only, `false` to let the container write to it. There is no default, because the choice changes what the container can do. |
+
+Both paths must be absolute and normalised: no `.` or `..` segment, no doubled `/`, no trailing `/`, and no control characters. A path that breaks a rule, a missing field, or an unknown field refuses the whole `bondi.yaml` when it is read, before any server is contacted, and the error names the path or entry at fault:
+
+```
+Error reading configuration: invalid bondi.yaml: volume host path "srv/my-api/uploads" is not absolute: it must start with /
+```
+
+The mounts belong to the service's container only. Every container Bondi starts for the service gets the same mounts under both strategies. Cron job containers and managed containers get none.
+
+#### Create the host directory first
+
+Bondi never creates, chowns or chmods a host path. Before the first deploy that declares a volume, create each `host` directory on every server the service deploys to, owned by the user the container runs as:
+
+```bash
+sudo mkdir -p /srv/my-api/uploads && sudo chown 1000:1000 /srv/my-api/uploads
+```
+
+Replace `1000:1000` with the uid and gid your application runs as inside the container.
+
+Bondi leaves this to you for three reasons. It cannot know which user the container runs as, because image metadata is often wrong. The owner of a directory is the host's policy, and the server may run other things besides your service. And a directory Bondi created for you would turn a typo such as `/srv/my-api/upload` into a silently empty directory, instead of a refused deploy.
+
+#### A missing host path refuses the deploy
+
+Before it sends a deploy, Bondi checks over SSH that every `host` path exists on each server. It tests each path as the SSH user, and then with `sudo -n`, because Docker checks the path as root. If the SSH user cannot see a path and the server refuses `sudo -n`, the path cannot be checked and the deploy is refused as unchecked, not reported missing. If a path is missing on any server, the deploy is refused before anything changes on any server, so the running container keeps serving. The error names the server and every missing path:
+
+```
+Error on server 203.0.113.10: the service mounts host paths that do not exist on the server: "/srv/my-api/uploads". Bondi does not create them: create each one, owned by the user the container runs as, then deploy again.
+```
+
+A check that could not run, for example because the server was not reached, refuses the deploy too. The error then says that the paths could not be checked, and why. It is never taken as a pass.
+
+The check runs only when the deploy sends volumes. A deploy that names only cron jobs sends none, so it is not checked.
+
+#### Blue-green: both containers mount the same directory
+
+During a [blue-green](#blue-green) switch, the old container and the new one run side by side until the new one passes its health check and the old one has drained. For that whole time both mount the same host directory. This is intended. Bondi does no locking, and your application owns concurrent access to the data.
+
+An SQLite database in a mounted directory is the classic hazard. For the length of the switch, two versions of your application have the same database open, and the new version may migrate a schema that the old one is still writing to. If your application cannot tolerate that, use the [simple strategy](#simple-default), which stops the old container before it starts the new one.
+
+#### Removing a volume keeps the data
+
+Removing an entry from `volumes`, or the whole field, unmounts it at the next deploy. The directory and everything in it stay on the server. Bondi does not delete host data when a volume is removed, when a blue-green deploy rolls back, or when a container is replaced. Delete the directory yourself when you no longer need it.
+
+#### When a change takes effect
+
+The mounts are part of the service's container, so a change to `volumes` takes effect at the next `bondi deploy` of the service, which is when the container is replaced. `bondi setup` does not touch the service's container and does not apply it.
+
+Volumes need orchestrator `0.23.0` or later on the server. A deploy that declares volumes to an older orchestrator is refused before anything is sent, naming the version it needs. See [Before the first deploy after an upgrade](#before-the-first-deploy-after-an-upgrade).
 
 ### Set up the server
 
@@ -879,6 +959,10 @@ service:
   env_vars:
     ENV: "production"
     DATABASE_URL: "{{DATABASE_URL}}"
+  volumes:
+    - host: /srv/my-api/uploads
+      container: /app/uploads
+      read_only: false
   servers:
     - ip_address: "203.0.113.10"
       ssh:
@@ -983,6 +1067,14 @@ Upgrade in this order:
 Step 3 before step 4 is the part that is easy to get wrong, because step 3 looks like it only bumps a version string.
 
 ### Before the first deploy after an upgrade
+
+- **Volumes need orchestrator `0.23.0` or later, so run `bondi setup` first.** Before the first deploy that declares `service.volumes`, set `bondi_server.version` to `0.23.0` or later and run `bondi setup` on every server the service deploys to. A deploy that declares volumes to an older orchestrator is refused before anything is sent:
+
+  ```
+  Error on server 203.0.113.10: the server is running bondi-server 0.22.0, but the service declares volumes, which requires 0.23.0 or later. An older server does not know the field and refuses the whole deploy. Set bondi_server.version in bondi.yaml to 0.23.0 or later, run bondi setup, then deploy again.
+  ```
+
+  A deploy that declares no volumes is unaffected by this. Create each host directory before that first deploy too — see [Create the host directory first](#create-the-host-directory-first).
 
 - Check that every cron job's `network` is either absent or exactly `bondi-network`, and the same for every managed container's `network`. Any other value now fails before anything is deployed instead of failing at run time — see [Reaching other containers from a cron job](#reaching-other-containers-from-a-cron-job).
 

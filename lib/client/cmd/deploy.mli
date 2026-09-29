@@ -50,6 +50,7 @@ type deploy_payload = {
   health_timeout : float option;
   poll_interval : float option;
   logs : bool option;
+  volumes : Config_file.volumes option;
 }
 (** Everything one server is asked to converge to, as the orchestrator's
     [deploy] subcommand reads it off its standard input.
@@ -57,7 +58,29 @@ type deploy_payload = {
     Every field is optional because a deploy is not obliged to name a service: a
     run that deploys cron jobs alone sends a payload whose service half is
     absent, and a box that received one changes nothing about the service it is
-    already running. *)
+    already running.
+
+    [volumes] is [None] both when the service declares none and when it declares
+    an empty list, and [None] is not written to the wire at all. A payload for a
+    service without mounts is therefore the one an orchestrator that predates
+    the field already reads, since that orchestrator refuses a field it does not
+    know. *)
+
+val payload_for :
+  Config_file.t ->
+  deployments:(string * string) list ->
+  force_traefik_redeploy:bool ->
+  Config_file.server ->
+  deploy_cron_job list option ->
+  deploy_payload
+(** [payload_for config ~deployments ~force_traefik_redeploy server cron_jobs]
+    is what [server] is sent by a run deploying [deployments] (each a name and
+    its tag), with [cron_jobs] already filtered to that server.
+
+    The service half is filled only when the service is among [deployments] and
+    [server] is one of the service's own; otherwise it is absent and only the
+    cron jobs travel. Exposed so a test can pin what reaches the wire from a
+    configuration, through the builder the command itself uses. *)
 
 val deploy_cron_job_to_yojson : deploy_cron_job -> Yojson.Safe.t
 (** [deploy_cron_job_to_yojson job] is [job] as the orchestrator reads it.
@@ -118,10 +141,12 @@ val validate_deployments :
 
 val version_gate :
   read_version:(unit -> (string, string) result) ->
+  volumes:Config_file.volumes option ->
   deploy_cron_job list option ->
   (unit, string) result
-(** [version_gate ~read_version cron_jobs] decides whether one server's
-    orchestrator is new enough for the work it is about to be given.
+(** [version_gate ~read_version ~volumes cron_jobs] decides whether one server's
+    orchestrator is new enough for the work it is about to be given: the
+    [volumes] and [cron_jobs] its payload carries.
 
     Every server is held to a floor, because a deploy reaches a box by running a
     subcommand inside the orchestrator's container and a binary from before
@@ -131,7 +156,10 @@ val version_gate :
     exec-shaped crontab line is the later capability and the release that
     carries it carries the subcommands by construction, so asking the lower
     question as well could only refuse the same box against a number that sends
-    the operator to an image which is still going to be refused.
+    the operator to an image which is still going to be refused. A server whose
+    payload mounts a volume is held to the volume floor alone, for the same
+    reason: it is the highest, and the release that carries it clears the other
+    two. An empty list mounts nothing and is held as [None] is.
 
     [read_version] is a parameter rather than something called ahead of the
     decision so that this is a decision made from a value, testable against a
@@ -205,18 +233,30 @@ val deploy_outcome :
 
 val deploy_servers :
   read_version:(Config_file.server -> (string, string) result) ->
-  deploy:
-    (Config_file.server -> deploy_cron_job list option -> (unit, string) result) ->
-  (Config_file.server * deploy_cron_job list option) list ->
+  check_volumes:
+    (Config_file.server -> string -> (string, Remote_exec.failure) result) ->
+  deploy:(Config_file.server -> deploy_payload -> (unit, string) result) ->
+  (Config_file.server * deploy_payload) list ->
   (unit, string list) result
-(** [deploy_servers ~read_version ~deploy servers_with_jobs] is the whole of
-    what this command does to the servers it was given: every one of them is
-    gated, and only then is any one of them deployed to.
+(** [deploy_servers ~read_version ~check_volumes ~deploy servers_with_payloads]
+    is the whole of what this command does to the servers it was given: every
+    one of them is gated, and only then is any one of them deployed to.
+
+    Each server is gated on the payload it is about to be sent — its volumes and
+    its cron jobs — so the floor it is held to is the floor of what it receives,
+    not of what the configuration declares elsewhere.
+
+    A server whose payload mounts volumes, and whose version passed, is then
+    asked whether their host paths exist: [check_volumes] runs
+    {!Volume_check.command} on it and {!Volume_check.val-verdict} decides from
+    what came back. A missing path, or a check that could not be read, refuses
+    the run as a version refusal does, before any server is deployed to. A
+    payload that mounts nothing is not checked and pays no round trip.
 
     A refusal that arrived after the first box had been written to would not be
     a refusal, and the order of those two phases is the only thing that makes it
-    one — so the reader and the deployer are parameters and the order is
-    observable without a box to run against.
+    one — so the reader, the checker and the deployer are parameters and the
+    order is observable without a box to run against.
 
     Every refusal is reported, and so is every failed deploy: an operator with
     two boxes to upgrade, or two boxes that refused the payload, should learn

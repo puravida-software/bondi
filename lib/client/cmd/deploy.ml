@@ -32,6 +32,7 @@ type deploy_payload = {
   health_timeout : float option; [@default None]
   poll_interval : float option; [@default None]
   logs : bool option; [@default None]
+  volumes : Config_file.volumes option; [@default None]
 }
 [@@deriving yojson]
 
@@ -81,13 +82,14 @@ let cron_jobs_for_server ip_address
       in
       if with_tags = [] then None else Some with_tags
 
-(* The two reads this command makes of its own are both of something already on
-   the box -- the crontab and the payload directory -- and a box that is
-   answering answers both at once. A minute is generous for either and short
-   enough that a box which has stopped answering is not waited on for the
-   deploy's own budget. The third read a deploy makes, of the orchestrator's
-   image tag, is [Orchestrator_version]'s and is held to that module's bound for
-   the reason given there. *)
+(* The reads this command makes of its own are all of something already on the
+   box -- the crontab, the payload directory, and whether the host paths a
+   service mounts exist -- and a box that is answering answers each at once. A
+   minute is generous for any of them and short enough that a box which has
+   stopped answering is not waited on for the deploy's own budget. The other
+   read a deploy makes, of the orchestrator's image tag, is
+   [Orchestrator_version]'s and is held to that module's bound for the reason
+   given there. *)
 let read_seconds = 60
 
 (* How long a box may take to answer the deploy itself, which is the one thing
@@ -152,16 +154,21 @@ let reported_orchestrator_version ?session (server : Config_file.server) =
    number would send an operator to an image that is still going to be refused
    here. One floor per server, and it is the one its work requires.
 
+   A server whose payload mounts a volume is held to the volume floor alone, for
+   the same reason one level up: it is the highest of the three, and the release
+   that carries it clears the other two, cron jobs or not.
+
    The reader is a parameter rather than something called ahead of the decision
    so that this stays a decision made from a value, testable against a box that
    does not exist. It is called once, so a server is read once. *)
-let version_gate ~read_version cron_jobs =
+let version_gate ~read_version ~volumes cron_jobs =
   let* version = read_version () in
-  match cron_jobs with
-  | None
-  | Some [] ->
+  match (volumes, cron_jobs) with
+  | Some (_ :: _), (None | Some [] | Some (_ :: _)) ->
+      Server_version.mounts_volumes version
+  | (None | Some []), Some (_ :: _) -> Server_version.writes_exec_lines version
+  | (None | Some []), (None | Some []) ->
       Server_version.answers_command_surface version
-  | Some (_ :: _) -> Server_version.writes_exec_lines version
 
 (* What the box's two cron sources say about each other, as the lines to print,
    for the servers this invocation is about to write cron jobs to.
@@ -288,9 +295,10 @@ let post_deploy ?session (server : Config_file.server) payload =
    [Remote_exec] gives each of them what it asked for. The deploy's bound is
    what is stated because a call over this session that named none of its own
    would be the deploy. *)
-let deploy_to_server (server : Config_file.server) cron_jobs payload =
+let deploy_to_server (server : Config_file.server) (payload : deploy_payload) =
   let work ?session () =
-    List.iter print_endline (reported_cron_divergence ?session server cron_jobs);
+    List.iter print_endline
+      (reported_cron_divergence ?session server payload.cron_jobs);
     print_endline (Printf.sprintf "Deploying to server: %s" server.ip_address);
     post_deploy ?session server payload
   in
@@ -314,18 +322,27 @@ let deploy_to_server (server : Config_file.server) cron_jobs payload =
    because a box that has already been deployed to is not made better by
    abandoning the next -- so the run already holds every outcome by the time it
    reports, and the terminal these lines are printed to shows all of them. *)
-let deploy_servers ~read_version ~deploy servers_with_jobs =
+let deploy_servers ~read_version ~check_volumes ~deploy servers_with_payloads =
   let refusals =
     List.filter_map
-      (fun ((server : Config_file.server), cron_jobs) ->
+      (fun ((server : Config_file.server), (payload : deploy_payload)) ->
+        (* The paths are asked about only once the version has passed: a box
+           too old to mount them is refused for that, and a round trip asking
+           about paths it could not use would add nothing to the refusal. *)
         match
-          version_gate ~read_version:(fun () -> read_version server) cron_jobs
+          Result.bind
+            (version_gate
+               ~read_version:(fun () -> read_version server)
+               ~volumes:payload.volumes payload.cron_jobs)
+            (fun () ->
+              Volume_check.refusal_for ~check:(check_volumes server)
+                payload.volumes)
         with
         | Ok () -> None
         | Error message ->
             Some
               (Printf.sprintf "Error on server %s: %s" server.ip_address message))
-      servers_with_jobs
+      servers_with_payloads
   in
   match refusals with
   | _ :: _ -> Error refusals
@@ -336,8 +353,8 @@ let deploy_servers ~read_version ~deploy servers_with_jobs =
       let outcomes =
         List.rev
           (List.fold_left
-             (fun taken (server, cron_jobs) -> deploy server cron_jobs :: taken)
-             [] servers_with_jobs)
+             (fun taken (server, payload) -> deploy server payload :: taken)
+             [] servers_with_payloads)
       in
       match
         List.filter_map
@@ -377,6 +394,89 @@ let validate_deployments (config : Config_file.t) deployments :
    say it to. *)
 let deprecation_notices (config : Config_file.t) =
   Deprecations.messages config.bondi_server
+
+let payload_for (config : Config_file.t) ~deployments ~force_traefik_redeploy
+    (server : Config_file.server) cron_jobs =
+  let tag_of_name name = List.assoc_opt name deployments in
+  let is_service_server ip =
+    match config.user_service with
+    | Some s ->
+        List.exists
+          (fun (x : Config_file.server) -> x.ip_address = ip)
+          s.servers
+    | None -> false
+  in
+  let ip_address = server.ip_address in
+  (* The decision carries the service and its tag rather than a bool: the
+     payload needs both, and a bool would leave the builder re-deriving them
+     from options the decision has already inspected. *)
+  let service_and_tag =
+    match config.user_service with
+    | None -> None
+    | Some service -> (
+        match tag_of_name service.name with
+        | None -> None
+        | Some tag -> (
+            match is_service_server ip_address with
+            | true -> Some (service, tag)
+            | false -> None))
+  in
+  match service_and_tag with
+  | Some ((service : Config_file.user_service), tag) ->
+      {
+        service_name = Some service.name;
+        image = Some (service.image ^ ":" ^ tag);
+        port = Some service.port;
+        env_vars = service.env_vars;
+        traefik_domain_name =
+          Option.map
+            (fun (tr : Config_file.traefik) -> tr.domain_name)
+            config.traefik;
+        traefik_image =
+          Option.map (fun (tr : Config_file.traefik) -> tr.image) config.traefik;
+        traefik_acme_email =
+          Option.map
+            (fun (tr : Config_file.traefik) -> tr.acme_email)
+            config.traefik;
+        registry_user = service.registry_user;
+        registry_pass = service.registry_pass;
+        force_traefik_redeploy = Some force_traefik_redeploy;
+        cron_jobs;
+        drain_grace_period = Option.map float_of_int service.drain_grace_period;
+        deployment_strategy = service.deployment_strategy;
+        health_timeout = Option.map float_of_int service.health_timeout;
+        poll_interval = Option.map float_of_int service.poll_interval;
+        logs = service.logs;
+        (* An empty list mounts nothing, so it is sent as the field's absence:
+           a payload that mounts nothing stays one an older orchestrator
+           reads. *)
+        volumes =
+          (match service.volumes with
+          | None
+          | Some [] ->
+              None
+          | Some (_ :: _) -> service.volumes);
+      }
+  | None ->
+      {
+        service_name = None;
+        image = None;
+        port = None;
+        env_vars = [];
+        traefik_domain_name = None;
+        traefik_image = None;
+        traefik_acme_email = None;
+        registry_user = None;
+        registry_pass = None;
+        force_traefik_redeploy = Some force_traefik_redeploy;
+        cron_jobs;
+        drain_grace_period = None;
+        deployment_strategy = None;
+        health_timeout = None;
+        poll_interval = None;
+        logs = None;
+        volumes = None;
+      }
 
 let run force_traefik_redeploy deployments =
   print_endline "Deployment process initiated...";
@@ -424,92 +524,22 @@ let run force_traefik_redeploy deployments =
           "Error: no servers configured. Add servers to bondi.yaml under \
            service or each cron job.";
         exit 1);
-      (* What this invocation has for a server is fixed for the whole run, and
-         three phases below ask for it: the version gate, the divergence report
-         and the payload. Derived once and carried beside its server, so the
-         three cannot drift into reading different answers. *)
-      let cron_jobs_per_server =
+      (* What this invocation sends a server is fixed for the whole run, and
+         four phases below ask for it: the version gate, the host-path check,
+         the divergence report and the post. Its payload is built once and
+         carried beside its server, so the four cannot drift into reading
+         different answers -- the gate holds a server to the floor of what it
+         is about to be sent, cron jobs and volumes both, and the check asks
+         about the paths it is about to mount, because both read them from the
+         payload itself. *)
+      let payloads_per_server =
         List.map
           (fun (server : Config_file.server) ->
             ( server,
-              cron_jobs_for_server server.ip_address config.cron_jobs
-                deployments ))
+              payload_for config ~deployments ~force_traefik_redeploy server
+                (cron_jobs_for_server server.ip_address config.cron_jobs
+                   deployments) ))
           servers
-      in
-      let tag_of_name name = List.assoc_opt name deployments in
-      let is_service_server ip =
-        match config.user_service with
-        | Some s ->
-            List.exists
-              (fun (x : Config_file.server) -> x.ip_address = ip)
-              s.servers
-        | None -> false
-      in
-      let payload_for (server : Config_file.server) cron_jobs =
-        let ip_address = server.ip_address in
-        (* The decision carries the service and its tag rather than a bool:
-           the payload needs both, and a bool would leave the builder
-           re-deriving them from options the decision has already
-           inspected. *)
-        let service_and_tag =
-          match config.user_service with
-          | None -> None
-          | Some service -> (
-              match tag_of_name service.name with
-              | None -> None
-              | Some tag ->
-                  if is_service_server ip_address then Some (service, tag)
-                  else None)
-        in
-        match service_and_tag with
-        | Some ((service : Config_file.user_service), tag) ->
-            {
-              service_name = Some service.name;
-              image = Some (service.image ^ ":" ^ tag);
-              port = Some service.port;
-              env_vars = service.env_vars;
-              traefik_domain_name =
-                Option.map
-                  (fun (tr : Config_file.traefik) -> tr.domain_name)
-                  config.traefik;
-              traefik_image =
-                Option.map
-                  (fun (tr : Config_file.traefik) -> tr.image)
-                  config.traefik;
-              traefik_acme_email =
-                Option.map
-                  (fun (tr : Config_file.traefik) -> tr.acme_email)
-                  config.traefik;
-              registry_user = service.registry_user;
-              registry_pass = service.registry_pass;
-              force_traefik_redeploy = Some force_traefik_redeploy;
-              cron_jobs;
-              drain_grace_period =
-                Option.map float_of_int service.drain_grace_period;
-              deployment_strategy = service.deployment_strategy;
-              health_timeout = Option.map float_of_int service.health_timeout;
-              poll_interval = Option.map float_of_int service.poll_interval;
-              logs = service.logs;
-            }
-        | None ->
-            {
-              service_name = None;
-              image = None;
-              port = None;
-              env_vars = [];
-              traefik_domain_name = None;
-              traefik_image = None;
-              traefik_acme_email = None;
-              registry_user = None;
-              registry_pass = None;
-              force_traefik_redeploy = Some force_traefik_redeploy;
-              cron_jobs;
-              drain_grace_period = None;
-              deployment_strategy = None;
-              health_timeout = None;
-              poll_interval = None;
-              logs = None;
-            }
       in
       (* The gate's read is the only thing this server has been asked for when
          it is made, so a session that could not be staged is the same failure
@@ -536,10 +566,19 @@ let run force_traefik_redeploy deployments =
         | Ok answer -> answer
         | Error _ -> reported_orchestrator_version server
       in
-      let deploy (server : Config_file.server) cron_jobs =
-        deploy_to_server server cron_jobs (payload_for server cron_jobs)
+      let deploy (server : Config_file.server) (payload : deploy_payload) =
+        deploy_to_server server payload
       in
-      match deploy_servers ~read_version ~deploy cron_jobs_per_server with
+      (* Asked only of a server whose payload mounts something, so it opens a
+         session of its own rather than holding the gate's open for every
+         server whether it mounts anything or not: one more handshake, and only
+         on the path that needs it. *)
+      let check_volumes server command =
+        Remote_exec.command_output ~timeout_seconds:read_seconds ~command server
+      in
+      match
+        deploy_servers ~read_version ~check_volumes ~deploy payloads_per_server
+      with
       | Error messages ->
           List.iter prerr_endline messages;
           exit 1

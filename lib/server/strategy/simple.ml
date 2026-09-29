@@ -14,6 +14,28 @@ let exit_code_severities_of_yojson json =
 
 let exit_code_severities_to_yojson = Alert.severity_map_to_yojson
 
+(* The mounts a deploy declares, read by the same [Bind_mount] codec the client
+   encodes them with, so a mount the client sends is one this end accepts.
+
+   Only the reason for a refusal differs. The codec's reason quotes the
+   rejected path or entry, and this reason becomes the refusal's message, which
+   never carries a value from the payload (see [Handler_error.message]). So the
+   field is named and the rule restated, and what the payload held is not. *)
+type volumes = Bondi_common.Bind_mount.t list
+
+(** Reads the [volumes] field; the refusal names the field and restates the rule
+    without echoing the payload. *)
+let volumes_of_yojson json =
+  Bondi_common.Bind_mount.list_of_yojson json
+  |> Result.map_error (fun (_ : string) ->
+      "volumes: an entry is not a well-formed bind mount. Each entry is an \
+       object of exactly host, container and read_only, with both paths \
+       absolute and normalised, and no container path that is / or is declared \
+       twice")
+
+(** Writes the [volumes] field. *)
+let volumes_to_yojson = Bondi_common.Bind_mount.list_to_yojson
+
 (* ------------------------------------------------------------------------- *)
 (* Types                                                                     *)
 (* ------------------------------------------------------------------------- *)
@@ -49,6 +71,7 @@ type deploy_input = {
   health_timeout : float option; [@default None]
   poll_interval : float option; [@default None]
   logs : bool option; [@default None]
+  volumes : volumes option; [@default None]
 }
 [@@deriving yojson]
 
@@ -191,7 +214,7 @@ let should_redeploy_traefik (input : deploy_input)
         match parse_image_and_tag requested_image with
         | Error _ -> false
         | Ok (_requested_name, requested_tag) -> current_tag <> requested_tag)
-    | _ -> false
+    | Some _, Error _ -> false
 
 let plan (input : deploy_input) (context : deploy_context) :
     (action list, string) result =
@@ -242,7 +265,10 @@ let plan (input : deploy_input) (context : deploy_context) :
                     }
                   :: !actions;
                 Ok ())
-        | _ -> Error "missing required traefik configuration"
+        | None, _, _
+        | _, None, _
+        | _, _, None ->
+            Error "missing required traefik configuration"
       else Ok ())
     else Ok ()
   in
@@ -283,13 +309,7 @@ let plan (input : deploy_input) (context : deploy_context) :
                       container_name = name;
                       config = service_cfg;
                       host_config =
-                        {
-                          binds = None;
-                          port_bindings = None;
-                          network_mode = None;
-                          restart_policy =
-                            Some Docker.Restart_policy.bondi_managed;
-                        };
+                        Workload_host_config.of_volumes input.volumes;
                       networking_conf = default_networking_config;
                     }
                   :: !actions;

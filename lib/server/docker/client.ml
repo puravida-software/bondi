@@ -127,11 +127,55 @@ type container_config = {
 }
 [@@deriving yojson]
 
+type mount = {
+  type_ : string; [@key "Type"]
+  source : string; [@key "Source"]
+  target : string; [@key "Target"]
+  read_only : bool; [@key "ReadOnly"]
+}
+[@@deriving to_yojson]
+(** One entry of HostConfig.Mounts. Bondi only ever sends [Type = "bind"]:
+    unlike a Binds entry, a bind mount whose source does not exist is refused by
+    the daemon instead of being created as an empty root-owned directory
+    [observed — Engine 29.8.1, 2026-09-27].
+
+    Encoding always writes ReadOnly, false included, so the request states the
+    mode rather than leaning on the daemon's default. *)
+
+(** The same entry as the Engine reports it back in an inspect, which is not the
+    shape it was sent in: a false ReadOnly is omitted rather than written
+    [observed — Engine 29.8.1, 2026-09-27], and an entry may carry keys this
+    client models none of (BindOptions, Consistency). Both are tolerated, so an
+    inspect of a container Bondi mounted read-write still decodes; every other
+    leaf of the inspect response is [strict = false] for the same reason.
+
+    Type, Source and Target are required: Bondi only inspects containers it
+    created, and it created them with bind mounts, which carry all three. A
+    mount of another type, such as a volume or tmpfs without a Source, does not
+    decode. Kept in its own module so its labels do not shadow [mount]'s. *)
+module Reported_mount = struct
+  type t = {
+    type_ : string; [@key "Type"]
+    source : string; [@key "Source"]
+    target : string; [@key "Target"]
+    read_only : bool; [@key "ReadOnly"] [@default false]
+  }
+  [@@deriving of_yojson { strict = false }]
+end
+
+(** Decodes a reported mount; see [Reported_mount] for what is required. *)
+let mount_of_yojson (json : Yojson.Safe.t) : (mount, string) result =
+  Result.map
+    (fun ({ type_; source; target; read_only } : Reported_mount.t) ->
+      { type_; source; target; read_only })
+    (Reported_mount.of_yojson json)
+
 type host_config = {
   binds : string list option; [@key "Binds"] [@default None]
   port_bindings : port_bindings option; [@key "PortBindings"] [@default None]
   network_mode : string option; [@key "NetworkMode"] [@default None]
   restart_policy : restart_policy option; [@key "RestartPolicy"] [@default None]
+  mounts : mount list option; [@key "Mounts"] [@default None]
 }
 [@@deriving yojson { strict = false }]
 

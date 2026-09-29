@@ -160,3 +160,15 @@ let ssh_argv_during f =
           f
       in
       (value, invocations (recorded record)))
+
+let run_on_this_machine ~sudo ~cwd command =
+  let script =
+    String.concat "; " [ "cd " ^ Filename.quote cwd; sudo; command ]
+  in
+  let channel =
+    Unix.open_process_args_in "/bin/sh" [| "/bin/sh"; "-c"; script |]
+  in
+  let output = In_channel.input_all channel in
+  Bondi_client.Remote_exec.failure_of_status
+    (Unix.close_process_in channel)
+    ~output

@@ -3,7 +3,7 @@
 (library
  (name server_test_helpers)
  (modules server_test_helpers)
- (libraries bondi.server))
+ (libraries alcotest yojson bondi.server))
 
 (tests
  (names
@@ -26,7 +26,8 @@
   test_readiness
   test_readiness_probes
   test_cmd_io
-  test_cli)
+  test_cli
+  test_workload_host_config)
  (modules
   test_env
   test_simple_plan
@@ -47,7 +48,8 @@
   test_readiness
   test_readiness_probes
   test_cmd_io
-  test_cli)
+  test_cli
+  test_workload_host_config)
  (libraries
   alcotest
   bondi.client

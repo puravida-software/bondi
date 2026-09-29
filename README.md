@@ -91,6 +91,10 @@ Beyond your service and its cron jobs, `bondi.yaml` can declare long-running sup
 
 A cron job can classify each run's exit code into a `success`, `failure`, or `critical` severity and POST a generic alert to per-severity `https` sink URLs — a paging endpoint for `critical`, a dashboard for `failure`. Defaults are `0` → success and non-zero → failure; specific codes can be raised to `critical`. Delivery is best-effort and never changes the job's outcome. A run that never started counts as a failure, so a job is never silently skipped. See the [Usage Guide](USAGE.md#alerting-on-job-outcomes).
 
+### Persistent data (volumes)
+
+A service can mount host directories under `service.volumes`, so what it writes survives a deploy. Both strategies mount the same directories, and during a blue-green switch both containers mount them at once. Bondi never creates, chowns or deletes a host path: you create each directory, and a deploy is refused before anything changes if one is missing on a server. Volumes need orchestrator `0.23.0` or later. See the [Usage Guide](USAGE.md#persistent-data-volumes).
+
 ### Recovering from a server image that will not start
 
 Server images `0.8.2`, `0.9.0`, `0.10.0` and `0.10.1` cannot start. The binary they package links `libzstd.so.1`, which those images do not ship, so the loader aborts before the server runs and the container exits `127`. `latest` pointed at a broken image until the first release after this fix; if you installed it before then, treat it as broken too.

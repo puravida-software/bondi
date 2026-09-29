@@ -43,6 +43,14 @@ type server = {
 }
 [@@deriving yojson]
 
+(* The mounts a service declares, decoded by [Bind_mount]'s own list codec so
+   that bondi.yaml and the deploy payload hold one definition of a well-formed
+   mount. Named so the deriver finds the codec below by its name. *)
+type volumes = Bondi_common.Bind_mount.t list
+
+let volumes_of_yojson = Bondi_common.Bind_mount.list_of_yojson
+let volumes_to_yojson = Bondi_common.Bind_mount.list_to_yojson
+
 type user_service = {
   name : string;
   image : string; (* Base image without tag, e.g. registry.com/app *)
@@ -56,6 +64,10 @@ type user_service = {
   health_timeout : int option; [@default None]
   poll_interval : int option; [@default None]
   logs : bool option; [@default None]
+  (* Absent means no mounts, which is what every service had before the field
+     existed. A malformed entry refuses the whole file, here, before any server
+     is contacted. *)
+  volumes : volumes option; [@default None]
 }
 [@@deriving yojson]
 

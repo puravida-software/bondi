@@ -31,6 +31,7 @@ let minimal_input =
     health_timeout = None;
     poll_interval = None;
     logs = None;
+    volumes = None;
   }
 
 let input_with_registry =
@@ -230,6 +231,62 @@ let test_run_workload_carries_restart_policy () =
       | Some host_config ->
           check_planned_restart_policy "planned workload" host_config)
 
+let mount_testable = Server_test_helpers.mount_testable
+let bind_mount = Test_helpers.bind_mount
+
+(* One read-write and one read-only volume, so a plan that dropped either the
+   second entry or the flag would show. *)
+let input_with_volumes =
+  {
+    minimal_input with
+    volumes =
+      Some
+        [
+          bind_mount ~host:"/srv/comalito/invoices" ~container:"/app/invoices"
+            ~read_only:false;
+          bind_mount ~host:"/etc/comalito" ~container:"/app/config"
+            ~read_only:true;
+        ];
+  }
+
+let planned_workload_mounts input =
+  let context = { Simple.current_traefik = None; current_workload = None } in
+  match Simple.plan input context with
+  | Error e -> Alcotest.fail ("plan failed: " ^ e)
+  | Ok actions -> (
+      match extract_workload_host_config actions with
+      | None -> Alcotest.fail "expected a RunWorkload action"
+      | Some host_config -> host_config.mounts)
+
+let test_run_workload_carries_declared_mounts () =
+  check
+    (option (list mount_testable))
+    "one bind mount per declared volume, in order"
+    (Some
+       [
+         {
+           Docker.type_ = "bind";
+           source = "/srv/comalito/invoices";
+           target = "/app/invoices";
+           read_only = false;
+         };
+         {
+           Docker.type_ = "bind";
+           source = "/etc/comalito";
+           target = "/app/config";
+           read_only = true;
+         };
+       ])
+    (planned_workload_mounts input_with_volumes)
+
+(* The absence arm of the case above: the same fixture with its volumes taken
+   away plans a workload with no Mounts key at all. *)
+let test_run_workload_without_volumes_carries_no_mounts () =
+  check
+    (option (list mount_testable))
+    "no mounts" None
+    (planned_workload_mounts { input_with_volumes with volumes = None })
+
 let test_deploy_adds_bondi_managed_label () =
   let context = { Simple.current_traefik = None; current_workload = None } in
   match Simple.plan minimal_input context with
@@ -296,6 +353,13 @@ let () =
         [
           test_case "run workload carries the policy" `Quick
             test_run_workload_carries_restart_policy;
+        ] );
+      ( "volumes",
+        [
+          test_case "run workload carries declared mounts" `Quick
+            test_run_workload_carries_declared_mounts;
+          test_case "run workload without volumes carries no mounts" `Quick
+            test_run_workload_without_volumes_carries_no_mounts;
         ] );
       ( "container labels",
         [

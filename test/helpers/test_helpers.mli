@@ -34,3 +34,21 @@ val exec_line : string -> string
     the crontab suite and the readiness suite read the same shape, and reading
     it from one definition is what keeps them from drifting apart while both
     stay green. *)
+
+val bind_mount :
+  host:string -> container:string -> read_only:bool -> Bondi_common.Bind_mount.t
+(** [bind_mount ~host ~container ~read_only] is the mount those fields describe,
+    failing the test when {!Bondi_common.Bind_mount.create} refuses them, so a
+    suite that needs a valid mount as a fixture does not restate the match. It
+    lives here, not in the server helpers, because the client suites need it too
+    and only this library is reachable from both. *)
+
+val mount_fields : Bondi_common.Bind_mount.t -> string * string * bool
+(** [mount_fields mount] is [(host, container, read_only)], the shape suites
+    compare mounts by. *)
+
+val with_temp_dir : string -> (string -> 'a) -> 'a
+(** [with_temp_dir prefix f] runs [f] on a freshly made directory whose name
+    starts with [prefix], and removes the directory and everything in it when
+    [f] returns or raises, so a suite that needs somewhere to write leaves
+    nothing behind in the temporary directory. *)

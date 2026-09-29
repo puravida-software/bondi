@@ -70,6 +70,7 @@ let mk_service name : Config_file.user_service =
     health_timeout = None;
     poll_interval = None;
     logs = None;
+    volumes = None;
   }
 
 let mk_cron_job ?network ?alert_sinks ?exit_code_severities name ip :
@@ -335,6 +336,7 @@ let test_deploy_payload_includes_logs_flag () =
       health_timeout = None;
       poll_interval = None;
       logs = Some false;
+      volumes = None;
     }
   in
   check (option bool) "logs flag is Some false" (Some false) payload.logs;
@@ -346,6 +348,67 @@ let test_deploy_payload_includes_logs_flag () =
     | Error msg -> Alcotest.fail ("unexpected error: " ^ msg)
   in
   check (option bool) "logs survives JSON round-trip" (Some false) decoded.logs
+
+(* deploy_payload volumes
+
+   One fixture, built by the payload builder the command itself uses, differing
+   only in what the service declares under [volumes]. The arm that declares a
+   mount is what shows the arms that declare none reach the field at all. *)
+
+let payload_server : Config_file.server =
+  { ip_address = "10.0.0.5"; ssh = None; port = None }
+
+let invoices_mount () =
+  Test_helpers.bind_mount ~host:"/srv/comalito/invoices"
+    ~container:"/data/invoices" ~read_only:false
+
+let service_payload_json volumes =
+  let config =
+    mk_config
+      ~user_service:
+        { (mk_service "web") with servers = [ payload_server ]; volumes }
+      ()
+  in
+  Deploy.payload_for config
+    ~deployments:[ ("web", "v1") ]
+    ~force_traefik_redeploy:false payload_server None
+  |> Deploy.deploy_payload_to_yojson
+
+let wire_keys = function
+  | `Assoc fields -> List.map fst fields
+  | `Null
+  | `Bool _
+  | `Int _
+  | `Float _
+  | `String _
+  | `List _
+  | `Intlit _ ->
+      fail "expected a JSON object"
+
+let mount_fields = Test_helpers.mount_fields
+
+let test_payload_omits_volumes_key_when_none_declared () =
+  let keys = wire_keys (service_payload_json None) in
+  check bool "the payload is the service's" true (List.mem "service_name" keys);
+  check bool "no volumes key at all, not a null" false (List.mem "volumes" keys)
+
+let test_payload_carries_volumes_when_declared () =
+  let json = service_payload_json (Some [ invoices_mount () ]) in
+  check bool "the volumes key is sent" true
+    (List.mem "volumes" (wire_keys json));
+  match Deploy.deploy_payload_of_yojson json with
+  | Error message -> fail ("the payload does not read back: " ^ message)
+  | Ok decoded ->
+      check
+        (option (list (triple string string bool)))
+        "the declared mount survives the wire"
+        (Some [ ("/srv/comalito/invoices", "/data/invoices", false) ])
+        (Option.map (List.map mount_fields) decoded.volumes)
+
+let test_payload_treats_empty_volumes_as_none () =
+  check string "an empty list is sent as no list"
+    (Yojson.Safe.to_string (service_payload_json None))
+    (Yojson.Safe.to_string (service_payload_json (Some [])))
 
 (* version_gate *)
 
@@ -361,7 +424,7 @@ let test_cron_deploy_against_an_under_version_box_is_refused () =
       [ ("backup", "v1") ]
   in
   let read_version () = Ok "0.12.0" in
-  match Deploy.version_gate ~read_version jobs with
+  match Deploy.version_gate ~read_version ~volumes:None jobs with
   | Ok () -> Alcotest.fail "expected a cron-declaring deploy to be refused"
   | Error msg ->
       check bool
@@ -377,7 +440,7 @@ let test_cron_deploy_against_an_under_version_box_is_refused () =
    the two. *)
 let test_a_service_only_deploy_is_held_to_the_command_surface () =
   let read_version () = Ok "0.14.0" in
-  match Deploy.version_gate ~read_version None with
+  match Deploy.version_gate ~read_version ~volumes:None None with
   | Ok () ->
       Alcotest.fail
         "expected a box with no subcommands to be refused a service deploy"
@@ -400,7 +463,7 @@ let test_a_service_only_deploy_is_not_held_to_the_crontab_floor () =
   let read_version () =
     Ok Bondi_client.Server_version.minimum_for_command_surface
   in
-  match Deploy.version_gate ~read_version None with
+  match Deploy.version_gate ~read_version ~volumes:None None with
   | Ok () -> ()
   | Error msg -> Alcotest.fail ("expected the deploy to proceed, got: " ^ msg)
 
@@ -411,7 +474,7 @@ let test_a_deploy_with_an_empty_cron_list_is_held_to_the_lower_floor () =
   let read_version () =
     Ok Bondi_client.Server_version.minimum_for_command_surface
   in
-  match Deploy.version_gate ~read_version (Some []) with
+  match Deploy.version_gate ~read_version ~volumes:None (Some []) with
   | Ok () -> ()
   | Error msg -> Alcotest.fail ("expected the deploy to proceed, got: " ^ msg)
 
@@ -422,7 +485,7 @@ let test_a_deploy_with_an_empty_cron_list_is_held_to_the_lower_floor () =
    box that could not answer the first was never going to answer the second. *)
 let test_a_deploy_against_an_unreadable_box_is_refused () =
   let read_version () = Error "the orchestrator's version could not be read" in
-  match Deploy.version_gate ~read_version None with
+  match Deploy.version_gate ~read_version ~volumes:None None with
   | Ok () -> Alcotest.fail "expected an unreadable box to refuse a deploy"
   | Error msg ->
       check string "the reader's own words reach the operator"
@@ -441,10 +504,82 @@ let test_cron_deploy_against_a_supported_box_proceeds () =
       [ ("backup", "v1") ]
   in
   let read_version () = Ok Bondi_client.Server_version.minimum_for_exec_lines in
-  match Deploy.version_gate ~read_version jobs with
+  match Deploy.version_gate ~read_version ~volumes:None jobs with
   | Ok () -> ()
   | Error msg ->
       Alcotest.fail ("expected a supported box to be deployed to: " ^ msg)
+
+(* The gate's volume arms. Each reads one version and asks the gate twice, the
+   fixture differing only in what the server's payload mounts, so a refusal is
+   shown to come from the volumes and not from the version alone. *)
+let gate_at version ~volumes cron_jobs =
+  Deploy.version_gate ~read_version:(fun () -> Ok version) ~volumes cron_jobs
+
+let names_floor ~floor msg =
+  check bool
+    (Printf.sprintf "the refusal names %s: %s" floor msg)
+    true
+    (Bondi_common.String_utils.contains ~needle:floor msg)
+
+(* A server whose payload mounts a volume is held to the volume floor. 0.22.0
+   clears the command-surface floor this deploy would otherwise be held to, so
+   the refusal is the volumes' and names their release; the same box is
+   accepted once the payload mounts nothing, and the release that carries
+   volumes is accepted with them. *)
+let test_gate_with_volumes_holds_to_volume_floor () =
+  let volumes = Some [ invoices_mount () ] in
+  (match gate_at "0.22.0" ~volumes None with
+  | Ok () -> fail "expected a volume-mounting deploy to 0.22.0 to be refused"
+  | Error msg ->
+      names_floor ~floor:"0.22.0" msg;
+      names_floor ~floor:Bondi_client.Server_version.minimum_for_volumes msg);
+  check (result_testable unit) "the same box without volumes proceeds" (Ok ())
+    (gate_at "0.22.0" ~volumes:None None);
+  check (result_testable unit) "the volume release proceeds with them" (Ok ())
+    (gate_at Bondi_client.Server_version.minimum_for_volumes ~volumes None)
+
+(* Volumes and cron jobs on one server: one floor, the highest either needs.
+   The exec-line release clears the crontab floor and still cannot mount, so it
+   is refused naming the volume floor -- naming the crontab one would send the
+   operator to an image that is refused again. *)
+let test_gate_with_volumes_and_cron_holds_to_highest_floor () =
+  let jobs =
+    Deploy.cron_jobs_for_server "1.2.3.4"
+      (Some [ mk_cron_job "backup" "1.2.3.4" ])
+      [ ("backup", "v1") ]
+  in
+  let volumes = Some [ invoices_mount () ] in
+  let exec_floor = Bondi_client.Server_version.minimum_for_exec_lines in
+  (match gate_at exec_floor ~volumes jobs with
+  | Ok () -> fail "expected the crontab floor alone to be refused volumes"
+  | Error msg ->
+      names_floor ~floor:Bondi_client.Server_version.minimum_for_volumes msg);
+  check (result_testable unit) "the crontab floor proceeds without volumes"
+    (Ok ())
+    (gate_at exec_floor ~volumes:None jobs);
+  check (result_testable unit) "the volume floor proceeds with both" (Ok ())
+    (gate_at Bondi_client.Server_version.minimum_for_volumes ~volumes jobs)
+
+(* A server whose payload mounts nothing is held where it was before volumes
+   existed: 0.22 proceeds with no cron jobs and with them. [Some []] mounts
+   nothing either, so it is held the same as [None]. *)
+let test_gate_without_volumes_unchanged_at_0_22 () =
+  let jobs =
+    Deploy.cron_jobs_for_server "1.2.3.4"
+      (Some [ mk_cron_job "backup" "1.2.3.4" ])
+      [ ("backup", "v1") ]
+  in
+  check (result_testable unit) "no volumes, no cron jobs" (Ok ())
+    (gate_at "0.22.0" ~volumes:None None);
+  check (result_testable unit) "no volumes, cron jobs" (Ok ())
+    (gate_at "0.22.0" ~volumes:None jobs);
+  check (result_testable unit) "an empty volume list" (Ok ())
+    (gate_at "0.22.0" ~volumes:(Some []) None);
+  (* The affirmative arm on the same box: it is the declared mount, not the
+     version, that the arms above are proceeding without. *)
+  match gate_at "0.22.0" ~volumes:(Some [ invoices_mount () ]) jobs with
+  | Ok () -> fail "expected the same box to refuse a declared mount"
+  | Error _ -> ()
 
 (* [reported_orchestrator_version] is the reader the gate is handed in
    production, and for a server with no [ssh] block nothing is ever spawned: the
@@ -563,7 +698,7 @@ let test_a_deploy_that_finds_a_divergence_still_proceeds () =
           ~read_crontab:(fun () -> crontab_naming "nightly-report")
           ~read_payloads:(fun () -> empty_payload_directory)
           jobs));
-  match Deploy.version_gate ~read_version jobs with
+  match Deploy.version_gate ~read_version ~volumes:None jobs with
   | Ok () -> ()
   | Error msg -> Alcotest.fail ("a divergence became a refusal: " ^ msg)
 
@@ -713,6 +848,21 @@ let gated_server ip : Config_file.server =
     port = None;
   }
 
+(* A server beside the payload a deploy of nothing would send it: no service,
+   no cron jobs, no volumes. Built by the command's own builder rather than by
+   hand, so every field is the one the command would send. *)
+let with_payload server =
+  ( server,
+    Deploy.payload_for (mk_config ()) ~deployments:[]
+      ~force_traefik_redeploy:false server None )
+
+(* None of the payloads the gate's first two cases send mounts anything, so a
+   host-path check is a round trip nobody asked for. Its affirmative arm is the
+   volume cases further down, whose payloads do mount something and whose boxes
+   are asked. *)
+let no_check_expected (server : Config_file.server) _command =
+  fail ("a payload that mounts nothing was checked on " ^ server.ip_address)
+
 (* A refusal that arrives after the first box has been written to is not a
    refusal. Two boxes, the second of them too old: the run has to end without
    the first having been deployed to, which is a property of the order the two
@@ -720,16 +870,22 @@ let gated_server ip : Config_file.server =
    was asked to do, so being asked at all is visible in the outcome. *)
 let test_the_gate_refuses_before_anything_is_posted () =
   let servers =
-    [ (gated_server "10.0.0.1", None); (gated_server "10.0.0.2", None) ]
+    [
+      with_payload (gated_server "10.0.0.1");
+      with_payload (gated_server "10.0.0.2");
+    ]
   in
   let read_version (server : Config_file.server) =
     if server.ip_address = "10.0.0.2" then Ok "0.14.0"
     else Ok Bondi_client.Server_version.minimum_for_exec_lines
   in
-  let deploy (server : Config_file.server) _cron_jobs =
+  let deploy (server : Config_file.server) _payload =
     Error ("deployed to " ^ server.ip_address)
   in
-  match Deploy.deploy_servers ~read_version ~deploy servers with
+  match
+    Deploy.deploy_servers ~read_version ~check_volumes:no_check_expected ~deploy
+      servers
+  with
   | Ok () -> Alcotest.fail "expected the old box to refuse the run"
   | Error messages ->
       let said = String.concat " | " messages in
@@ -752,19 +908,237 @@ let test_the_gate_refuses_before_anything_is_posted () =
    boxes that both failed are two things the operator has to fix. *)
 let test_every_gated_server_is_deployed_to_in_order () =
   let servers =
-    [ (gated_server "10.0.0.1", None); (gated_server "10.0.0.2", None) ]
+    [
+      with_payload (gated_server "10.0.0.1");
+      with_payload (gated_server "10.0.0.2");
+    ]
   in
   let read_version _ = Ok Bondi_client.Server_version.minimum_for_exec_lines in
-  let deploy (server : Config_file.server) _cron_jobs =
+  let deploy (server : Config_file.server) _payload =
     Error ("deployed to " ^ server.ip_address)
   in
-  match Deploy.deploy_servers ~read_version ~deploy servers with
+  match
+    Deploy.deploy_servers ~read_version ~check_volumes:no_check_expected ~deploy
+      servers
+  with
   | Ok () -> Alcotest.fail "expected the deployer's own failure to be reported"
   | Error messages ->
       check (list string)
         "every server is reached, in order, and every failure is the run's"
         [ "deployed to 10.0.0.1"; "deployed to 10.0.0.2" ]
         messages
+
+(* The host-path check, inside the gate.
+
+   Two current boxes, each sent a payload mounting one host path, built by the
+   command's own builder. Each box's check is the real command run through a
+   real shell on this machine, where the path does not exist; what differs
+   between the boxes is whether their root can see it, which is the fallback
+   the command asks through. So the first box has the path and the second does
+   not, and the only difference between the two cases below is that answer. *)
+
+let with_mounted_path f =
+  Test_helpers.with_temp_dir "bondi-deploy-volumes" (fun dir ->
+      f (Filename.concat dir "invoices"))
+
+let volume_payloads host =
+  let mount =
+    Test_helpers.bind_mount ~host ~container:"/data/invoices" ~read_only:false
+  in
+  let servers = [ gated_server "10.0.0.1"; gated_server "10.0.0.2" ] in
+  let config =
+    mk_config
+      ~user_service:
+        { (mk_service "web") with servers; volumes = Some [ mount ] }
+      ()
+  in
+  List.map
+    (fun server ->
+      ( server,
+        Deploy.payload_for config
+          ~deployments:[ ("web", "v1") ]
+          ~force_traefik_redeploy:false server None ))
+    servers
+
+(* Runs [f] with a checker whose boxes answer as [root_sees] says, and returns
+   its outcome with the boxes that were asked, in order. *)
+let checked_by ~root_sees f =
+  (* mutable: justified because the checker is a callback and the order it was
+     called in is the observation *)
+  let asked = ref [] in
+  let check_volumes (server : Config_file.server) command =
+    asked := (server.ip_address, command) :: !asked;
+    let sudo =
+      match root_sees server.ip_address with
+      | true -> "sudo() { return 0; }"
+      | false -> "sudo() { return 1; }"
+    in
+    Client_fixtures.run_on_this_machine ~sudo ~cwd:(Sys.getcwd ()) command
+  in
+  let outcome = f check_volumes in
+  (outcome, List.rev !asked)
+
+let deployed_to (server : Config_file.server) _payload =
+  Error ("deployed to " ^ server.ip_address)
+
+let read_current _ = Ok Bondi_client.Server_version.minimum_for_volumes
+
+let test_a_missing_host_path_refuses_before_anything_is_posted () =
+  with_mounted_path @@ fun host ->
+  let outcome, asked =
+    checked_by
+      ~root_sees:(fun ip -> ip = "10.0.0.1")
+      (fun check_volumes ->
+        Deploy.deploy_servers ~read_version:read_current ~check_volumes
+          ~deploy:deployed_to (volume_payloads host))
+  in
+  check (list string) "every box is asked, in order" [ "10.0.0.1"; "10.0.0.2" ]
+    (List.map fst asked);
+  match outcome with
+  | Ok () -> fail "expected the box without the path to refuse the run"
+  | Error messages ->
+      let said = String.concat " | " messages in
+      check int
+        ("one refusal, the second box's: " ^ said)
+        1 (List.length messages);
+      check bool
+        ("it names the box: " ^ said)
+        true
+        (Bondi_common.String_utils.contains ~needle:"10.0.0.2" said);
+      check bool
+        ("it names the path: " ^ said)
+        true
+        (Bondi_common.String_utils.contains ~needle:host said);
+      check bool
+        ("and the first box, which had it, was not deployed to: " ^ said)
+        false
+        (Bondi_common.String_utils.contains ~needle:"deployed to" said)
+
+let test_present_host_paths_let_every_server_through () =
+  with_mounted_path @@ fun host ->
+  let outcome, asked =
+    checked_by
+      ~root_sees:(fun _ -> true)
+      (fun check_volumes ->
+        Deploy.deploy_servers ~read_version:read_current ~check_volumes
+          ~deploy:deployed_to (volume_payloads host))
+  in
+  check (list string) "every box is asked about the path it mounts"
+    [ "10.0.0.1"; "10.0.0.2" ]
+    (List.filter_map
+       (fun (ip, command) ->
+         match Bondi_common.String_utils.contains ~needle:host command with
+         | true -> Some ip
+         | false -> None)
+       asked);
+  match outcome with
+  | Ok () -> fail "expected the deployer's own failure to be reported"
+  | Error messages ->
+      check (list string) "both boxes are deployed to, in order"
+        [ "deployed to 10.0.0.1"; "deployed to 10.0.0.2" ]
+        messages
+
+(* A deploy naming only a cron job sends the service's volumes nowhere, so the
+   box is not asked about paths the payload does not carry, and is not held to
+   the volume floor either. The stub that fails when called is what shows the
+   check was never made; the deployer being reached is what shows the run went
+   on. *)
+let test_a_cron_only_deploy_does_not_check_the_services_volumes () =
+  let server = gated_server "10.0.0.1" in
+  let mount =
+    Test_helpers.bind_mount ~host:"/srv/comalito/invoices"
+      ~container:"/data/invoices" ~read_only:false
+  in
+  let config =
+    mk_config
+      ~user_service:
+        {
+          (mk_service "web") with
+          servers = [ server ];
+          volumes = Some [ mount ];
+        }
+      ~cron_jobs:[ mk_cron_job "nightly" "10.0.0.1" ]
+      ()
+  in
+  let payload =
+    Deploy.payload_for config
+      ~deployments:[ ("nightly", "v1") ]
+      ~force_traefik_redeploy:false server None
+  in
+  check bool "the payload carries no volumes" true (payload.volumes = None);
+  let outcome =
+    Deploy.deploy_servers
+      ~read_version:(fun _ ->
+        Ok Bondi_client.Server_version.minimum_for_exec_lines)
+      ~check_volumes:(fun _ _ -> fail "the volumes were checked")
+      ~deploy:deployed_to
+      [ (server, payload) ]
+  in
+  check
+    (result unit (list string))
+    "the deploy went ahead" (Error [ "deployed to 10.0.0.1" ]) outcome
+
+(* The service is being deployed, but to a box that does not run it: that
+   box's payload must not carry the service's volumes. *)
+let test_a_server_outside_the_service_gets_no_volumes () =
+  let service_server = gated_server "10.0.0.1" in
+  let other = gated_server "10.0.0.9" in
+  let mount =
+    Test_helpers.bind_mount ~host:"/srv/comalito/invoices"
+      ~container:"/data/invoices" ~read_only:false
+  in
+  let config =
+    mk_config
+      ~user_service:
+        {
+          (mk_service "web") with
+          servers = [ service_server ];
+          volumes = Some [ mount ];
+        }
+      ~cron_jobs:[ mk_cron_job "nightly" "10.0.0.9" ]
+      ()
+  in
+  let payload =
+    Deploy.payload_for config
+      ~deployments:[ ("web", "v1") ]
+      ~force_traefik_redeploy:false other None
+  in
+  check bool "the payload carries no volumes" true (payload.volumes = None)
+
+(* One box too old and another missing its path: both are refused in the one
+   run, and neither is deployed to. The first box is below the volume floor so
+   it is never asked about its paths; the second is current and is. *)
+let test_mixed_refusals_are_all_reported_and_nothing_is_deployed () =
+  with_mounted_path @@ fun host ->
+  let outcome, asked =
+    checked_by
+      ~root_sees:(fun _ -> false)
+      (fun check_volumes ->
+        Deploy.deploy_servers
+          ~read_version:(fun (server : Config_file.server) ->
+            if server.ip_address = "10.0.0.1" then Ok "0.14.0"
+            else Ok Bondi_client.Server_version.minimum_for_volumes)
+          ~check_volumes ~deploy:deployed_to (volume_payloads host))
+  in
+  check (list string) "only the current box is checked" [ "10.0.0.2" ]
+    (List.map fst asked);
+  match outcome with
+  | Ok () -> fail "expected both boxes to refuse the run"
+  | Error messages ->
+      check int "one refusal per box" 2 (List.length messages);
+      let said = String.concat " | " messages in
+      check bool
+        ("the old box is named: " ^ said)
+        true
+        (Bondi_common.String_utils.contains ~needle:"10.0.0.1" said);
+      check bool
+        ("the box missing the path is named: " ^ said)
+        true
+        (Bondi_common.String_utils.contains ~needle:host said);
+      check bool
+        ("nothing was deployed: " ^ said)
+        false
+        (Bondi_common.String_utils.contains ~needle:"deployed to" said)
 
 (* The same property this client's [setup] cases state, owed a second time here:
    [deploy] is the other command that acts on the configuration, and two commands
@@ -845,6 +1219,13 @@ let () =
             `Quick test_a_deploy_against_an_unreadable_box_is_refused;
           test_case "a cron-declaring deploy against a supported box proceeds"
             `Quick test_cron_deploy_against_a_supported_box_proceeds;
+          test_case "a deploy with volumes is held to the volume floor" `Quick
+            test_gate_with_volumes_holds_to_volume_floor;
+          test_case
+            "a deploy with volumes and cron jobs is held to the highest floor"
+            `Quick test_gate_with_volumes_and_cron_holds_to_highest_floor;
+          test_case "a deploy without volumes is unchanged at 0.22" `Quick
+            test_gate_without_volumes_unchanged_at_0_22;
           test_case
             "a server with no ssh block is told that, not that a read failed"
             `Quick test_a_server_without_an_ssh_block_is_told_so;
@@ -867,6 +1248,12 @@ let () =
         [
           test_case "includes logs flag" `Quick
             test_deploy_payload_includes_logs_flag;
+          test_case "omits the volumes key when none are declared" `Quick
+            test_payload_omits_volumes_key_when_none_declared;
+          test_case "carries volumes when declared" `Quick
+            test_payload_carries_volumes_when_declared;
+          test_case "treats an empty volumes list as none" `Quick
+            test_payload_treats_empty_volumes_as_none;
         ] );
       ( "deprecation notices",
         [
@@ -885,5 +1272,15 @@ let () =
             test_the_gate_refuses_before_anything_is_posted;
           test_case "every gated server is deployed to, in order" `Quick
             test_every_gated_server_is_deployed_to_in_order;
+          test_case "a missing host path refuses before anything is posted"
+            `Quick test_a_missing_host_path_refuses_before_anything_is_posted;
+          test_case "present host paths let every server through" `Quick
+            test_present_host_paths_let_every_server_through;
+          test_case "a cron-only deploy does not check the service's volumes"
+            `Quick test_a_cron_only_deploy_does_not_check_the_services_volumes;
+          test_case "a server outside the service gets no volumes" `Quick
+            test_a_server_outside_the_service_gets_no_volumes;
+          test_case "mixed refusals are all reported and nothing is deployed"
+            `Quick test_mixed_refusals_are_all_reported_and_nothing_is_deployed;
         ] );
     ]

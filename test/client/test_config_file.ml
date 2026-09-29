@@ -1089,6 +1089,169 @@ let test_manifest_with_no_private_key_parses () =
                   check (option string) "and no passphrase is declared" None
                     ssh.private_key_pass)))
 
+(* One service, with whatever [service_lines] adds under it, so the parsing and
+   refusing arms below differ from each other in those lines alone. *)
+let volumes_yaml service_lines =
+  {|service:
+  name: web
+  image: registry.example.com/web
+  port: 8080
+  env_vars: {}
+  servers: []
+|}
+  ^ service_lines ^ {|
+bondi_server:
+  version: 0.1.0
+|}
+
+let invoices_volume ~host =
+  Printf.sprintf
+    {|  volumes:
+    - host: %s
+      container: /data/invoices
+      read_only: false
+|}
+    host
+
+let read_service_volumes yaml =
+  with_temp_config yaml (fun () ->
+      match Config_file.read () with
+      | Error message -> Error message
+      | Ok config -> (
+          match config.user_service with
+          | None -> fail "the fixture declares a service"
+          | Some service -> Ok service.volumes))
+
+let mount_fields = Test_helpers.mount_fields
+
+let test_service_volumes_parse () =
+  let yaml =
+    volumes_yaml
+      {|  volumes:
+    - host: /srv/comalito/invoices
+      container: /data/invoices
+      read_only: false
+    - host: /etc/comalito
+      container: /config
+      read_only: true
+|}
+  in
+  match read_service_volumes yaml with
+  | Error message -> fail message
+  | Ok None -> fail "the declared volumes were dropped"
+  | Ok (Some mounts) ->
+      check
+        (list (triple string string bool))
+        "both entries, in order"
+        [
+          ("/srv/comalito/invoices", "/data/invoices", false);
+          ("/etc/comalito", "/config", true);
+        ]
+        (List.map mount_fields mounts)
+
+let test_service_without_volumes_parses_as_none () =
+  let present =
+    read_service_volumes
+      (volumes_yaml (invoices_volume ~host:"/srv/comalito/invoices"))
+  in
+  let absent = read_service_volumes (volumes_yaml "") in
+  (* The same fixture reaches [Some] with the field declared, so the [None]
+     below is the field's absence and not a service that never parsed. *)
+  (match present with
+  | Ok (Some [ _ ]) -> ()
+  | Ok (Some _)
+  | Ok None ->
+      fail "expected exactly the declared volume"
+  | Error message -> fail message);
+  match absent with
+  | Error message -> fail message
+  | Ok volumes ->
+      check bool "an omitted volumes field is None" true
+        (Option.is_none volumes)
+
+let test_service_volume_relative_path_fails_the_read () =
+  match
+    read_service_volumes
+      (volumes_yaml (invoices_volume ~host:"srv/comalito/invoices"))
+  with
+  | Ok _ -> fail "a relative host path was accepted"
+  | Error message ->
+      check string "the read fails naming the path"
+        "invalid bondi.yaml: volume host path \"srv/comalito/invoices\" is not \
+         absolute: it must start with /"
+        message
+
+let test_service_unknown_key_still_fails_the_read () =
+  (* [volume] for [volumes]: a misspelt key must not be read as a service that
+     declares no mounts. The correctly spelt line parses in the test above. *)
+  let misspelt =
+    volumes_yaml
+      {|  volume:
+    - host: /srv/comalito/invoices
+      container: /data/invoices
+      read_only: false
+|}
+  in
+  match read_service_volumes misspelt with
+  | Ok _ -> fail "an unknown key under service was accepted"
+  | Error message ->
+      check bool
+        (Printf.sprintf "the read is refused as invalid, got: %s" message)
+        true
+        (Bondi_common.String_utils.contains ~needle:"invalid bondi.yaml" message)
+
+let check_volumes_refused ~label yaml =
+  match read_service_volumes yaml with
+  | Ok _ -> fail (label ^ " was accepted")
+  | Error message ->
+      check bool
+        (Printf.sprintf "%s is refused as invalid, got: %s" label message)
+        true
+        (Bondi_common.String_utils.contains ~needle:"invalid bondi.yaml" message)
+
+let test_service_volume_missing_read_only_fails_the_read () =
+  check_volumes_refused ~label:"an entry without read_only"
+    (volumes_yaml
+       {|  volumes:
+    - host: /srv/comalito/invoices
+      container: /data/invoices
+|})
+
+let test_service_volume_string_entry_fails_the_read () =
+  check_volumes_refused ~label:"a string entry"
+    (volumes_yaml {|  volumes:
+    - "/a:/b"
+|})
+
+let test_service_volume_unknown_entry_key_fails_the_read () =
+  check_volumes_refused ~label:"an unknown key inside an entry"
+    (volumes_yaml
+       {|  volumes:
+    - host: /srv/comalito/invoices
+      container: /data/invoices
+      read_only: false
+      mode: rw
+|})
+
+let test_service_volume_yes_read_only_reads_as_true () =
+  (* YAML 1.1 reads bare [yes] as a boolean. Pinned so a change of parser that
+     stops doing so is noticed. *)
+  match
+    read_service_volumes
+      (volumes_yaml
+         {|  volumes:
+    - host: /srv/comalito/invoices
+      container: /data/invoices
+      read_only: yes
+|})
+  with
+  | Error message -> fail message
+  | Ok (Some [ mount ]) ->
+      check bool "yes reads as read_only true" true
+        (let _, _, read_only = mount_fields mount in
+         read_only)
+  | Ok _ -> fail "expected exactly one mount"
+
 let () =
   run "Config_file"
     [
@@ -1114,6 +1277,24 @@ let () =
             `Quick test_parse_service_without_health_timeout;
           test_case "service logs false" `Quick test_service_logs_false;
           test_case "service logs default" `Quick test_service_logs_default;
+        ] );
+      ( "volumes",
+        [
+          test_case "service volumes parse" `Quick test_service_volumes_parse;
+          test_case "service without volumes parses as None" `Quick
+            test_service_without_volumes_parses_as_none;
+          test_case "a relative volume path fails the read" `Quick
+            test_service_volume_relative_path_fails_the_read;
+          test_case "an unknown key under service still fails the read" `Quick
+            test_service_unknown_key_still_fails_the_read;
+          test_case "a volume without read_only fails the read" `Quick
+            test_service_volume_missing_read_only_fails_the_read;
+          test_case "a string volume entry fails the read" `Quick
+            test_service_volume_string_entry_fails_the_read;
+          test_case "an unknown key inside a volume fails the read" `Quick
+            test_service_volume_unknown_entry_key_fails_the_read;
+          test_case "read_only: yes reads as true" `Quick
+            test_service_volume_yes_read_only_reads_as_true;
         ] );
       ( "alloy",
         [

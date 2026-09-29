@@ -41,6 +41,26 @@ let test_contains_word_rejects_a_trailing_fragment () =
     (Test_helpers.contains_word ~word:"healthy"
        "  gateway  docker  no healthcheck defined")
 
+(* A recursive delete that follows a symlink leaves its root: the cleanup of a
+   scratch directory would empty whatever the link points at. *)
+let test_with_temp_dir_does_not_follow_symlinks () =
+  let survivor = Filename.temp_dir "bondi-outside" "" in
+  let file = Filename.concat survivor "keep" in
+  Out_channel.with_open_text file (fun oc -> output_string oc "x");
+  Fun.protect
+    ~finally:(fun () ->
+      (try Sys.remove file with
+      | Sys_error _ -> ());
+      try Sys.rmdir survivor with
+      | Sys_error _ -> ())
+    (fun () ->
+      let inside = ref "" in
+      Test_helpers.with_temp_dir "bondi-inside" (fun dir ->
+          inside := dir;
+          Unix.symlink survivor (Filename.concat dir "link"));
+      check bool "the temp dir is gone" false (Sys.file_exists !inside);
+      check bool "the linked-to file survives" true (Sys.file_exists file))
+
 let () =
   run "Test_helpers"
     [
@@ -64,5 +84,10 @@ let () =
             test_contains_word_spans_lines;
           test_case "a trailing fragment" `Quick
             test_contains_word_rejects_a_trailing_fragment;
+        ] );
+      ( "with_temp_dir",
+        [
+          test_case "does not follow symlinks" `Quick
+            test_with_temp_dir_does_not_follow_symlinks;
         ] );
     ]
