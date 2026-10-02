@@ -320,6 +320,18 @@ let test_deploy_adds_bondi_logs_label () =
           check bool "has bondi.logs label" true
             (List.exists (fun (k, _) -> k = "bondi.logs") labels))
 
+let test_service_labels_carry_service_name () =
+  let context = { Simple.current_traefik = None; current_workload = None } in
+  match Simple.plan minimal_input context with
+  | Error e -> Alcotest.fail ("plan failed: " ^ e)
+  | Ok actions -> (
+      match extract_workload_labels actions with
+      | None -> Alcotest.fail "expected labels on workload container"
+      | Some labels ->
+          check (option string) "bondi.name is the service name"
+            (Some "my-service")
+            (List.assoc_opt "bondi.name" labels))
+
 let () =
   run "Simple.plan"
     [
@@ -369,5 +381,7 @@ let () =
             test_deploy_adds_bondi_type_label;
           test_case "adds bondi.logs label" `Quick
             test_deploy_adds_bondi_logs_label;
+          test_case "carries the service name" `Quick
+            test_service_labels_carry_service_name;
         ] );
     ]

@@ -1,0 +1,31 @@
+; Whether the generated relabel rules keep and drop the containers they mean to
+; is a question only Alloy can answer: the rules name labels, and which labels
+; exist is decided by Alloy's Docker discovery, not by this tree. A test that
+; reads the generated text agrees with whatever the generator wrote, including
+; a rule over a label nothing produces. So the script runs the real image
+; against real labelled containers and reads what its components computed.
+;
+; The verdict is the script's exit code, as for test/ssh_real_sshd: it must skip
+; where Docker is absent and fail where Docker was expected, and neither is
+; expressible as a snapshot.
+
+; A private probe: no public name and no package, so nothing installs it and
+; nothing but the rule below builds or runs it.
+
+(executable
+ (name emit_config)
+ (modules emit_config)
+ (libraries bondi.common))
+
+; CI is named rather than inherited, so a run that skipped for want of Docker is
+; not the cached answer to a run that must fail because CI is set.
+
+(rule
+ (alias runtest)
+ (deps
+  (:script alloy_real_docker.sh))
+ (action
+  (setenv
+   CI
+   %{env:CI=}
+   (run bash %{script} %{exe:emit_config.exe}))))

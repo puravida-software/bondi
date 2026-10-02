@@ -36,16 +36,9 @@ let test_collect_mode_invalid () =
       check bool "error mentions valid options" true
         (contains ~needle:"services_only" msg)
 
-(* --- generate: bondi.logs drop rule --- *)
-
-let test_generate_includes_logs_drop_rule () =
-  let river = R.generate base_config in
-  check bool "contains bondi.logs source label" true
-    (contains ~needle:"bondi.logs" river);
-  check bool "contains drop action for logs=false" true
-    (contains ~needle:"\"false\"" river
-    && contains ~needle:"\"drop\"" river
-    && contains ~needle:"bondi.logs" river)
+(* What the relabel rules keep and drop is judged by a real Alloy against real
+   labelled containers, in test/alloy_real_docker: a text match here agrees
+   with a rule over a label discovery never produces. *)
 
 (* --- generate: escaping --- *)
 
@@ -91,23 +84,6 @@ let test_generate_escapes_excluded_regex () =
   let river = R.generate config in
   check bool "regex dot escaped" true
     (contains ~needle:"my\\.service\\+name" river)
-
-(* --- generate: excluded_containers + collect mode integration --- *)
-
-let test_generate_services_only_with_exclusions () =
-  let config =
-    {
-      base_config with
-      collect = Services_only;
-      excluded_containers = [ "noisy-svc" ];
-    }
-  in
-  let river = R.generate config in
-  check bool "has services_only keep rule" true
-    (contains ~needle:"^(service|cron)$" river);
-  check bool "has exclusion rule" true (contains ~needle:"noisy-svc" river);
-  check bool "has bondi.logs drop rule" true
-    (contains ~needle:"bondi.logs" river)
 
 (* --- env_file_contents --- *)
 
@@ -286,16 +262,12 @@ let () =
         ] );
       ( "generate",
         [
-          test_case "includes bondi.logs drop rule" `Quick
-            test_generate_includes_logs_drop_rule;
           test_case "escapes endpoint" `Quick test_generate_escapes_endpoint;
           test_case "uses env() for credentials" `Quick
             test_generate_uses_env_for_credentials;
           test_case "escapes labels" `Quick test_generate_escapes_labels;
           test_case "escapes excluded container regex" `Quick
             test_generate_escapes_excluded_regex;
-          test_case "services_only with exclusions" `Quick
-            test_generate_services_only_with_exclusions;
         ] );
       ( "env_file_contents",
         [

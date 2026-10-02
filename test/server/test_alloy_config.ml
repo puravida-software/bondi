@@ -17,19 +17,13 @@ let test_river_config_all_mode () =
   Alcotest.check Alcotest.bool "contains discovery.docker" true
     (Bondi_common.String_utils.contains ~needle:"discovery.docker" river);
   Alcotest.check Alcotest.bool "contains bondi.managed label filter" true
-    (Bondi_common.String_utils.contains ~needle:"bondi.managed" river);
-  Alcotest.check Alcotest.bool "does not filter by bondi.type" false
-    (Bondi_common.String_utils.contains ~needle:"bondi.type" river
-    && Bondi_common.String_utils.contains ~needle:"drop" river
-    && Bondi_common.String_utils.contains ~needle:"infrastructure" river)
+    (Bondi_common.String_utils.contains ~needle:"bondi.managed" river)
 
 let test_river_config_services_only () =
   let config = { base_config with collect = Services_only } in
   let river = Alloy.generate_river_config config in
   Alcotest.check Alcotest.bool "contains discovery.docker" true
-    (Bondi_common.String_utils.contains ~needle:"discovery.docker" river);
-  Alcotest.check Alcotest.bool "filters by bondi.type" true
-    (Bondi_common.String_utils.contains ~needle:"bondi.type" river)
+    (Bondi_common.String_utils.contains ~needle:"discovery.docker" river)
 
 let test_river_config_excluded_containers () =
   let config =

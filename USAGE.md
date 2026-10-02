@@ -731,7 +731,7 @@ alloy:
 | Field | Default | Description |
 |---|---|---|
 | `image` | `grafana/alloy:v1.8.0` | Alloy Docker image. Override to pin or upgrade. |
-| `collect` | `all` | `all` collects logs from every Bondi-managed container (service, cron, infrastructure). `services_only` restricts to service and cron containers, excluding infrastructure like the orchestrator and Traefik. |
+| `collect` | `all` | `all` collects logs from every Bondi-managed container (service, cron, managed containers, infrastructure) that is not opted out. `services_only` restricts to service and cron containers, excluding managed containers and infrastructure like the orchestrator and Traefik. Before `0.24.1`, `services_only` shipped nothing at all; see [Upgrading to 0.24.1](#upgrading-to-0241). |
 | `labels` | _(none)_ | Key-value pairs added as external labels on every log line sent to Grafana Cloud. Useful for filtering in Loki by environment, team, etc. |
 
 ### Opting a service out of log collection
@@ -745,6 +745,44 @@ service:
   port: 8080
   logs: false
 ```
+
+The service's container is then labelled `bondi.logs=false`, and a container carrying that label ships nothing under either `collect` mode. `bondi setup` also excludes the service by name (any container whose name contains it), so its logs stay out of Loki even before its next deploy has put the label on the container. The `bondi-alloy` sidecar carries the same label, so Alloy does not ship its own logs.
+
+### Finding a container's logs in Loki
+
+Every line Bondi ships carries a `container` label naming the workload it came from:
+
+| Container | `container` value |
+|---|---|
+| Your service | the service's `name` |
+| A cron job | the job's `name` |
+| A managed container | its `name` in `managed_containers` (`gateway`, not `bondi-gateway`) |
+| Infrastructure | the container's name: `bondi-orchestrator`, `bondi-traefik` |
+
+Query by it in Grafana's Explore view or any LogQL client:
+
+```logql
+{container="my-api"}
+{container="daily-backup"} |= "error"
+```
+
+The value stays the same from one run to the next, so one workload is one stream. A cron job's container runs under a name with a timestamp in it, and a blue-green deploy starts the incoming service under a temporary name; both carry a `bondi.name` label holding the workload's name, and that label is what `container` is read from. A container started before it carried `bondi.name` is labelled with its container name instead, so it is never unlabelled. For a service that is its name already; for a cron job, every run after the upgrade carries the label.
+
+### Upgrading to 0.24.1
+
+Before `0.24.1`, the generated Alloy configuration read the `bondi.type` and `bondi.logs` labels under names Alloy's Docker discovery never produces, so neither rule ever matched:
+
+- **`collect: services_only` shipped nothing.** It now ships your service and cron jobs, as documented above.
+- **The `bondi.logs=false` label was ignored.** A service with `logs: false` was kept out only by the name exclusion `bondi setup` adds for it. The label is now honoured as well, under either mode, and under `collect: all` the `bondi-alloy` sidecar's own logs stop shipping.
+- **Lines carried no `container` label.** They now do, as described above.
+
+The Alloy configuration is written by `bondi setup`, not by `bondi deploy`, so a deploy alone changes none of this. To adopt it:
+
+1. Upgrade the `bondi` CLI to `0.24.1` or later. The CLI generates the configuration that `setup` writes to the server, so this is the step that fixes the filters.
+2. Set `bondi_server.version` to `0.24.1` or later. The orchestrator is what puts `bondi.name` on the cron and service containers it starts, so without it every cron run is a stream of its own.
+3. Run `bondi setup`. It rewrites `/etc/bondi/alloy/config.alloy` and replaces the `bondi-alloy` container.
+
+Your service needs no redeploy for its logs to start shipping or to carry `container`.
 
 ### Removing Alloy
 

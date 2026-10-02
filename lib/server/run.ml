@@ -92,6 +92,9 @@ let run_opts ~container_name ~full_image payload :
             ("bondi.managed", "true");
             ("bondi.type", "cron");
             ("bondi.logs", "true");
+            (* The job, not [container_name]: a pass runs under a timestamped
+               temporary name, and the log stream must stay one per job. *)
+            ("bondi.name", payload.job);
           ];
       exposed_ports = None;
     }
