@@ -69,17 +69,18 @@ jobs:
       - name: Build
         run: just build
 
-      # The Alloy image is pulled here, in a step of its own, so a registry
-      # that cannot serve it fails this step by name and never reads as a
-      # verdict on the log-collection rules. The image is the one the server
-      # deploys, asked of the built tree rather than written out a second time
-      # here where it could drift from it.
-      - name: Pull Alloy image
+      # The images the log-collection test runs are pulled here, in a step of
+      # their own, so a registry that cannot serve one fails this step by name
+      # and never reads as a verdict on the log-collection rules; the test
+      # pulls only an image that is still absent. Both are asked of the built
+      # tree rather than written out a second time here where they could drift.
+      - name: Pull log-collection test images
         run: |
           set -euo pipefail
-          alloy_image=$(opam exec -- dune exec \
-            ./test/alloy_real_docker/emit_config.exe -- image)
-          docker pull "$alloy_image"
+          for what in image fixture-image; do
+            docker pull "$(opam exec -- dune exec \
+              ./test/alloy_real_docker/emit_config.exe -- "$what")"
+          done
 
       - name: Test
         run: just test

@@ -36,9 +36,62 @@ let test_collect_mode_invalid () =
       check bool "error mentions valid options" true
         (contains ~needle:"services_only" msg)
 
-(* What the relabel rules keep and drop is judged by a real Alloy against real
-   labelled containers, in test/alloy_real_docker: a text match here agrees
-   with a rule over a label discovery never produces. *)
+(* --- generate: relabel rules --- *)
+
+(* These pin the text the generator emits; whether Alloy keeps and drops the
+   right containers on those rules is judged by a real Alloy against real
+   labelled containers, in test/alloy_real_docker. *)
+
+let keep_rule =
+  "source_labels = [\"__meta_docker_container_label_bondi_type\"]\n\
+   \t\tregex         = \"^(service|cron)$\"\n\
+   \t\taction        = \"keep\""
+
+let logs_drop_rule =
+  "source_labels = [\"__meta_docker_container_label_bondi_logs\"]\n\
+   \t\tregex         = \"false\"\n\
+   \t\taction        = \"drop\""
+
+let test_relabel_keep_rule_only_in_services_only () =
+  check bool "services_only keeps service and cron" true
+    (contains ~needle:keep_rule
+       (R.generate { base_config with collect = Services_only }));
+  check bool "all has no keep rule" false
+    (contains ~needle:keep_rule (R.generate { base_config with collect = All }))
+
+let test_relabel_logs_drop_rule_in_both_modes () =
+  List.iter
+    (fun collect ->
+      check bool "bondi_logs drop rule present" true
+        (contains ~needle:logs_drop_rule
+           (R.generate { base_config with collect })))
+    [ R.All; R.Services_only ]
+
+let test_relabel_reads_no_dotted_label_names () =
+  List.iter
+    (fun collect ->
+      let river = R.generate { base_config with collect } in
+      check bool "no bare bondi.type source" false
+        (contains ~needle:"source_labels = [\"bondi.type\"]" river);
+      check bool "no bare bondi.logs source" false
+        (contains ~needle:"source_labels = [\"bondi.logs\"]" river))
+    [ R.All; R.Services_only ]
+
+let test_relabel_container_name_precedes_bondi_name () =
+  let river = R.generate base_config in
+  let fallback =
+    Bondi_common.String_utils.index_of
+      ~needle:
+        "[\"__meta_docker_container_name\"]\n\t\tregex         = \"/(.*)\""
+      river
+  in
+  let override =
+    Bondi_common.String_utils.index_of
+      ~needle:"[\"__meta_docker_container_label_bondi_name\"]" river
+  in
+  match (fallback, override) with
+  | Some f, Some o -> check bool "fallback precedes override" true (f < o)
+  | _ -> fail "container rules missing"
 
 (* --- generate: escaping --- *)
 
@@ -268,6 +321,17 @@ let () =
           test_case "escapes labels" `Quick test_generate_escapes_labels;
           test_case "escapes excluded container regex" `Quick
             test_generate_escapes_excluded_regex;
+        ] );
+      ( "relabel rules",
+        [
+          test_case "keep rule only in services_only" `Quick
+            test_relabel_keep_rule_only_in_services_only;
+          test_case "logs drop rule in both modes" `Quick
+            test_relabel_logs_drop_rule_in_both_modes;
+          test_case "reads no dotted label names" `Quick
+            test_relabel_reads_no_dotted_label_names;
+          test_case "container name precedes bondi.name" `Quick
+            test_relabel_container_name_precedes_bondi_name;
         ] );
       ( "env_file_contents",
         [

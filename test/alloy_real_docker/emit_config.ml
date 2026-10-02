@@ -11,7 +11,12 @@ module R = Bondi_common.Alloy_river
 
 let usage =
   "usage: emit_config.exe image\n\
+  \       emit_config.exe fixture-image\n\
   \       emit_config.exe config (all|services_only) [EXCLUDED_NAME...]\n"
+
+(* A small image whose only job is to exist with labels. Pinned so the fixture
+   is the same container on every machine. *)
+let fixture_image = "busybox:1.37.0"
 
 let config_of collect excluded_containers : R.config =
   {
@@ -30,6 +35,7 @@ let fail message =
 let () =
   match Array.to_list Sys.argv with
   | [ _; "image" ] -> print_endline Bondi_common.Defaults.alloy_image
+  | [ _; "fixture-image" ] -> print_endline fixture_image
   | _ :: "config" :: mode :: excluded -> (
       match R.collect_mode_of_string mode with
       | Ok collect -> print_string (R.generate (config_of collect excluded))

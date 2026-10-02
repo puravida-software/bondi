@@ -766,7 +766,7 @@ Query by it in Grafana's Explore view or any LogQL client:
 {container="daily-backup"} |= "error"
 ```
 
-The value stays the same from one run to the next, so one workload is one stream. A cron job's container runs under a name with a timestamp in it, and a blue-green deploy starts the incoming service under a temporary name; both carry a `bondi.name` label holding the workload's name, and that label is what `container` is read from. A container started before it carried `bondi.name` is labelled with its container name instead, so it is never unlabelled. For a service that is its name already; for a cron job, every run after the upgrade carries the label.
+The value stays the same from one run to the next, so one workload is one stream, provided names differ across services, cron jobs and managed containers: two workloads sharing a name share one stream. A cron job's container runs under a name with a timestamp in it, and a blue-green deploy starts the incoming service under a temporary name; both carry a `bondi.name` label holding the workload's name, and that label is what `container` is read from. A container started before it carried `bondi.name` is labelled with its container name instead, so it is never unlabelled. For a service that is its name already; for a cron job, every run after the upgrade carries the label.
 
 ### Upgrading to 0.24.1
 

@@ -143,9 +143,10 @@ let service_config (input : deploy_input) :
                 | Error _ -> image
               in
               (* The service name, not the container name: blue-green starts the
-                 incoming colour under a temporary name. Without a service name
-                 the label is left off and log collection falls back to the
-                 container name. *)
+                 incoming colour under a temporary name. The [None] arm only
+                 mirrors [deploy_input]'s optional field: a service deploy
+                 without a service name is refused by the plan, so no deploy
+                 reaches it. *)
               let name_label =
                 match input.service_name with
                 | Some name -> [ ("bondi.name", name) ]

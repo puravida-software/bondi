@@ -54,7 +54,7 @@ unavailable() {
       "$1" >&2
     exit 1
   fi
-  printf 'skipped: %s. This case is not skippable where CI is set, and fails there instead.\n' "$1"
+  printf 'skipped: %s. This case is not skippable where CI is set, and fails there instead. Dune caches a skip: re-run with: dune build @test/alloy_real_docker/runtest --force, once it is available.\n' "$1"
   exit 0
 }
 
@@ -64,10 +64,15 @@ for program in docker jq curl; do
 done
 docker info > /dev/null 2>&1 \
   || unavailable "the Docker daemon does not answer 'docker info'"
+# The Alloy container mounts this path and the config targets it, so a daemon
+# reached some other way (DOCKER_HOST, a context) cannot be tested here.
+[ -S /var/run/docker.sock ] \
+  || unavailable "/var/run/docker.sock is not a socket on this machine"
 
-# A small image whose only job is to exist with labels. Pinned so the fixture
-# is the same container on every machine.
-fixture_image='busybox:1.37.0'
+if ! fixture_image=$("$emit_config" fixture-image); then
+  printf 'FAIL: %s could not name the fixture image.\n' "$emit_config" >&2
+  exit 1
+fi
 
 if ! alloy_image=$("$emit_config" image); then
   printf 'FAIL: %s could not name the Alloy image.\n' "$emit_config" >&2
@@ -116,6 +121,7 @@ harness_failure() {
 }
 
 for image in "$fixture_image" "$alloy_image"; do
+  docker image inspect "$image" > /dev/null 2>&1 && continue
   docker pull -q "$image" > /dev/null \
     || harness_failure "could not pull $image; this is a harness failure, not a verdict on the rules"
 done
@@ -129,10 +135,12 @@ fixtures=(
   'service-logs-false bondi.type=service bondi.logs=false'
   'service-logs-absent bondi.type=service'
   'cron-logs-true bondi.type=cron bondi.logs=true'
-  'managed bondi.type=managed bondi.logs=true'
+  "managed bondi.type=managed bondi.logs=true bondi.name=$prefix-managed-name"
   'infrastructure-logs-true bondi.type=infrastructure bondi.logs=true'
   'infrastructure-logs-false bondi.type=infrastructure bondi.logs=false'
   'untyped'
+  # An empty `bondi.name` is no name: the container name is the fallback.
+  'service-name-empty bondi.type=service bondi.name='
   'excluded bondi.type=service bondi.logs=true'
   # A cron pass runs under its job name plus a timestamp for its whole life,
   # so the name discovery sees differs on every pass; `bondi.name` carries the
@@ -263,6 +271,8 @@ run_alloy() {
   # Read after the arm, so the output is computed from the input the arm saw.
   relabel=$(curl -sf "$api/discovery.relabel.bondi") \
     || harness_failure "the relabel component stopped answering for $mode"
+  jq -e '.exports' <<< "$relabel" > /dev/null \
+    || harness_failure "the relabel component's answer for $mode has no exports"
   kept=$(target_names "$relabel" exports output)
   docker rm -f "$name" > /dev/null 2>&1
   return 0
@@ -313,8 +323,14 @@ if run_alloy all; then
     'service-logs-absent=kept' \
     "$(verdict service-logs-absent)"
   report 'all_keeps_every_non_opted_out_container' \
-    'service-logs-true=kept service-logs-absent=kept cron-logs-true=kept managed=kept infrastructure-logs-true=kept untyped=kept' \
-    "$(verdict service-logs-true service-logs-absent cron-logs-true managed infrastructure-logs-true untyped)"
+    'service-logs-true=kept service-logs-absent=kept service-name-empty=kept cron-logs-true=kept managed=kept infrastructure-logs-true=kept untyped=kept' \
+    "$(verdict service-logs-true service-logs-absent service-name-empty cron-logs-true managed infrastructure-logs-true untyped)"
+  report 'managed_container_label_is_its_bondi_name_not_the_gateway_default' \
+    "$prefix-managed-name" \
+    "$(container_of managed)"
+  report 'empty_bondi_name_falls_back_to_container_name' \
+    "$prefix-service-name-empty" \
+    "$(container_of service-name-empty)"
   report 'excluded_name_dropped (all)' \
     'excluded=dropped service-logs-true=kept' \
     "$(verdict excluded service-logs-true)"
