@@ -28,14 +28,30 @@ val generate : config -> string
 
     The generated config:
     - Discovers containers via Docker socket with [bondi.managed=true]
-    - Filters by collect mode when [Services_only]
-    - Drops containers with [bondi.logs=false] label
-    - Drops containers matching [excluded_containers] names
+    - Keeps only [bondi.type] [service] and [cron] when [Services_only]
+    - Drops containers with [bondi.logs=false] label, under either mode
+    - Drops containers whose name contains one of [excluded_containers]
+    - Sets a [container] label on every kept target: the container's
+      [bondi.name] label when it is non-empty, otherwise the container name
+      without Docker's leading [/]
     - Attaches user-provided [labels] as external labels
     - Forwards to Grafana Cloud endpoint with basic auth credentials referenced
-      via [env("GRAFANA_CLOUD_INSTANCE_ID")] and [env("GRAFANA_CLOUD_API_KEY")]
-      — credentials are not baked into the config file; they must be provided as
-      environment variables to the Alloy container *)
+      via [sys.env("GRAFANA_CLOUD_INSTANCE_ID")] and
+      [sys.env("GRAFANA_CLOUD_API_KEY")] — credentials are not baked into the
+      config file; they must be provided as environment variables to the Alloy
+      container
+
+    The rules read container labels by the names Alloy's Docker discovery gives
+    them, never by their Docker spelling: a label [bondi.x] reaches a target as
+    [__meta_docker_container_label_bondi_x]. A rule naming [bondi.x] itself
+    reads an empty value on every target, so it would keep nothing or drop
+    nothing.
+
+    [bondi.name] carries the workload's name, which the container name does not
+    always: a cron pass runs under a timestamped name and a blue-green candidate
+    under a temporary one, so the container name alone would give each pass or
+    deploy a log stream of its own. The fallback labels containers started
+    before they carried [bondi.name]. *)
 
 val env_file_contents : config -> string
 (** The environment file the generated River configuration reads its Grafana

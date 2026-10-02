@@ -74,20 +74,25 @@ let generate (config : config) : string =
   (* Relabel rules for discovery *)
   add "discovery.relabel \"bondi\" {\n";
   add "\ttargets = discovery.docker.containers.targets\n";
+  (* The rules read labels by the names Docker discovery gives them: a container
+     label [bondi.x] reaches a target as
+     [__meta_docker_container_label_bondi_x], and no target carries a label
+     spelled [bondi.x]. A rule naming that spelling reads an empty value on
+     every target, so a [keep] keeps nothing and a [drop] drops nothing. *)
   (* Collect mode filtering *)
   (match config.collect with
   | All -> ()
   | Services_only ->
       add "\n";
       add "\trule {\n";
-      add "\t\tsource_labels = [\"bondi.type\"]\n";
+      add "\t\tsource_labels = [\"__meta_docker_container_label_bondi_type\"]\n";
       add "\t\tregex         = \"^(service|cron)$\"\n";
       add "\t\taction        = \"keep\"\n";
       add "\t}\n");
   (* Per-service logs opt-out via bondi.logs label *)
   add "\n";
   add "\trule {\n";
-  add "\t\tsource_labels = [\"bondi.logs\"]\n";
+  add "\t\tsource_labels = [\"__meta_docker_container_label_bondi_logs\"]\n";
   add "\t\tregex         = \"false\"\n";
   add "\t\taction        = \"drop\"\n";
   add "\t}\n";
@@ -102,6 +107,31 @@ let generate (config : config) : string =
       add "\t\taction        = \"drop\"\n";
       add "\t}\n")
     config.excluded_containers;
+  (* The [container] label names the workload a line came from. It is written
+     to a label of its own, so the rules above read the raw container name
+     whatever order they come in. The container name, without the leading [/]
+     Docker gives it, is the fallback, for containers started before
+     [bondi.name] was set on them. The second rule overrides it when
+     [bondi.name] is non-empty: a cron pass and a blue-green candidate run
+     under a temporary name that differs from run to run, and [bondi.name]
+     holds the one that does not. The order is the precedence: swapped, the
+     temporary name would win. *)
+  add "\n";
+  add "\trule {\n";
+  add "\t\tsource_labels = [\"__meta_docker_container_name\"]\n";
+  add "\t\tregex         = \"/(.*)\"\n";
+  add "\t\ttarget_label  = \"container\"\n";
+  add "\t\treplacement   = \"$1\"\n";
+  add "\t\taction        = \"replace\"\n";
+  add "\t}\n";
+  add "\n";
+  add "\trule {\n";
+  add "\t\tsource_labels = [\"__meta_docker_container_label_bondi_name\"]\n";
+  add "\t\tregex         = \"(.+)\"\n";
+  add "\t\ttarget_label  = \"container\"\n";
+  add "\t\treplacement   = \"$1\"\n";
+  add "\t\taction        = \"replace\"\n";
+  add "\t}\n";
   add "}\n\n";
   (* Loki source *)
   add "loki.source.docker \"bondi\" {\n";

@@ -84,6 +84,23 @@ let test_cron_run_container_declares_no_restart_policy () =
     "a one-shot cron container carries no restart policy" "no host config"
     (show_restart_policy opts.host_config)
 
+(* A cron pass runs under a timestamped temporary name, so the container name
+   differs on every pass. The workload's name must reach the labels from the
+   payload's job, never from that temporary name. *)
+let test_run_opts_labels_cron_with_job_name () =
+  let opts : Docker.run_image_options =
+    Run.run_opts ~container_name:"nightly-1759312345.123" ~full_image:"myapp:v1"
+      (mk_payload ())
+  in
+  match opts.config.labels with
+  | None -> Alcotest.fail "expected cron labels on the run options"
+  | Some labels ->
+      Alcotest.check
+        Alcotest.(option string)
+        "bondi.name is the job, not the temporary container name"
+        (Some "nightly")
+        (List.assoc_opt "bondi.name" labels)
+
 let test_networking_conf_none_when_network_absent () =
   check_networking_conf "absent network produces no networking config"
     ~expected:None
@@ -491,6 +508,8 @@ let () =
             test_run_opts_absent_network;
           Alcotest.test_case "cron container declares no restart policy" `Quick
             test_cron_run_container_declares_no_restart_policy;
+          Alcotest.test_case "labels a cron container with its job name" `Quick
+            test_run_opts_labels_cron_with_job_name;
         ] );
       ( "run",
         [

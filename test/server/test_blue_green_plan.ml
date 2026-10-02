@@ -364,6 +364,39 @@ let test_simple_and_blue_green_mount_identically () =
   check host_config_testable "blue-green first deploy" simple
     (new_container_host_config "first deploy" input_with_volumes empty_context)
 
+(* The colour started beside a running workload runs as [<svc>-new] and is
+   renamed afterwards, so its container name is not the workload's name. The
+   name check is the arm: it proves the label below was read off the temp
+   container and not off the direct-name first-deploy site. *)
+let test_blue_green_temp_container_carries_service_name () =
+  match Blue_green.config_of_input input_with_volumes with
+  | Error e -> Alcotest.fail ("config refused: " ^ e)
+  | Ok config -> (
+      let plan = Blue_green.plan config context_with_workload in
+      let started =
+        List.find_map
+          (function
+            | Blue_green.RunNewContainer { container_name; config; _ } ->
+                Some (container_name, config.labels)
+            | Blue_green.CleanupOrphanedContainer _
+            | Blue_green.WaitForHealthy _
+            | Blue_green.DisconnectFromNetwork _
+            | Blue_green.DrainGracePeriod _
+            | Blue_green.StopAndRemoveContainer _
+            | Blue_green.RenameContainer _ ->
+                None)
+          plan.success_path
+      in
+      match started with
+      | None -> Alcotest.fail "expected a RunNewContainer action"
+      | Some (_, None) -> Alcotest.fail "expected labels on the temp container"
+      | Some (container_name, Some labels) ->
+          check string "started under the temp name" "my-service-new"
+            container_name;
+          check (option string) "bondi.name is the service, not the temp name"
+            (Some "my-service")
+            (List.assoc_opt "bondi.name" labels))
+
 let test_plan_orphan_cleanup () =
   let orphan =
     Server_test_helpers.mk_container ~id:"orphan-id" ~image:"myapp:v0.8"
@@ -458,8 +491,11 @@ let () =
           test_case "default drain period" `Quick test_plan_default_drain_period;
         ] );
       ( "container naming",
-        [ test_case "temp container name" `Quick test_plan_temp_container_name ]
-      );
+        [
+          test_case "temp container name" `Quick test_plan_temp_container_name;
+          test_case "temp container carries the service name" `Quick
+            test_blue_green_temp_container_carries_service_name;
+        ] );
       ( "traefik labels",
         [
           test_case "labels on new container" `Quick

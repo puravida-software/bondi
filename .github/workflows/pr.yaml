@@ -37,26 +37,50 @@ jobs:
       # happens to ship is not a dependency this repository gets to have
       # unwritten.
       #
+      # test/alloy_real_docker/alloy_real_docker.sh is the same kind of test
+      # for log collection: it runs the Alloy image the server deploys against
+      # labelled containers, because which containers the generated config
+      # keeps is decided by Alloy's Docker discovery and by nothing this tree
+      # can read. It too refuses to skip when CI is set. Docker, jq and curl
+      # come with the hosted runner image rather than from a step here, so the
+      # loop is what says so when an image stops shipping one of them, and
+      # `docker info` is what says the daemon behind the client answers.
+      #
       # The loop is the precondition rather than a formality, and it names
-      # every program that script `require`s, not only the ones installed
+      # every program those scripts need, not only the ones installed
       # above. `setsid` comes from util-linux on the base image, so a runner
       # image that drops it says so here instead of arriving later as a test
       # that cannot find a program it was promised. PATH is asserted by the
       # same loop: the daemon installs to a sbin directory, and that directory
       # being on this runner's PATH is assumed here and not verified anywhere
       # else.
-      - name: Install OpenSSH
+      - name: Install test prerequisites
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
             openssh-server openssh-client
-          for program in sshd ssh ssh-agent ssh-add ssh-keygen setsid; do
+          for program in sshd ssh ssh-agent ssh-add ssh-keygen setsid \
+            docker jq curl; do
             command -v "$program"
           done
+          docker info --format 'Docker Engine {{.ServerVersion}}'
 
       - name: Build
         run: just build
+
+      # The images the log-collection test runs are pulled here, in a step of
+      # their own, so a registry that cannot serve one fails this step by name
+      # and never reads as a verdict on the log-collection rules; the test
+      # pulls only an image that is still absent. Both are asked of the built
+      # tree rather than written out a second time here where they could drift.
+      - name: Pull log-collection test images
+        run: |
+          set -euo pipefail
+          for what in image fixture-image; do
+            docker pull "$(opam exec -- dune exec \
+              ./test/alloy_real_docker/emit_config.exe -- "$what")"
+          done
 
       - name: Test
         run: just test

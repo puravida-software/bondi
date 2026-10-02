@@ -142,6 +142,16 @@ let service_config (input : deploy_input) :
                 | Ok (name, tag) -> if tag = "" then name ^ ":latest" else image
                 | Error _ -> image
               in
+              (* The service name, not the container name: blue-green starts the
+                 incoming colour under a temporary name. The [None] arm only
+                 mirrors [deploy_input]'s optional field: a service deploy
+                 without a service name is refused by the plan, so no deploy
+                 reaches it. *)
+              let name_label =
+                match input.service_name with
+                | Some name -> [ ("bondi.name", name) ]
+                | None -> []
+              in
               let labels : string_map =
                 [
                   ("bondi.managed", "true");
@@ -159,6 +169,7 @@ let service_config (input : deploy_input) :
                   ( "traefik.http.services.bondi.loadbalancer.server.port",
                     string_of_int port );
                 ]
+                @ name_label
               in
               let env = Option.map env_vars_to_list input.env_vars in
               let config : Docker.Client.container_config =
