@@ -114,22 +114,11 @@ check-server-image TAG:
 # clean base image, and that the packaged binary starts and answers every one of
 # its subcommands — the regression class that plain `dune build` cannot catch.
 # Requires Docker.
-# Uses the CI-computed version when commitizen (cz) is present; otherwise a dev
-# placeholder, since the version is only embedded at runtime and does not affect
-# what this step verifies.
+# Always builds as a dev placeholder: the version is only embedded in the binary
+# and does not affect what this step verifies, and computing it needs unreleased
+# commits, which a working tree before its first commit does not have.
 build-server-ci:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if command -v cz >/dev/null 2>&1; then
-        VERSION=$(just next-version)
-    else
-        VERSION=0.0.0-dev
-    fi
-    if [ -z "$VERSION" ]; then
-        echo "error: could not determine a version for the server image build" >&2
-        exit 1
-    fi
-    just build-server "$VERSION"
+    just build-server 0.0.0-dev
     just verify-server-image latest
     just verify-server-image-negative latest
     just check-server-image latest
