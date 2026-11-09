@@ -207,6 +207,27 @@ type image_inspect_response = {
 }
 [@@deriving yojson { strict = false }]
 
+(** One entry of [GET /images/json], read down to what image cleanup decides
+    from. Every other key the Engine reports is ignored rather than refused, but
+    [Id] and [RepoTags] must be present: an absent [RepoTags] is an [Error], not
+    an untagged image. Kept in its own module so its labels do not shadow
+    [container]'s. *)
+module Image_summary = struct
+  type repo_tags = string list
+
+  (* An untagged image reports RepoTags as an empty list on some daemon
+     versions and as null on others; both mean it carries no tag. A missing
+     key is not decoded as untagged: the Engine did not say, and image cleanup
+     removes what it believes is untagged. *)
+  let repo_tags_of_yojson (json : Yojson.Safe.t) : (repo_tags, string) result =
+    match json with
+    | `Null -> Ok []
+    | json -> [%of_yojson: string list] json
+
+  type t = { id : string; [@key "Id"] repo_tags : repo_tags [@key "RepoTags"] }
+  [@@deriving of_yojson { strict = false }]
+end
+
 type run_image_options = {
   container_name : string;
   config : container_config;
@@ -255,8 +276,8 @@ let default_socket_path : string = "/var/run/docker.sock"
 
    [negotiate] ends the sequence by asking the daemon instead of predicting it.
    The value stays low because nothing here needs a modern API -- the endpoints
-   used are /containers/{json,create,...}, /images/create, /images/{name} and
-   /networks{,/create}, all of which predate 1.41 -- so a daemon's floor is the
+   used are /containers/{json,create,...}, /images/{json,create}, /images/{name}
+   and /networks{,/create}, all of which predate 1.41 -- so a daemon's floor is the
    only thing that ever raises it. *)
 let default_api_version : string = "v1.41"
 let preferred_api_version : string = default_api_version
@@ -432,10 +453,11 @@ let json_body : Yojson.Safe.t -> Cohttp.Header.t * Cohttp_eio.Body.t =
    collected, and [/images/create] streams a pull whose duration is the image's
    size over the network. Those two are why the bound is per endpoint here and
    not inside [call]. Being per endpoint also means the bound reaches only the
-   endpoints that opt in, which today are [inspect_container] and
-   [update_container]; every other Engine call this client makes — listing,
-   creating, starting, stopping, removing and renaming containers, image
-   inspect, and the network calls — is not bounded yet. *)
+   endpoints that opt in, which today are [inspect_container],
+   [update_container], [list_images] and [remove_image]; every other Engine
+   call this client makes — listing, creating, starting, stopping, removing and
+   renaming containers, image inspect, and the network calls — is not bounded
+   yet. *)
 let engine_request_timeout_seconds = 10.0
 
 let with_request_bound ~clock ~what f =
@@ -583,16 +605,6 @@ let rename_container :
   in
   Ok ()
 
-let remove_container_and_image :
-    t -> net:_ Eio.Net.t -> container:container -> (unit, string) result =
- fun t ~net ~container ->
-  let* () = remove_container t ~net ~container_id:container.id in
-  let image_query =
-    [ query_param "force" "true"; query_param "noprune" "false" ]
-  in
-  let* _ = call t ~net `DELETE ("/images/" ^ container.image_id) image_query in
-  Ok ()
-
 let run_image_with_opts :
     t -> net:_ Eio.Net.t -> run_image_options -> (string, string) result =
  fun t ~net opts ->
@@ -703,6 +715,97 @@ let inspect_image :
   |> Result.map_error (fun msg ->
       Printf.sprintf "failed to parse inspect response for image %s: %s" image
         msg)
+
+(** The most of a rejected payload an error message carries. *)
+let rejected_payload_limit = 512
+
+(** A failed entry is reported with the entry itself, bounded: the decoder's
+    message names what it expected, and only the entry shows what the Engine
+    sent. *)
+let image_summaries_of_json :
+    Yojson.Safe.t -> (Image_summary.t list, string) result =
+ fun json ->
+  match json with
+  | `List values ->
+      let rec parse_all acc = function
+        | [] -> Ok (List.rev acc)
+        | v :: rest -> (
+            match Image_summary.of_yojson v with
+            | Ok image -> parse_all (image :: acc) rest
+            | Error msg ->
+                Error
+                  (Printf.sprintf "failed to parse image summary: %s; entry: %s"
+                     msg
+                     (Bondi_common.String_utils.bounded
+                        ~limit:rejected_payload_limit (Yojson.Safe.to_string v)))
+            )
+      in
+      parse_all [] values
+  | other ->
+      Error
+        ("expected JSON array from /images/json, got: "
+        ^ Bondi_common.String_utils.bounded ~limit:rejected_payload_limit
+            (Yojson.Safe.to_string other))
+
+(** The Engine's [filters] parameter is a JSON-encoded map[string][]string; a
+    [reference] entry narrows the listing to images whose repository, and tag if
+    one is given, match it. No reference sends no filter at all. *)
+let list_images_query : reference:string option -> (string * string list) list =
+ fun ~reference ->
+  match reference with
+  | None -> []
+  | Some reference ->
+      let filters = `Assoc [ ("reference", `List [ `String reference ]) ] in
+      [ query_param "filters" (Yojson.Safe.to_string filters) ]
+
+(** Lists the images on the host, narrowed to one repository when [reference] is
+    given. Bounded by [engine_request_timeout_seconds]. *)
+let list_images :
+    t ->
+    net:_ Eio.Net.t ->
+    clock:_ Eio.Time.clock ->
+    ?reference:string ->
+    unit ->
+    (Image_summary.t list, string) result =
+ fun t ~net ~clock ?reference () ->
+  let* body_str =
+    with_request_bound ~clock ~what:"listing of images" (fun () ->
+        call t ~net `GET "/images/json" (list_images_query ~reference))
+  in
+  (* Parsed here rather than through [call_json], whose [Yojson.Safe.from_string]
+     raises on a body that is not JSON; image cleanup must get an [Error] it
+     can report, not an exception. [call_json] has the same exposure for every
+     other caller and is left as it is. *)
+  match Yojson.Safe.from_string body_str with
+  | exception Yojson.Json_error msg ->
+      Error
+        (Printf.sprintf "/images/json did not answer JSON: %s; body: %s" msg
+           (Bondi_common.String_utils.bounded ~limit:rejected_payload_limit
+              body_str))
+  | json -> image_summaries_of_json json
+
+(** The query of an image removal. No [force]: with it the Engine would delete
+    an image a stopped container still uses. [noprune=false] is sent rather than
+    assumed, so untagged parent layers go with the image. *)
+let remove_image_query : (string * string list) list =
+  [ query_param "noprune" "false" ]
+
+(** Removes one image by id. No [force]: the Engine refuses, with a 409, an
+    image any container still uses, and that refusal comes back as the [Error].
+    [noprune=false] is sent rather than assumed, so untagged parent layers go
+    with it. Bounded by [engine_request_timeout_seconds]. *)
+let remove_image :
+    t ->
+    net:_ Eio.Net.t ->
+    clock:_ Eio.Time.clock ->
+    image_id:string ->
+    (unit, string) result =
+ fun t ~net ~clock ~image_id ->
+  let* _ =
+    with_request_bound ~clock ~what:("removal of image " ^ image_id) (fun () ->
+        call t ~net `DELETE ("/images/" ^ image_id) remove_image_query)
+  in
+  Ok ()
 
 let disconnect_from_network :
     t ->

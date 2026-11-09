@@ -412,7 +412,7 @@ The name (`my-api`) must match `service.name` in your config. The tag (`v1.0.0`)
 
 Bondi sends the deployment to the orchestrator running on the server, which:
 
-1. Pulls the image
+1. Pulls the image (a failed pull leaves the old container running)
 2. Stops the old container (if any)
 3. Starts the new container with Traefik labels for automatic HTTPS routing
 
@@ -432,7 +432,7 @@ This shows a table with your service, cron jobs, infrastructure components (orch
 
 ### Simple (default)
 
-The simple strategy is the default. It stops the old container, then starts the new one. There is a brief period of downtime during the switch.
+The simple strategy is the default. It pulls the new image first, so a failed pull leaves the old container running, then stops the old container and starts the new one. There is a brief period of downtime during the switch.
 
 You do not need to set anything — omitting `deployment_strategy` uses simple.
 
@@ -495,6 +495,23 @@ service:
 | `health_timeout` | `120` | Maximum seconds to wait for the new container to become healthy. If exceeded, Bondi rolls back. |
 | `poll_interval` | `1` | Seconds between health check polls. |
 | `drain_grace_period` | `2` | Seconds to wait after disconnecting the old container from the network, allowing in-flight requests to complete. |
+
+### Old images
+
+After a deploy, Bondi removes the local images it no longer needs, whichever strategy you use and for cron-only deploys too. It removes an image only when all of these hold:
+
+- it belongs to a repository the deploy declares (your service image or a cron job's image), and
+- the deploy does not declare its exact tag, and
+- no container, running or stopped, uses it.
+
+Bondi never removes an image from another repository, an image a container still uses, or an image the deploy declares. A removal that Docker refuses does not fail the deploy.
+
+> **Note:** Every unused local image of a declared repository is removed, including one you pulled by hand to roll back to. To keep one, run a container from it, or redeploy that tag with `bondi deploy`.
+
+Cleanup can only warn. Two lines appear in the orchestrator's log, which you read with `docker logs bondi-orchestrator`:
+
+- `image cleanup: kept image <id> because a container uses it` (an image was left in place)
+- `image cleanup warning: could not read the host's images and containers, so none were removed: <reason>` (nothing was removed this time; the next deploy tries again)
 
 ---
 

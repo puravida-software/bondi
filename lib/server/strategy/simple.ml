@@ -116,6 +116,15 @@ let parse_image_and_tag image =
   | [ name ] -> Ok (name, "")
   | _ -> Error ("invalid image format: " ^ image)
 
+(** The reference the service container's image is tagged with: an untagged
+    image runs as [name:latest], and a reference that does not parse is kept as
+    written. *)
+let service_image_reference image =
+  match parse_image_and_tag image with
+  | Ok (name, "") -> name ^ ":latest"
+  | Ok (_, _) -> image
+  | Error _ -> image
+
 let require_image_and_tag image =
   match parse_image_and_tag image with
   | Ok (name, "") ->
@@ -137,11 +146,7 @@ let service_config (input : deploy_input) :
           match input.traefik_domain_name with
           | None -> Error "missing traefik_domain_name for service labels"
           | Some domain_name ->
-              let new_image =
-                match parse_image_and_tag image with
-                | Ok (name, tag) -> if tag = "" then name ^ ":latest" else image
-                | Error _ -> image
-              in
+              let new_image = service_image_reference image in
               (* The service name, not the container name: blue-green starts the
                  incoming colour under a temporary name. The [None] arm only
                  mirrors [deploy_input]'s optional field: a service deploy
@@ -299,10 +304,9 @@ let plan (input : deploy_input) (context : deploy_context) :
             | Ok _, None ->
                 Error "service_name required when deploying a service"
             | Ok service_cfg, Some name ->
-                (match context.current_workload with
-                | None -> ()
-                | Some container ->
-                    actions := StopAndRemoveContainer container :: !actions);
+                (* The pull comes before the stop, so a pull that fails leaves
+                   the old service running and the outage is only the stop,
+                   remove and start. *)
                 (match parse_image_and_tag image with
                 | Ok (image_name, image_tag) ->
                     actions :=
@@ -314,6 +318,10 @@ let plan (input : deploy_input) (context : deploy_context) :
                         }
                       :: !actions
                 | Error _ -> ());
+                (match context.current_workload with
+                | None -> ()
+                | Some container ->
+                    actions := StopAndRemoveContainer container :: !actions);
                 actions :=
                   RunWorkload
                     {
@@ -406,7 +414,7 @@ let interpret ~clock ~client ~net (actions : action list) :
           Docker.Client.stop_container client ~net ~container_id:container.id
         in
         let* () =
-          Docker.Client.remove_container_and_image client ~net ~container
+          Docker.Client.remove_container client ~net ~container_id:container.id
         in
         run rest
     | PullImage { image; tag; with_auth } :: rest ->

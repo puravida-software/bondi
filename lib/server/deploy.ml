@@ -479,14 +479,23 @@ let deploy ~clock ~net input : (deploy_response, Handler_error.t) result =
        workload is touched: a rejected network declaration must not be discovered
        after the service has already moved to a new tag. *)
     let* actions = cron_plan input in
+    (* Last, and only once every step before it has returned [Ok]: an image is
+       removed only when the new service is running and the crontab names the
+       new tags, so a failed deploy removes nothing. It returns unit, so nothing
+       it meets can fail the deploy. *)
+    let clean_up ~replaced =
+      Image_cleanup.run ~client ~net ~clock ~replaced
+        ~declared:(Image_cleanup.declared_of_input input)
+    in
     match input.Simple.service_name with
     | None ->
         (* Cron-only deploy: skip main image pull and workload deployment *)
         let* () = orchestrator_step (interpret ~clock ~client ~net actions) in
+        clean_up ~replaced:[];
         Ok
           (build_response ~strategy:Simple ~strategy_reason:"cron-only deploy"
              input)
-    | Some _ ->
+    | Some service_name ->
         let* strategy, strategy_reason =
           orchestrator_step (select_strategy_and_prepare ~client ~net input)
         in
@@ -497,11 +506,20 @@ let deploy ~clock ~net input : (deploy_response, Handler_error.t) result =
           orchestrator_step
             (converge_traefik_restart_policy ~clock ~client ~net ~strategy input)
         in
+        (* Immediately before the workload moves, because afterwards the
+           replaced containers are gone and so is the record of what they ran.
+           A snapshot that fails removes only the replaced images from cleanup
+           and must not block the deploy, the rule [gather_traefik_policy]
+           follows for the same reason. *)
+        let replaced =
+          Image_cleanup.snapshot_replaced ~client ~net ~clock ~service_name
+        in
         let* () =
           orchestrator_step
             (deploy_workload ~clock ~client ~net ~strategy input)
         in
         let* () = orchestrator_step (interpret ~clock ~client ~net actions) in
+        clean_up ~replaced;
         Ok (build_response ~strategy ~strategy_reason input)
   with
   | Eio.Cancel.Cancelled _ as cancelled -> raise cancelled

@@ -101,6 +101,108 @@ let test_plan_with_existing_workload () =
       check bool "includes StopAndRemoveContainer for workload" true
         has_stop_workload
 
+(* The index of the first action satisfying [matches], so an ordering test reads
+   positions rather than pinning the whole list. *)
+let position_of matches actions =
+  let rec go index = function
+    | [] -> None
+    | action :: rest ->
+        if matches action then Some index else go (index + 1) rest
+  in
+  go 0 actions
+
+let is_pull = function
+  | Simple.PullImage _ -> true
+  | Simple.CreateNetwork _
+  | Simple.EnsureTraefik _
+  | Simple.StopAndRemoveContainer _
+  | Simple.RunWorkload _ ->
+      false
+
+let is_run_workload = function
+  | Simple.RunWorkload _ -> true
+  | Simple.CreateNetwork _
+  | Simple.EnsureTraefik _
+  | Simple.StopAndRemoveContainer _
+  | Simple.PullImage _ ->
+      false
+
+let is_ensure_traefik = function
+  | Simple.EnsureTraefik _ -> true
+  | Simple.CreateNetwork _
+  | Simple.StopAndRemoveContainer _
+  | Simple.PullImage _
+  | Simple.RunWorkload _ ->
+      false
+
+let is_stop_of ~container_id = function
+  | Simple.StopAndRemoveContainer container ->
+      container.Docker.id = container_id
+  | Simple.CreateNetwork _
+  | Simple.EnsureTraefik _
+  | Simple.PullImage _
+  | Simple.RunWorkload _ ->
+      false
+
+let check_before ~first:(first_name, first) ~second:(second_name, second) =
+  check bool
+    (Printf.sprintf "%s (at %d) precedes %s (at %d)" first_name first
+       second_name second)
+    true (first < second)
+
+(* A pull that fails must leave the old service running, so the new image is on
+   the box before the old container is stopped, and the outage is only the stop,
+   remove and start. *)
+let test_redeploy_pulls_before_stop () =
+  let workload = mock_container ~id:"workload-1" ~image:"myapp:v0.9" in
+  let context =
+    { Simple.current_traefik = None; current_workload = Some workload }
+  in
+  match Simple.plan minimal_input context with
+  | Error e -> Alcotest.fail ("plan failed: " ^ e)
+  | Ok actions -> (
+      match
+        ( position_of is_pull actions,
+          position_of (is_stop_of ~container_id:"workload-1") actions,
+          position_of is_run_workload actions )
+      with
+      | Some pull, Some stop, Some run ->
+          check_before ~first:("PullImage", pull)
+            ~second:("StopAndRemoveContainer", stop);
+          check_before
+            ~first:("StopAndRemoveContainer", stop)
+            ~second:("RunWorkload", run)
+      | None, _, _
+      | _, None, _
+      | _, _, None ->
+          Alcotest.fail
+            "expected PullImage, StopAndRemoveContainer of the workload and \
+             RunWorkload")
+
+(* Reordering the service's pull must not move Traefik's stop: the old proxy is
+   still stopped before the new one is ensured. *)
+let test_traefik_redeploy_keeps_order () =
+  let traefik = mock_container ~id:"traefik-1" ~image:"traefik:v2.0" in
+  let workload = mock_container ~id:"workload-1" ~image:"myapp:v0.9" in
+  let context =
+    { Simple.current_traefik = Some traefik; current_workload = Some workload }
+  in
+  match Simple.plan minimal_input context with
+  | Error e -> Alcotest.fail ("plan failed: " ^ e)
+  | Ok actions -> (
+      match
+        ( position_of (is_stop_of ~container_id:"traefik-1") actions,
+          position_of is_ensure_traefik actions )
+      with
+      | Some stop, Some ensure ->
+          check_before
+            ~first:("StopAndRemoveContainer of Traefik", stop)
+            ~second:("EnsureTraefik", ensure)
+      | None, _
+      | _, None ->
+          Alcotest.fail
+            "expected StopAndRemoveContainer of Traefik and EnsureTraefik")
+
 let test_plan_traefik_version_mismatch () =
   let traefik = mock_container ~id:"traefik-1" ~image:"traefik:v2.0" in
   let context =
@@ -332,6 +434,14 @@ let test_service_labels_carry_service_name () =
             (Some "my-service")
             (List.assoc_opt "bondi.name" labels))
 
+let test_service_image_reference () =
+  check string "untagged gains :latest" "myapp:latest"
+    (Simple.service_image_reference "myapp");
+  check string "tagged is kept" "myapp:v1"
+    (Simple.service_image_reference "myapp:v1");
+  check string "unparseable is kept as written" "a:b:c"
+    (Simple.service_image_reference "a:b:c")
+
 let () =
   run "Simple.plan"
     [
@@ -350,6 +460,13 @@ let () =
             test_plan_traefik_version_mismatch;
           test_case "skips traefik redeploy when same version" `Quick
             test_plan_traefik_same_version_skips_redeploy;
+        ] );
+      ( "ordering",
+        [
+          test_case "redeploy pulls before it stops" `Quick
+            test_redeploy_pulls_before_stop;
+          test_case "traefik redeploy keeps its order" `Quick
+            test_traefik_redeploy_keeps_order;
         ] );
       ( "registry",
         [
@@ -372,6 +489,11 @@ let () =
             test_run_workload_carries_declared_mounts;
           test_case "run workload without volumes carries no mounts" `Quick
             test_run_workload_without_volumes_carries_no_mounts;
+        ] );
+      ( "image reference",
+        [
+          test_case "service image reference" `Quick
+            test_service_image_reference;
         ] );
       ( "container labels",
         [

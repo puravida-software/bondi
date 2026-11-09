@@ -392,9 +392,177 @@ let test_version_response_without_a_minimum_json () =
     (Alcotest.option Alcotest.string)
     "no floor reported" None response.min_api_version
 
+(* The tagged entry follows the ImageSummary example of the Docker Engine API
+   v1.41 reference, https://docs.docker.com/engine/api/v1.41/#tag/Image/operation/ImageList
+   (response schema ImageSummary). The untagged entry is the same shape with
+   the RepoTags a daemon reports for an image that has lost its last tag: an
+   empty list on current engines. Only Id and RepoTags are read; every other
+   key must be tolerated, as an engine adds keys between versions. *)
+let test_list_images_decodes_recorded_body () =
+  let json =
+    Yojson.Safe.from_string
+      {|[
+        {
+          "Id": "sha256:ec3f0931a6e6b6855d76b2d7b0be30e81860baccd891b2e243280bf1cd8ad710",
+          "ParentId": "",
+          "RepoTags": [
+            "example:1.0",
+            "example:latest",
+            "example:stable",
+            "internal.registry.example.com:5000/example:1.0"
+          ],
+          "RepoDigests": [
+            "example@sha256:afcc7f1ac1b49db317a7196c902e61c6c3c4607d63599ee1a82d702d249a0ccb",
+            "internal.registry.example.com:5000/example@sha256:b69959407d21e8a062e0416bf13405bb2b71ed7a84dde4158ebafacfa06f5578"
+          ],
+          "Created": 1644009612,
+          "Size": 172064416,
+          "SharedSize": 1239828,
+          "VirtualSize": 172064416,
+          "Labels": {
+            "com.example.some-label": "some-value",
+            "com.example.some-other-label": "some-other-value"
+          },
+          "Containers": 2
+        },
+        {
+          "Id": "sha256:a44854fbf6b6c1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7081920",
+          "ParentId": "",
+          "RepoTags": [],
+          "RepoDigests": [],
+          "Created": 1644009600,
+          "Size": 172064416,
+          "SharedSize": -1,
+          "VirtualSize": 172064416,
+          "Labels": null,
+          "Containers": -1
+        }
+      ]|}
+  in
+  let images = Docker.image_summaries_of_json json |> unwrap in
+  Alcotest.check
+    Alcotest.(list (pair string (list string)))
+    "ids and tags, in listing order"
+    [
+      ( "sha256:ec3f0931a6e6b6855d76b2d7b0be30e81860baccd891b2e243280bf1cd8ad710",
+        [
+          "example:1.0";
+          "example:latest";
+          "example:stable";
+          "internal.registry.example.com:5000/example:1.0";
+        ] );
+      ( "sha256:a44854fbf6b6c1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7081920",
+        [] );
+    ]
+    (List.map
+       (fun (image : Docker.Image_summary.t) -> (image.id, image.repo_tags))
+       images)
+
+let expect_error_containing what needle result =
+  match result with
+  | Ok _ -> Alcotest.fail (what ^ ": expected an Error")
+  | Error msg ->
+      Alcotest.(check bool)
+        (what ^ ": message " ^ msg)
+        true
+        (Bondi_common.String_utils.contains ~needle msg)
+
+let test_list_images_rejects_a_malformed_entry_bounded () =
+  let long = String.make 5000 'x' in
+  let json = `List [ `Assoc [ ("Id", `Int 7); ("Pad", `String long) ] ] in
+  let result = Docker.image_summaries_of_json json in
+  expect_error_containing "entry shown" "\"Id\":7" result;
+  expect_error_containing "entry bounded" "truncated" result;
+  match result with
+  | Error msg ->
+      Alcotest.(check bool) "message is short" true (String.length msg < 1500)
+  | Ok _ -> ()
+
+let test_list_images_rejects_a_non_array_bounded () =
+  let long = String.make 5000 'y' in
+  let json = `Assoc [ ("message", `String long) ] in
+  let result = Docker.image_summaries_of_json json in
+  expect_error_containing "body shown" "\"message\"" result;
+  expect_error_containing "body bounded" "truncated" result
+
+let test_list_images_rejects_a_missing_repo_tags () =
+  let json = `List [ `Assoc [ ("Id", `String "sha256:abc") ] ] in
+  match Docker.image_summaries_of_json json with
+  | Error _ -> ()
+  | Ok _ -> Alcotest.fail "a missing RepoTags must not read as untagged"
+
+let test_remove_image_query_has_no_force () =
+  Alcotest.(check bool)
+    "no force" false
+    (List.mem_assoc "force" Docker.remove_image_query);
+  Alcotest.(check bool)
+    "noprune sent" true
+    (List.mem_assoc "noprune" Docker.remove_image_query)
+
+(* Some daemon versions report an untagged image's RepoTags as null rather than
+   an empty list; both mean the image carries no tag. *)
+let test_list_images_decodes_untagged_image () =
+  let json =
+    Yojson.Safe.from_string
+      {|[
+        {
+          "Id": "sha256:a44854fbf6b6c1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7081920",
+          "ParentId": "",
+          "RepoTags": null,
+          "RepoDigests": null,
+          "Created": 1644009600,
+          "Size": 172064416,
+          "Containers": -1
+        }
+      ]|}
+  in
+  let images = Docker.image_summaries_of_json json |> unwrap in
+  Alcotest.check
+    Alcotest.(list (pair string (list string)))
+    "the id, and no tags"
+    [
+      ( "sha256:a44854fbf6b6c1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7081920",
+        [] );
+    ]
+    (List.map
+       (fun (image : Docker.Image_summary.t) -> (image.id, image.repo_tags))
+       images)
+
+(* The reference filter is what narrows the listing to one repository's images.
+   Its wire form is the Engine API's [filters] parameter: a JSON-encoded
+   map[string][]string, here {"reference":[...]}, per the same v1.41 reference.
+   With no reference there is no filter and the listing covers every image. *)
+let test_list_images_filters_by_reference () =
+  Alcotest.check
+    Alcotest.(list (pair string (list string)))
+    "a reference becomes the filters parameter"
+    [ ("filters", [ {|{"reference":["ghcr.io/acme/app"]}|} ]) ]
+    (Docker.list_images_query ~reference:(Some "ghcr.io/acme/app"));
+  Alcotest.check
+    Alcotest.(list (pair string (list string)))
+    "no reference, no filter" []
+    (Docker.list_images_query ~reference:None)
+
 let () =
   Alcotest.run "Docker.Client"
     [
+      ( "image list",
+        [
+          Alcotest.test_case "decodes a recorded body" `Quick
+            test_list_images_decodes_recorded_body;
+          Alcotest.test_case "decodes an untagged image" `Quick
+            test_list_images_decodes_untagged_image;
+          Alcotest.test_case "filters by reference" `Quick
+            test_list_images_filters_by_reference;
+          Alcotest.test_case "bounds a malformed entry in the error" `Quick
+            test_list_images_rejects_a_malformed_entry_bounded;
+          Alcotest.test_case "bounds a non-array body in the error" `Quick
+            test_list_images_rejects_a_non_array_bounded;
+          Alcotest.test_case "refuses a missing RepoTags" `Quick
+            test_list_images_rejects_a_missing_repo_tags;
+          Alcotest.test_case "removal carries no force" `Quick
+            test_remove_image_query_has_no_force;
+        ] );
       ( "image inspect",
         [
           Alcotest.test_case "with healthcheck" `Quick
