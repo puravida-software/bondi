@@ -118,20 +118,23 @@ a manual this file has no business pinning.
 The bare binary is what the image's entrypoint runs, and it is what a client
 that predates the HTTP surface's deletion still starts an orchestrator with. It
 must stay up: a container whose PID 1 exits is a container the runtime reaps. So
-what is asserted is that something else had to stop it. It is stopped from
-outside after a second, by a signal rather than by the timeout's default: a
-process killed by SIGKILL leaves 137, which no exit code this binary or its
-command-line library can choose collides with. The timeout's own 124 would --
-observed on 2026-09-12, cmdliner's cli_error is 124 as well, so a refusal and a
-stopping would have read the same.
+what is asserted is that something else had to stop it. It is started in the
+background, sent SIGKILL after a second, and its own status is read with wait:
+a process killed by SIGKILL leaves 137, which no exit code this binary or its
+command-line library can choose collides with. One that had already exited
+keeps its own code, because a signal sent to an unreaped child changes nothing.
+
+timeout(1) is not used, because its exit code is not portable. GNU's
+`timeout -s KILL` also kills itself and so leaves 137. The Rust coreutils that
+Ubuntu ships from 26.04 return their own 124 instead. cmdliner's cli_error is
+124 as well, so on that box a refusal and a stopping would read the same.
 
 The stopping runs inside its own shell, which is not an aesthetic choice: the
-shell that runs this file has job control on and announces a foreground job
-killed by a signal, with the process id in the line. That line would be a diff
-on every run. A shell spawned for the command has no job control and says
-nothing, and its own status is the one being read.
+shell that runs this file has job control on and announces a job killed by a
+signal, with the process id in the line. That line would be a diff on every
+run. A shell spawned for the command has no job control and says nothing.
 
-  $ sh -c 'timeout -s KILL 1 bondi-server > idle.out 2> idle.err'; status=$?
+  $ sh -c 'bondi-server > idle.out 2> idle.err & pid=$!; sleep 1; kill -KILL "$pid" 2> /dev/null; wait "$pid"'; status=$?
   $ case "$status" in 137) echo "it was still running when it was stopped";; *) echo "it exited on its own: $status";; esac
   it was still running when it was stopped
 
