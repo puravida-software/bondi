@@ -132,9 +132,12 @@ Ubuntu ships from 26.04 return their own 124 instead. cmdliner's cli_error is
 The stopping runs inside its own shell, which is not an aesthetic choice: the
 shell that runs this file has job control on and announces a job killed by a
 signal, with the process id in the line. That line would be a diff on every
-run. A shell spawned for the command has no job control and says nothing.
+run. A shell spawned for the command has no job control, but dash, Ubuntu's
+sh, still writes "Killed" to its stderr when wait reaps the job, and bash does
+not. That shell's stderr is dropped, which loses nothing: the binary's own
+output already goes to idle.out and idle.err.
 
-  $ sh -c 'bondi-server > idle.out 2> idle.err & pid=$!; sleep 1; kill -KILL "$pid" 2> /dev/null; wait "$pid"'; status=$?
+  $ sh -c 'bondi-server > idle.out 2> idle.err & pid=$!; sleep 1; kill -KILL "$pid" 2> /dev/null; wait "$pid"' 2> /dev/null; status=$?
   $ case "$status" in 137) echo "it was still running when it was stopped";; *) echo "it exited on its own: $status";; esac
   it was still running when it was stopped
 
