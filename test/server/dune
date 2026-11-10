@@ -27,7 +27,8 @@
   test_readiness_probes
   test_cmd_io
   test_cli
-  test_workload_host_config)
+  test_workload_host_config
+  test_image_cleanup)
  (modules
   test_env
   test_simple_plan
@@ -49,7 +50,8 @@
   test_readiness_probes
   test_cmd_io
   test_cli
-  test_workload_host_config)
+  test_workload_host_config
+  test_image_cleanup)
  (libraries
   alcotest
   bondi.client

@@ -3,14 +3,19 @@
 
     This is what acts on a [bondi.yaml]. It plans the cron half of the request,
     chooses a deployment strategy, pulls what that strategy needs, converges the
-    reverse proxy's restart policy, rolls the workload forward, and then writes
-    each job's files and the crontab. A request that names no service is a
-    cron-only deploy: it plans, writes the cron half, and touches no workload.
+    reverse proxy's restart policy, rolls the workload forward, writes each
+    job's files and the crontab, and then removes the images the deploy left
+    behind. A request that names no service is a cron-only deploy: it plans,
+    writes the cron half, removes the old images, and touches no workload.
 
     The order is not incidental. The cron plan is pure and is refused first, so
     a job declaring a network Bondi does not manage is rejected before the
-    service has moved to a new tag; the crontab is written last, so a box whose
-    deploy failed is not left firing jobs against an image that is not there.
+    service has moved to a new tag; the crontab is written after the workload,
+    so a box whose deploy failed is not left firing jobs against an image that
+    is not there. Image removal comes last of all, and only when every step
+    before it succeeded, so it never runs while the old image may still be
+    needed. It is cleanup: a removal Docker refuses -- an image a cron pass is
+    still running from -- is one diagnostic line and never a failed deploy.
 
     Everything here besides {!deploy} is exposed for one of two reasons -- it is
     part of the answer the caller reads, or it is a pure seam the tests reach
@@ -37,7 +42,9 @@ val deploy_response_to_yojson : deploy_response -> Yojson.Safe.t
     does not, the presence of a [HEALTHCHECK] on the image decides, because
     blue-green has nothing to wait for without one. *)
 type deployment_strategy =
-  | Simple  (** Stop the old container, then start the new one. *)
+  | Simple
+      (** Pull the new image, then stop the old container and start the new one,
+          so a pull that fails leaves the old container running. *)
   | Blue_green
       (** Start the new container alongside the old, wait for its health check,
           repoint the proxy, and only then stop the old one. *)
