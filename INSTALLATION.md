@@ -98,26 +98,25 @@ gh api repos/puravida-software/bondi/git/ref/tags/<tag> --jq .object.sha
 If the fetched clone and the API disagree, the API wins and the disagreement is
 worth reporting.
 
-## Known defect — the tap is broken on macOS
+## Platform support
 
-`Formula/bondi.rb`'s `on_macos` / `Hardware::CPU.arm?` branch points at
-`bondi-macos-arm64.tar.gz` with a pinned sha256, but **no recent release publishes
-that asset**. `v0.10.1`, `v0.10.2` and `v0.10.3` each publish exactly one:
-`bondi-linux-x86_64.tar.gz`.
-
-Consequence: `brew install bondi` on an Apple-silicon Mac fails on a 404. The
-macOS x86_64 branch is an explicit `odie`, so it fails cleanly. Harmless for Linux
-CI and for Linux containers; a hard failure for anyone running `setup` from a
-Mac. Either publish the asset or make the arm64 branch `odie` like its sibling.
+The Homebrew formula is Linux x86_64 only. macOS is not built, and the release
+publishes exactly one asset: `bondi-linux-x86_64.tar.gz`.
 
 ## Release checklist
 
 After cutting a release, state explicitly which of the four locations this release
 needs, and update them.
 
-- [ ] **Tag and release published**, with the Linux asset attached.
+- [ ] **Tag and release published**, with the Linux asset attached. The tag is
+      cut only after `just` (the full gate) has passed on `main`. The GitHub
+      release and the formula bump follow the server image: neither exists
+      until the image for that version has been built, verified and pushed.
 - [ ] **Tap formula bumped** — `version`, and the sha256 for each published asset.
-      Verify the sha256 is of the tarball.
+      Verify the sha256 is of the tarball. The updater refuses, and leaves the
+      formula unchanged, if the formula holds more than one `url`/`sha256` pair
+      (commented-out ones count), a commented-out pair or `version`, a bad
+      sha256, or bad arguments.
 - [ ] **Which half changed?** `git show <sha> --stat` against `lib/client/` and
       `lib/server/`. Write the answer into the release notes — consumers need it
       to know whether they owe a CLI upgrade, a `setup` run, or both.

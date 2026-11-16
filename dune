@@ -1,0 +1,6 @@
+; Dune leaves directories whose names start with a dot out of the source tree
+; by default. The workflow checks under test/workflows read the files in
+; .github, and a rule can only depend on a file dune knows about, so .github is
+; named here. Nothing under it is a dune directory: it holds no dune files.
+
+(dirs :standard .github)

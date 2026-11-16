@@ -12,24 +12,25 @@ concurrency:
   group: release
 
 jobs:
+  # The client tarball and the GitHub release publish only once the image for
+  # the same version has: a client for an image that does not exist installs an
+  # orchestrator nothing can pull.
   release:
     name: build-${{ matrix.platform }}
     runs-on: ${{ matrix.os }}
+    needs: release-server
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-22.04
             platform: linux-x86_64
-          # Disable for now to save on CI credits (remember to update the action and formula)
-          # - os: macos-14
-          #   platform: macos-arm64
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
-      - uses: extractions/setup-just@v3
+      - uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b # v3.1.0
         with:
           just-version: "1.46.0"
       - uses: ./.github/actions/ocaml-deps
@@ -50,22 +51,28 @@ jobs:
           opam exec -- dune install --prefix "$PWD/_build/install"
 
       - name: Package artifact
+        env:
+          PLATFORM: ${{ matrix.platform }}
         run: |
           dist_dir="$PWD/dist"
           mkdir -p "$dist_dir"
           install -m 755 "_build/install/default/bin/bondi-client" "$dist_dir/bondi"
-          tar -czf "bondi-${{ matrix.platform }}.tar.gz" -C "$dist_dir" bondi
+          tar -czf "bondi-${PLATFORM}.tar.gz" -C "$dist_dir" bondi
 
-      - name: Publish release asset
-        uses: softprops/action-gh-release@v2
+      # The GitHub release is created here, for the tag this workflow runs
+      # for, rather than when the tag is pushed: this job waits on the server
+      # image, so the release appears only once its image has been published.
+      - name: Create the release and publish its asset
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
+          generate_release_notes: true
           files: bondi-${{ matrix.platform }}.tar.gz
 
   release-server:
     name: release-server-image
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Set version
         run: |
@@ -77,12 +84,12 @@ jobs:
           echo "VERSION=$VERSION" >> $GITHUB_ENV
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - uses: extractions/setup-just@v3
+      - uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b # v3.1.0
         with:
           just-version: "1.46.0"
 
@@ -137,19 +144,21 @@ jobs:
   update-homebrew-tap:
     name: update-homebrew-tap
     runs-on: ubuntu-22.04
-    needs: release
+    # The image job is named here as well as through `release`, so the formula
+    # waits on the image itself rather than on whatever `release` waits on.
+    needs: [release, release-server]
     env:
       TAP_REPO: puravida-software/homebrew-bondi
       FORMULA_PATH: Formula/bondi.rb
     steps:
       - name: Checkout main repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           path: main
           fetch-depth: 0
 
       - name: Checkout tap repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           repository: ${{ env.TAP_REPO }}
           token: ${{ secrets.TAP_GITHUB_TOKEN }}

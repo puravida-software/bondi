@@ -14,10 +14,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v6
+      # The checkout is given no token and persists none, so nothing the gate
+      # runs can read a write credential from the repository's git config. The
+      # PAT exists for one step, the tag push at the end, after the gate. That
+      # a checkout persists its token in git config is assumed from
+      # https://github.com/actions/checkout#usage, not observed.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
-      - uses: extractions/setup-just@v3
+          persist-credentials: false
+      - uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b # v3.1.0
         with:
           just-version: '1.46.0'
       - uses: ./.github/actions/ocaml-deps
@@ -39,6 +45,10 @@ jobs:
       # loop is what says so when an image stops shipping one of them, and
       # `docker info` is what says the daemon behind the client answers.
       #
+      # test/homebrew_formula/update_formula.t runs the release's formula
+      # updater under python3, which also comes with the runner image rather
+      # than from a step here, so the loop names it for the same reason.
+      #
       # The loop is the precondition rather than a formality, and it names
       # every program those scripts need, not only the ones installed
       # above. `setsid` comes from util-linux on the base image, so a runner
@@ -54,13 +64,10 @@ jobs:
           sudo apt-get install --yes --no-install-recommends \
             openssh-server openssh-client
           for program in sshd ssh ssh-agent ssh-add ssh-keygen setsid \
-            docker jq curl; do
+            docker jq curl python3; do
             command -v "$program"
           done
           docker info --format 'Docker Engine {{.ServerVersion}}'
-
-      - name: Build
-        run: just build
 
       # The log-collection test reads the runner's journal with journalctl, so
       # the journal must be persistent and readable by the runner user. Group
@@ -89,8 +96,17 @@ jobs:
               ./test/alloy_real_docker/emit_config.exe -- "$what")"
           done
 
-      - name: Test
-        run: just test
+      # `just` alone runs the default recipe, the gate a commit has to pass
+      # locally: build, test, fmt, lint and the server image check. The lint
+      # recipes need the development tools, which the dependency install above
+      # does not bring; this installs them from the package file itself.
+      - name: Install lint prerequisites
+        run: opam install . --deps-only --with-dev-setup -y
+
+      # The tag is cut only after this step, so a version is never tagged on a
+      # tree that fails any part of the gate.
+      - name: Run the full gate
+        run: just
 
       - uses: Homebrew/actions/setup-homebrew@1e34f2e2acaa766b7efacb8c26352e6abbb023f9 # 2026.09.13.1
       - name: Install Commitizen
@@ -104,9 +120,21 @@ jobs:
           echo "RELEASE_VERSION=${NEXT_VERSION}" >> $GITHUB_ENV
           echo "RELEASE_TAG=v${NEXT_VERSION}" >> $GITHUB_ENV
 
-      - name: Create GH release
-        uses: softprops/action-gh-release@v1
-        with:
-          generate_release_notes: true
-          token: ${{ secrets.PAT_GITHUB }}
-          tag_name: ${{ env.RELEASE_TAG }}
+      # Only the tag is pushed here. The GitHub release is created by the
+      # release workflow the tag starts, after the server image for the same
+      # version has been built, verified and pushed, so a release never exists
+      # for an image that does not.
+      #
+      # A tag pushed with the default GITHUB_TOKEN starts no workflow at all
+      # (assumed from documentation, not observed:
+      # https://docs.github.com/en/actions/security-for-github-actions/security-guides/automatic-token-authentication#using-the-github_token-in-a-workflow),
+      # and the tag is what starts the release workflow, so this push is made
+      # with the PAT. It is bound under env for this step alone and is the only
+      # place it is used.
+      - name: Push the release tag
+        env:
+          PAT: ${{ secrets.PAT_GITHUB }}
+        run: |
+          set -euo pipefail
+          git tag "$RELEASE_TAG"
+          git push "https://x-access-token:${PAT}@github.com/${GITHUB_REPOSITORY}" "$RELEASE_TAG"
