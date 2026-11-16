@@ -61,6 +61,11 @@ val networking_conf_of_network :
 (** The Docker networking configuration for a declared network, or none when the
     job declares no network and stays on the default bridge. *)
 
+val cron_log_config :
+  job:string -> labels:(string * string) list -> Docker.Client.log_config
+(** The log driver a cron container runs with: the journal, tagged with the job,
+    copying every label named in [labels] into the journal as a field. *)
+
 val run_opts :
   container_name:string ->
   full_image:string ->
@@ -68,7 +73,13 @@ val run_opts :
   Docker.Client.run_image_options
 (** The Docker options that start one cron run: the pinned image, the job's
     environment, and the labels that let the run be discovered later as a Bondi
-    cron container. *)
+    cron container.
+
+    The run logs through the [journald] driver, tagged with the job and with its
+    [labels] option naming every one of those labels, so each line reaches the
+    host journal however briefly the container lives. The driver's cache is left
+    on, so [docker logs] still shows the run's output. The host config states no
+    restart policy: a cron run is one-shot. *)
 
 val combine_warnings : string option -> string option -> string option
 (** Join two best-effort cleanup warnings into the single [warning] field,

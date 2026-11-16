@@ -120,3 +120,14 @@ val mounts_volumes : string -> (unit, string) result
     command that fixes it. The comparison is the same ordering against the same
     reading of a version, so an empty answer, a [latest] tag, or a fork's image
     name is a refusal rather than a pass. *)
+
+val minimum_for_journald_capture : string
+(** The oldest orchestrator release whose server sends a cron job's container
+    output to the host journal. The highest of the floors. *)
+
+val captures_cron_to_journald : string -> (unit, string) result
+(** [captures_cron_to_journald version] decides whether an orchestrator
+    reporting [version] writes cron jobs' lines where the generated Alloy
+    configuration reads them. Refuses in the same shape as {!writes_exec_lines}.
+    An older server loses every cron line silently, which is why setup takes
+    this gate before it writes that configuration. *)

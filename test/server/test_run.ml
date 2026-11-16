@@ -81,8 +81,43 @@ let test_cron_run_container_declares_no_restart_policy () =
       Alcotest.check Alcotest.bool "planned as a cron container" true
         (List.mem ("bondi.type", "cron") labels));
   Alcotest.check Alcotest.string
-    "a one-shot cron container carries no restart policy" "no host config"
+    "a one-shot cron container carries no restart policy"
+    "host config without a restart policy"
     (show_restart_policy opts.host_config)
+
+(* A cron pass can exit before Alloy's Docker discovery ever lists it, so its
+   lines must leave through the journal instead: the journald driver, tagged
+   with the job so a pass's timestamped name never splits the stream, and
+   carrying the four bondi.* labels the Alloy relabel rules read. The expected
+   strings are written out, not derived from the labels [run_opts] sets, so a
+   change to which labels reach the journal fails here and is seen. *)
+let test_run_opts_uses_journald_driver () =
+  let opts : Docker.run_image_options =
+    Run.run_opts ~container_name:"nightly-1759312345.123" ~full_image:"myapp:v1"
+      (mk_payload ())
+  in
+  match opts.host_config with
+  | None -> Alcotest.fail "expected a host config on the run options"
+  | Some { log_config = None; _ } ->
+      Alcotest.fail "expected a log config on the host config"
+  | Some { log_config = Some log_config; _ } ->
+      Alcotest.check Alcotest.string "log driver" "journald" log_config.type_;
+      Alcotest.check
+        Alcotest.(option string)
+        "tag is the job, not the temporary container name" (Some "nightly")
+        (List.assoc_opt "tag" log_config.config);
+      Alcotest.check
+        Alcotest.(option string)
+        "labels names the four bondi.* keys"
+        (Some "bondi.managed,bondi.type,bondi.logs,bondi.name")
+        (List.assoc_opt "labels" log_config.config);
+      (* The two present options above are this absence's affirmative arm:
+         the same options map is read, and it is not empty. Disabling the
+         driver's cache would leave docker logs on the container empty. *)
+      Alcotest.check
+        Alcotest.(option string)
+        "the dual-logging cache stays on" None
+        (List.assoc_opt "cache-disabled" log_config.config)
 
 (* A cron pass runs under a timestamped temporary name, so the container name
    differs on every pass. The workload's name must reach the labels from the
@@ -508,6 +543,8 @@ let () =
             test_run_opts_absent_network;
           Alcotest.test_case "cron container declares no restart policy" `Quick
             test_cron_run_container_declares_no_restart_policy;
+          Alcotest.test_case "uses the journald driver" `Quick
+            test_run_opts_uses_journald_driver;
           Alcotest.test_case "labels a cron container with its job name" `Quick
             test_run_opts_labels_cron_with_job_name;
         ] );

@@ -18,9 +18,14 @@ the declared version, so the run reduces to the alloy phase.
   > cat >> "$SSH_STDIN_LOG"
   > case "$1" in
   >   *BONDI_ACME_PRESENT*) echo BONDI_ACME_PRESENT ;;
+  >   # The journal probe, answered present: this box's journald already stores
+  >   # under /var/log/journal, so the alloy phase reads it once and goes on.
+  >   # Without this arm the probe falls through to *) and answers nothing, which
+  >   # setup reads as a journal it could not read, and it stops the run there.
+  >   *BONDI_JOURNAL_PRESENT*) echo BONDI_JOURNAL_PRESENT ;;
   >   'docker --version') echo 'Docker version 27.0.0, build deadbeef' ;;
   >   *'name=^/bondi-orchestrator$'*'{{.State}}'*)
-  >     printf 'running\tmlopez1506/bondi-server:0.15.0\n' ;;
+  >     printf 'running\tmlopez1506/bondi-server:0.25.0\n' ;;
   >   *'ps -a --filter name=^/bondi-alloy$'*'{{.State}}'*)
   >     printf 'exited\tgrafana/alloy:v1.8.0\n' ;;
   >   # The mode the host reports for the config file *before* setup writes it,
@@ -84,7 +89,7 @@ the declared version, so the run reduces to the alloy phase.
   >   # ends the command rather than merely containing it: the probe's own
   >   # listing asks for {{.State}} and {{.Image}} together, and an arm that
   >   # matched both would answer the probe with a version.
-  >   *'name=^/bondi-orchestrator$'*"--format '{{.Image}}'") echo 'mlopez1506/bondi-server:0.15.0' ;;
+  >   *'name=^/bondi-orchestrator$'*"--format '{{.Image}}'") echo 'mlopez1506/bondi-server:0.25.0' ;;
   >   # The three readings setup takes off the box once it has started the
   >   # container: the wait for a running state, the server's own check inside
   >   # it, and a read of the container's log stream for the line the check
@@ -137,7 +142,7 @@ host rather than merely to have gone missing.
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
   > bondi_server:
-  >   version: "0.15.0"
+  >   version: "0.25.0"
   > alloy:
   >   grafana_cloud:
   >     instance_id: "123456"
@@ -156,13 +161,14 @@ non-zero -- or be killed by the SIGPIPE `head` raises when it has its ten lines
 wrote leaves the status this line asserts belonging to `bondi-client`.
 
   $ bondi-client setup > out.log 2>&1
-  $ head -11 out.log
+  $ head -12 out.log
   Setting up the servers...
   Processing server: 127.0.0.1
-  bondi-orchestrator container is already running on server 127.0.0.1: 0.15.0, skipping...
+  bondi-orchestrator container is already running on server 127.0.0.1: 0.25.0, skipping...
   Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 127.0.0.1
   ACME file permissions updated on server 127.0.0.1: /etc/traefik/acme/acme.json
+  Journal on server 127.0.0.1 is stored persistently under /var/log/journal
   Stopped bondi-alloy container on server 127.0.0.1
   Removed bondi-alloy container and config on server 127.0.0.1
   Alloy config written on server 127.0.0.1: /etc/bondi/alloy/config.alloy
@@ -198,6 +204,51 @@ would pass for whatever value the constant takes, including `always`.
 
   $ grep -c -F -- 'docker run -d --name bondi-alloy --restart unless-stopped' ssh-argv.log
   1
+
+The run command mounts the host journal, because a cron container can exit
+before Docker discovery ever lists it, and its lines are read from the journal
+instead. The mount is read-only, at the path journald stores under, and uses
+`--mount` rather than `-v`: `-v` creates a missing source as an empty directory
+and starts an Alloy that reads nothing, where `--mount` refuses the run. The
+paths are spelled out rather than derived, for the reason the restart policy
+above is.
+
+  $ grep -c -F -- "'--mount' 'type=bind,source=/var/log/journal,target=/var/log/journal,readonly' " ssh-argv.log
+  1
+
+Setup replaces Alloy on every run, so where the last Alloy stopped reading the
+journal is kept in a host directory every Alloy mounts, and `--storage.path`
+names it. Without the two, each new Alloy re-reads every entry the journal still
+holds within its maximum age. The mount is writable, because Alloy writes its
+read position there.
+
+  $ grep -c -F -- "'--mount' 'type=bind,source=/var/lib/bondi/alloy,target=/var/lib/bondi/alloy' " ssh-argv.log
+  1
+
+`--storage.path` is a flag of Alloy's `run`, not of `docker run`: it sits after
+the image and ahead of the config path. Before the image, Docker would read it
+as its own option and refuse the run.
+
+  $ grep -c -F -- "' run '--storage.path=/var/lib/bondi/alloy' /etc/bondi/alloy/config.alloy" ssh-argv.log
+  1
+
+`--mount` refuses a source that does not exist, so the state directory is
+created before the run, and on every run: a box set up by an earlier release
+has none. Created after the run, the run fails on the first setup of every box.
+
+  $ grep -c -x -F -- "sudo mkdir -p '/var/lib/bondi/alloy'" ssh-argv.log
+  1
+  $ STATE_DIR_AT=$(grep -n -x -F -- "sudo mkdir -p '/var/lib/bondi/alloy'" ssh-argv.log | cut -d: -f1)
+  $ ALLOY_RUN_AT=$(grep -n -F -- 'docker run -d --name bondi-alloy' ssh-argv.log | cut -d: -f1)
+  $ test "$STATE_DIR_AT" -lt "$ALLOY_RUN_AT" && echo 'state directory created before the run'
+  state directory created before the run
+
+It is also created before the old Alloy is stopped: a `mkdir` that failed after
+the stop and removal would leave the box with no Alloy at all.
+
+  $ STOP_AT=$(grep -n -x -F -- 'docker stop bondi-alloy' ssh-argv.log | cut -d: -f1)
+  $ test "$STATE_DIR_AT" -lt "$STOP_AT" && echo 'state directory created before the old Alloy is stopped'
+  state directory created before the old Alloy is stopped
 
 The config file's mode is Bondi's own rather than whatever the remote shell's
 umask happened to be. The write reaching the host carries the mode explicitly,

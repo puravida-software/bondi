@@ -155,3 +155,26 @@ let mounts_volumes version =
     ~consequence:
       "An older server does not know the field and refuses the whole deploy."
     ~retry:"deploy again" version
+
+(* The fourth floor, and the highest: the first release whose server starts a
+   cron job's container under the journald logging driver. The Alloy
+   configuration this client generates reads cron jobs' lines from the host
+   journal and no longer from the Docker path, so against an older server the
+   configuration is accepted, Alloy runs, and every cron line is lost without
+   anything failing. *)
+let journald_major = 0
+let journald_minor = 25
+let minimum_for_journald_capture = "0.25.0"
+
+let captures_cron_to_journald version =
+  gate ~floor_major:journald_major ~floor_minor:journald_minor
+    ~minimum:minimum_for_journald_capture
+    ~because:
+      "alloy is declared, and the configuration setup writes reads cron jobs' \
+       lines from the host journal"
+    ~unreadable_note:
+      (Some ", which only a server from that release writes there")
+    ~consequence:
+      "An older server logs cron jobs to the Docker path the configuration no \
+       longer reads, so every cron line would be lost without an error."
+    ~retry:"check it with bondi status" version

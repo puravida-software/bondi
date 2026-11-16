@@ -25,6 +25,8 @@ let action_string = function
   | Setup.StopOrchestrator -> "StopOrchestrator"
   | Setup.RemoveOrchestrator -> "RemoveOrchestrator"
   | Setup.RunServer -> "RunServer"
+  | Setup.EnsureJournalStorage -> "EnsureJournalStorage"
+  | Setup.EnsureAlloyState -> "EnsureAlloyState"
   | Setup.EnsureAlloyConfig -> "EnsureAlloyConfig"
   | Setup.WriteAlloyEnv -> "WriteAlloyEnv"
   | Setup.RunAlloy -> "RunAlloy"
@@ -51,6 +53,8 @@ let is_ensure_network = function
   | Setup.StopOrchestrator
   | Setup.RemoveOrchestrator
   | Setup.RunServer
+  | Setup.EnsureJournalStorage
+  | Setup.EnsureAlloyState
   | Setup.EnsureAlloyConfig
   | Setup.WriteAlloyEnv
   | Setup.RunAlloy
@@ -79,6 +83,8 @@ let joins_network = function
   | Setup.PreserveCronPayloads _
   | Setup.StopOrchestrator
   | Setup.RemoveOrchestrator
+  | Setup.EnsureJournalStorage
+  | Setup.EnsureAlloyState
   | Setup.EnsureAlloyConfig
   | Setup.WriteAlloyEnv
   | Setup.StopAlloy
@@ -108,6 +114,8 @@ let is_managed = function
   | Setup.StopOrchestrator
   | Setup.RemoveOrchestrator
   | Setup.RunServer
+  | Setup.EnsureJournalStorage
+  | Setup.EnsureAlloyState
   | Setup.EnsureAlloyConfig
   | Setup.WriteAlloyEnv
   | Setup.RunAlloy
@@ -1980,6 +1988,8 @@ let test_plan_alloy_declared_image_converges_like_the_default () =
       [
         "EnsureDocker";
         "EnsureNetwork " ^ Bondi_common.Defaults.network_name;
+        "EnsureJournalStorage";
+        "EnsureAlloyState";
         "StopAlloy";
         "RemoveAlloy";
         "EnsureAlloyConfig";
@@ -2012,6 +2022,8 @@ let test_plan_alloy_stopped_is_removed_before_running () =
       [
         "EnsureDocker";
         ensure_network_action;
+        "EnsureJournalStorage";
+        "EnsureAlloyState";
         "StopAlloy";
         "RemoveAlloy";
         "EnsureAlloyConfig";
@@ -2039,6 +2051,8 @@ let test_plan_alloy_absent_runs_without_removing () =
       [
         "EnsureDocker";
         ensure_network_action;
+        "EnsureJournalStorage";
+        "EnsureAlloyState";
         "EnsureAlloyConfig";
         "WriteAlloyEnv";
         "RunAlloy";
@@ -2289,6 +2303,8 @@ let test_plan_for_config_proceeds_when_probes_succeed () =
             "StopOrchestrator";
             "RemoveOrchestrator";
             "RunServer";
+            "EnsureJournalStorage";
+            "EnsureAlloyState";
             "StopAlloy";
             "RemoveAlloy";
             "EnsureAlloyConfig";

@@ -47,23 +47,37 @@ let failure_message ~server ~failed ~remaining ~reason =
         reason (name failed) server
         (String.concat ", " (List.map name phases))
 
-type site = Alloy_config_mode | Orchestrator_restart_policy
+type site = Alloy_config_mode | Orchestrator_restart_policy | Journal_storage
 
 (* What the run had to say about one site's reading. Two shapes rather than two
    lists: both are lines of one account, they are accumulated together in the
    order a run took them, and a register that holds only what went right is the
    silence this account exists to remove. *)
+type found = Host_said of Host_answer.t | Journal_was_volatile
+
 type finding =
-  | Corrected of { found : Host_answer.t; applied : string }
+  | Corrected of { found : found; applied : string }
   | Unreadable of { detail : string }
 
 type correction = { site : site; finding : finding }
 
 let restart_policy_corrected ~found ~applied =
-  { site = Orchestrator_restart_policy; finding = Corrected { found; applied } }
+  {
+    site = Orchestrator_restart_policy;
+    finding = Corrected { found = Host_said found; applied };
+  }
 
 let config_mode_corrected ~found ~applied =
-  { site = Alloy_config_mode; finding = Corrected { found; applied } }
+  {
+    site = Alloy_config_mode;
+    finding = Corrected { found = Host_said found; applied };
+  }
+
+let journal_storage_provisioned =
+  {
+    site = Journal_storage;
+    finding = Corrected { found = Journal_was_volatile; applied = "persistent" };
+  }
 
 let unreadable_reading ~site ~detail = { site; finding = Unreadable { detail } }
 
@@ -74,6 +88,7 @@ let unreadable_reading ~site ~detail = { site; finding = Unreadable { detail } }
 let reading = function
   | Alloy_config_mode -> "mode"
   | Orchestrator_restart_policy -> "restart policy"
+  | Journal_storage -> "storage"
 
 (* What each site reads its value off: a path Bondi declares and a container
    Bondi names, both of them this tool's own constants, both read through the
@@ -88,8 +103,9 @@ let reading = function
 let subject = function
   | Alloy_config_mode -> Bondi_common.Defaults.alloy_config_path
   | Orchestrator_restart_policy -> Bondi_common.Builtin_container.orchestrator
+  | Journal_storage -> Alloy_run_args.journal_path
 
-(* One shape for both sites, so that two of them cannot describe the same kind of
+(* One shape for every site, so that two of them cannot describe the same kind of
    disagreement differently -- which is what happened while each site worded its
    own sentence where it stood. The host's value comes before Bondi's because the
    first is the reading and the second is what the run already intended: an
@@ -105,10 +121,13 @@ let subject = function
 let correction_line ~server correction =
   match correction.finding with
   | Corrected { found; applied } ->
+      let found =
+        match found with
+        | Host_said answer -> Host_answer.to_string answer
+        | Journal_was_volatile -> "volatile"
+      in
       Printf.sprintf "%s on server %s was %s %s, applied %s"
-        (subject correction.site) server (reading correction.site)
-        (Host_answer.to_string found)
-        applied
+        (subject correction.site) server (reading correction.site) found applied
   | Unreadable { detail } ->
       Printf.sprintf
         "could not read the %s of %s on server %s, so this run cannot say what \

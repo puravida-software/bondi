@@ -39,6 +39,7 @@ let mk_host_config restart_policy : Docker.host_config =
     network_mode = None;
     restart_policy;
     mounts = None;
+    log_config = None;
   }
 
 let inspect_with host_config : Docker.inspect_response =

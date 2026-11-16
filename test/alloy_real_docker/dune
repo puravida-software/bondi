@@ -15,7 +15,7 @@
 (executable
  (name emit_config)
  (modules emit_config)
- (libraries bondi.common))
+ (libraries bondi.common bondi.client bondi.server))
 
 ; CI is named rather than inherited, so a run that skipped for want of Docker is
 ; not the cached answer to a run that must fail because CI is set.

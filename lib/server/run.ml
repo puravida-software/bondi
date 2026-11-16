@@ -76,8 +76,30 @@ let combine_warnings w1 w2 =
       Some w
   | Some a, Some b -> Some (a ^ "; " ^ b)
 
+(* A pass can exit before Alloy's Docker discovery ever lists it, so its lines
+   leave through the journal. The tag is the job, for the same reason
+   bondi.name is; labels names every label given, so each reaches the journal
+   as a field the Alloy relabel rules read. The driver's cache is left on,
+   which is what keeps docker logs working. *)
+let cron_log_config ~job ~labels : Docker.Client.log_config =
+  {
+    type_ = "journald";
+    config =
+      [ ("tag", job); ("labels", String.concat "," (List.map fst labels)) ];
+  }
+
 let run_opts ~container_name ~full_image payload :
     Docker.Client.run_image_options =
+  let labels =
+    [
+      ("bondi.managed", "true");
+      ("bondi.type", "cron");
+      ("bondi.logs", "true");
+      (* The job, not [container_name]: a pass runs under a timestamped
+         temporary name, and the log stream must stay one per job. *)
+      ("bondi.name", payload.job);
+    ]
+  in
   let config : Docker.Client.container_config =
     {
       image = Some full_image;
@@ -86,23 +108,24 @@ let run_opts ~container_name ~full_image payload :
       entrypoint = None;
       hostname = None;
       working_dir = None;
-      labels =
-        Some
-          [
-            ("bondi.managed", "true");
-            ("bondi.type", "cron");
-            ("bondi.logs", "true");
-            (* The job, not [container_name]: a pass runs under a timestamped
-               temporary name, and the log stream must stay one per job. *)
-            ("bondi.name", payload.job);
-          ];
+      labels = Some labels;
       exposed_ports = None;
     }
   in
   {
     container_name;
     config;
-    host_config = None;
+    host_config =
+      Some
+        {
+          binds = None;
+          port_bindings = None;
+          network_mode = None;
+          (* None, not "no": a cron pass is one-shot and states no policy. *)
+          restart_policy = None;
+          mounts = None;
+          log_config = Some (cron_log_config ~job:payload.job ~labels);
+        };
     networking_conf = networking_conf_of_network payload.network;
   }
 

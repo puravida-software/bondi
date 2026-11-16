@@ -12,14 +12,32 @@
 # Alloy's own HTTP API.
 #
 # What is real here: the Alloy image, its discovery against a real Docker
-# socket, the generated config, and the relabel output. What is not: the Loki
-# endpoint, which is a port nothing listens on, so nothing is pushed and no
-# credential is needed. Delivery is not this file's subject; the relabel output
-# is exactly the target list the log source consumes.
+# socket, the generated config, the relabel output, and a Loki the generated
+# config writes to. That Loki is a pinned image run locally with auth disabled;
+# Grafana Cloud is not reached, and the credentials the config reads are empty,
+# which a Loki without auth ignores.
+#
+# Alloy runs inside its Loki's network namespace and pushes to it over
+# loopback, and both are reached from here through ports Loki publishes. A
+# Docker network of the run's own would need a subnet of its own, and Docker
+# hands out subnets regardless of the host's routes: on a host whose VPN routes
+# part of Docker's address pool, such a network's published ports were observed
+# to refuse or hang whenever its subnet landed in the routed part. A shared
+# namespace on the default bridge needs no subnet and no name lookup.
+#
+# Every keep or drop verdict is read twice: off the relabel output, which is
+# what Alloy decided to tail, and off Loki, which is what arrived. Each fixture
+# prints one marker line naming itself, so a kept fixture's marker is in Loki
+# and a dropped fixture's is not. Each collect mode writes to a Loki of its own:
+# the fixtures print their markers once, before either mode runs, so a shared
+# Loki would hold the first mode's deliveries when the second is judged, and a
+# fixture the second mode wrongly dropped would still read as delivered.
 #
 # Written against, and executed under, Docker Engine 29.8.1 with the Alloy image
 # named by the server's defaults (v1.8.0 when written), jq 1.8.2 and GNU bash
 # 5.3. The hosted runner image lists jq 1.7.1, which this has not yet run under.
+# The delivery arms were written against, and executed under, Docker Engine
+# 29.9.3 with the Loki image emit_config names (3.7.9 when written).
 #
 # Every assertion block has an arm: before anything is read off the relabel
 # component, the discovery component's own target list must hold every fixture
@@ -34,6 +52,31 @@
 #
 # Docker absent is a failure when CI is set and a skip only on a developer
 # machine. A skip-if-absent case is indistinguishable from no case.
+#
+# The journal path. A cron container can exit before Docker discovery ever
+# lists it, so cron containers log through journald and Alloy reads the host
+# journal, and the Docker path drops them. The journal assertions run one more
+# Alloy, against a Loki of its own. Every Alloy here, the collect-mode ones
+# included, runs with the journal mounts, state bind and storage path
+# emit_config prints from the module that owns them for setup's run line. Only
+# each Alloy's host state directory is this run's own. The generated config
+# reads the journal, and Alloy v1.8.0 refuses to load it when the journal path
+# is not there [observed -- 2026-11-12], so without a readable persistent
+# journal no Alloy here can start: the whole script skips on a developer
+# machine and fails where CI is set. Written against, and executed under,
+# Docker Engine 29.9.3 and systemd 261's journalctl and logger.
+#
+# A line Alloy sends twice cannot be counted in Loki. Loki 3.7.9 returns one
+# copy of entries that share a stream, a timestamp and a line, and the journal
+# source stamps each entry with the journal's own timestamp, so a re-sent line
+# is identical to the first. A restarted Alloy that kept its read position
+# also re-sends the last entry it had shipped. [observed -- 2026-11-12, probes
+# against Loki 3.7.9 and Alloy v1.8.0.] The restart assertion therefore also
+# reads, from the restarted Alloy's own metrics, how many journal lines it
+# read. The bound is the cron entries the host journal gained since the old
+# Alloy stopped, plus that one re-sent entry. An Alloy that lost its position
+# re-reads every earlier entry of this run and exceeds it. The metric is read
+# by its name in Alloy v1.8.0, `loki_source_journal_target_lines_total`.
 
 set -u
 
@@ -79,6 +122,30 @@ if ! alloy_image=$("$emit_config" image); then
   exit 1
 fi
 
+if ! loki_image=$("$emit_config" loki-image); then
+  printf 'FAIL: %s could not name the Loki image.\n' "$emit_config" >&2
+  exit 1
+fi
+
+if ! journal_dir=$("$emit_config" journal-path); then
+  printf 'FAIL: %s could not name the journal path.\n' "$emit_config" >&2
+  exit 1
+fi
+
+# Whether any Alloy here can run. The generated config reads the host's
+# persistent journal, which journald keeps under a directory named by the
+# machine id; with only volatile storage the parent directory can exist and
+# stay empty, so the machine's own directory is what is checked.
+machine_id=$(cat /etc/machine-id 2> /dev/null) || machine_id=''
+command -v journalctl > /dev/null 2>&1 \
+  || unavailable "journalctl is not on this machine's PATH"
+command -v logger > /dev/null 2>&1 \
+  || unavailable "logger is not on this machine's PATH"
+[ -n "$machine_id" ] && [ -d "$journal_dir/$machine_id" ] \
+  || unavailable "$journal_dir/<machine-id> does not exist, so this machine keeps no persistent journal"
+journalctl -D "$journal_dir" -q -n 1 > /dev/null 2>&1 \
+  || unavailable "journalctl cannot read $journal_dir"
+
 prefix="bondi-alloy-test-$$-$RANDOM"
 work=$(mktemp -d) || {
   printf 'FAIL: could not create a working directory.\n' >&2
@@ -92,6 +159,14 @@ cleanup() {
     # Word splitting is the point: one id per word.
     # shellcheck disable=SC2086
     docker rm -f $ids > /dev/null 2>&1
+  fi
+  # Alloy writes its state as root, which this user may not be able to delete.
+  # Every Alloy's state directory begins `alloy-state`.
+  if compgen -G "$work/alloy-state*" > /dev/null; then
+    # The single quotes are the point: the glob is expanded in the container.
+    # shellcheck disable=SC2016
+    docker run --rm -v "$work:/work" "$fixture_image" \
+      sh -c 'rm -rf /work/alloy-state*' > /dev/null 2>&1
   fi
   rm -rf "$work"
   return 0
@@ -120,7 +195,7 @@ harness_failure() {
   exit 1
 }
 
-for image in "$fixture_image" "$alloy_image"; do
+for image in "$fixture_image" "$alloy_image" "$loki_image"; do
   docker image inspect "$image" > /dev/null 2>&1 && continue
   docker pull -q "$image" > /dev/null \
     || harness_failure "could not pull $image; this is a harness failure, not a verdict on the rules"
@@ -130,6 +205,8 @@ done
 # `bondi.managed=true`. Every container a mode drops has a sibling of the same
 # `bondi.type` that differs only in the label under test and is kept, so a
 # rule that drops everything cannot pass as a rule that drops the right thing.
+# Cron is the exception: the Docker path drops every cron container, under
+# both modes, and the journal assertions below are where one is kept.
 fixtures=(
   'service-logs-true bondi.type=service bondi.logs=true'
   'service-logs-false bondi.type=service bondi.logs=false'
@@ -143,12 +220,16 @@ fixtures=(
   'service-name-empty bondi.type=service bondi.name='
   'excluded bondi.type=service bondi.logs=true'
   # A cron pass runs under its job name plus a timestamp for its whole life,
-  # so the name discovery sees differs on every pass; `bondi.name` carries the
-  # job name that stays the same.
+  # and carries `bondi.name`, as a real pass does. The Docker path drops it
+  # whatever it carries; the journal assertions judge its stable name.
   "job-1727790000.123 bondi.type=cron bondi.logs=true bondi.name=$prefix-job"
 )
 excluded_name="$prefix-excluded"
 cron_pass='job-1727790000.123'
+
+# The line a fixture prints, naming it. Every marker begins with this run's
+# prefix, which is what the Loki query filters on.
+marker_prefix="bondi-marker $prefix-"
 
 suffixes=()
 for fixture in "${fixtures[@]}"; do
@@ -157,10 +238,29 @@ for fixture in "${fixtures[@]}"; do
   for label in $labels; do
     label_args+=(--label "$label")
   done
+  # The marker is printed once, at start. Alloy's Docker source reads a log it
+  # holds no position for from its beginning, so the line written before Alloy
+  # starts is still delivered.
+  # The single quotes are the point: `$1` is expanded by the fixture's shell.
+  # shellcheck disable=SC2016
   docker run -d --name "$prefix-$suffix" "${label_args[@]}" \
-    "$fixture_image" sleep 600 > /dev/null \
+    "$fixture_image" sh -c 'echo "$1"; exec sleep 600' sh \
+    "$marker_prefix$suffix" > /dev/null \
     || harness_failure "could not start fixture $prefix-$suffix"
   suffixes+=("$suffix")
+done
+
+# One Loki per collect mode, and one for the journal assertions, all started
+# now so each is ready by the time it is used. Each publishes Alloy's API port as well as its own,
+# because the Alloy that writes to it runs in its network namespace and can
+# publish nothing itself. `-auth.enabled=false` is named rather than left to the
+# image's bundled config: with auth on, every push without a tenant header is
+# refused, and the config pushes none.
+for mode in services_only all journal; do
+  docker run -d --name "$prefix-loki-$mode" \
+    -p 127.0.0.1::3100 -p 127.0.0.1::12345 "$loki_image" \
+    -config.file=/etc/loki/local-config.yaml -auth.enabled=false > /dev/null \
+    || harness_failure "could not start $loki_image for $mode"
 done
 
 # Every list of names below is in one shape: this run's suffixes, sorted by jq,
@@ -218,25 +318,121 @@ report_every_kept_target_labelled() {
     "${kept:-at least one kept target}" "$(labelled_names)"
 }
 
-# Runs Alloy over the config generated for one mode, waits on the arm, and
-# leaves the relabel component's answer in `relabel` and its kept names in
-# `kept`. Returns non-zero when the arm did not hold, in which case neither is
-# a verdict.
+# The Loki answer for one mode, and this run's delivered names read off it,
+# both set by run_alloy.
+loki_answer=''
+delivered=''
+
+# Every line one Loki holds that begins with this run's marker prefix. Loki
+# gives every stream a `service_name`, by its documentation falling back to
+# `unknown_service` when no label it derives one from is present, so the
+# selector matches any stream, including one a wrongly shipped fixture would
+# arrive on without a `container` label. Each read is capped, so one that
+# hangs cannot hold a poll past its bound.
+query_loki() {
+  curl -sfG --max-time 5 "http://$1/loki/api/v1/query_range" \
+    --data-urlencode "query={service_name=~\".+\"} |= \"$marker_prefix\"" \
+    --data-urlencode limit=1000
+}
+
+# This run's suffixes whose marker is in a Loki answer, in the shape `kept`
+# has.
+delivered_names() {
+  printf '%s' "$1" | jq -r --arg marker "$marker_prefix" \
+    '[ .data.result[].values[][1] | rtrimstr("\n") | select(startswith($marker))
+       | ltrimstr($marker) ] | unique | join(" ")'
+}
+
+# The `container` label of the Loki stream holding one fixture's marker. Empty
+# when the marker is absent or its stream carries no such label.
+delivered_container_of() {
+  printf '%s' "$loki_answer" | jq -r --arg line "$marker_prefix$1" \
+    '[ .data.result[] | select(any(.values[]; .[1] | rtrimstr("\n") == $line))
+       | .stream.container // "" ] | unique | join(" ")'
+}
+
+# Whether every name in the second list is in the first.
+holds_all() {
+  local have=" $1 " name
+  for name in $2; do
+    case "$have" in
+      *" $name "*) ;;
+      *) return 1 ;;
+    esac
+  done
+  return 0
+}
+
+# Sets `loki_address` to the published address of one mode's Loki once it
+# answers ready. Alloy backs off between refused pushes, so it starts only once
+# Loki answers ready, and a slow Loki start cannot read as an undelivered line.
+await_loki() {
+  local loki=$1 mode=$2 deadline
+  loki_address=$(docker port "$loki" 3100/tcp | head -n 1)
+  [ -n "$loki_address" ] || harness_failure "Loki for $mode published no port"
+  deadline=$((SECONDS + 120))
+  until curl -sf --max-time 5 "http://$loki_address/ready" > /dev/null; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      docker logs "$loki" 2>&1 | tail -n 40 >&2
+      printf 'Loki at %s last answered /ready with: %s\n' "$loki_address" \
+        "$(curl -sS --max-time 5 "http://$loki_address/ready" 2>&1)" >&2
+      harness_failure "Loki for $mode was not ready within 120 seconds; this is a harness failure, not a verdict on the rules"
+    fi
+    sleep 1
+  done
+}
+
+# Creates the host state directory given and reads, into `shipped_docker_args`
+# and `shipped_alloy_args`, the arguments emit_config prints for an Alloy whose
+# state lives there. Each output is bound to a variable before it is split, so
+# an emit_config that fails stops the run instead of leaving an empty argument
+# list. An empty output is an empty list, not a failure: a run line that lost
+# its storage path prints no Alloy arguments, and that has to reach Alloy and
+# be judged by the restart assertion, not stop the run. Split as it is, an
+# empty output would become one empty argument.
+load_shipped_args() {
+  local state=$1 out
+  mkdir "$state" || harness_failure "could not create $state"
+  out=$("$emit_config" alloy-run-args docker "$state") \
+    || harness_failure 'emit_config could not print the docker run arguments'
+  shipped_docker_args=()
+  [ -z "$out" ] || mapfile -t shipped_docker_args <<< "$out"
+  out=$("$emit_config" alloy-run-args alloy "$state") \
+    || harness_failure "emit_config could not print Alloy's run arguments"
+  shipped_alloy_args=()
+  [ -z "$out" ] || mapfile -t shipped_alloy_args <<< "$out"
+}
+
+# Runs Alloy over the config generated for one mode, writing to that mode's
+# Loki, waits on the arm, and leaves the relabel component's answer in
+# `relabel`, its kept names in `kept`, Loki's answer in `loki_answer` and the
+# names delivered to it in `delivered`. Returns non-zero when the arm did not
+# hold, in which case none of them is a verdict.
 run_alloy() {
   local mode=$1 config="$work/$1.alloy" name="$prefix-alloy-$1"
+  local loki="$prefix-loki-$1"
   local address api discovery seen_by_discovery seen_by_relabel deadline
+  local loki_address answer
   relabel=''
   kept=''
-  "$emit_config" config "$mode" "$excluded_name" > "$config" \
+  loki_answer=''
+  delivered=''
+
+  await_loki "$loki" "$mode"
+
+  "$emit_config" config "$mode" "http://127.0.0.1:3100/loki/api/v1/push" \
+    "$excluded_name" > "$config" \
     || harness_failure "emit_config could not generate the $mode config"
-  docker run -d --name "$name" -p 127.0.0.1::12345 \
+  load_shipped_args "$work/alloy-state-$mode"
+  docker run -d --name "$name" --network "container:$loki" \
     -v /var/run/docker.sock:/var/run/docker.sock:ro \
     -v "$config:/etc/alloy/config.alloy:ro,Z" \
+    "${shipped_docker_args[@]}" \
     "$alloy_image" run --server.http.listen-addr=0.0.0.0:12345 \
-    /etc/alloy/config.alloy > /dev/null \
+    "${shipped_alloy_args[@]}" /etc/alloy/config.alloy > /dev/null \
     || harness_failure "could not start $alloy_image for $mode"
-  address=$(docker port "$name" 12345/tcp | head -n 1)
-  [ -n "$address" ] || harness_failure "Alloy for $mode published no port"
+  address=$(docker port "$loki" 12345/tcp | head -n 1)
+  [ -n "$address" ] || harness_failure "Loki for $mode published no port for Alloy"
   api="http://$address/api/v0/web/components"
 
   # Discovery lists containers once at start, so the fixtures are expected on
@@ -245,8 +441,8 @@ run_alloy() {
   seen_by_relabel=''
   deadline=$((SECONDS + 60))
   while [ "$SECONDS" -lt "$deadline" ]; do
-    if discovery=$(curl -sf "$api/discovery.docker.containers") \
-      && relabel=$(curl -sf "$api/discovery.relabel.bondi"); then
+    if discovery=$(curl -sf --max-time 5 "$api/discovery.docker.containers") \
+      && relabel=$(curl -sf --max-time 5 "$api/discovery.relabel.bondi"); then
       seen_by_discovery=$(target_names "$discovery" exports targets)
       seen_by_relabel=$(target_names "$relabel" arguments targets)
       if [ "$seen_by_discovery" = "$fixture_names" ] \
@@ -269,20 +465,41 @@ run_alloy() {
   fi
 
   # Read after the arm, so the output is computed from the input the arm saw.
-  relabel=$(curl -sf "$api/discovery.relabel.bondi") \
+  relabel=$(curl -sf --max-time 5 "$api/discovery.relabel.bondi") \
     || harness_failure "the relabel component stopped answering for $mode"
   jq -e '.exports' <<< "$relabel" > /dev/null \
     || harness_failure "the relabel component's answer for $mode has no exports"
   kept=$(target_names "$relabel" exports output)
-  docker rm -f "$name" > /dev/null 2>&1
+
+  # Waits until every target the relabel component kept has its marker in
+  # Loki, then reads Loki once more. A wrongly shipped fixture's marker would
+  # travel beside the kept ones; the pause covers more than one batch of
+  # `loki.write`, whose documented default wait is one second, so its absence
+  # is read after it would have arrived. A kept marker still missing at the
+  # bound is a verdict, read by the assertions below, and not a harness
+  # failure.
+  deadline=$((SECONDS + 60))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if answer=$(query_loki "$loki_address"); then
+      holds_all "$(delivered_names "$answer")" "$kept" && break
+    fi
+    sleep 1
+  done
+  sleep 3
+  loki_answer=$(query_loki "$loki_address") \
+    || harness_failure "Loki stopped answering for $mode"
+  delivered=$(delivered_names "$loki_answer")
+  docker rm -f "$name" "$loki" > /dev/null 2>&1
   return 0
 }
 
-# One `suffix=kept` or `suffix=dropped` per suffix named, in the order named.
+# One `suffix=kept` or `suffix=dropped` per suffix named, in the order named,
+# read off the list of names given first, in the shape `kept` has.
 verdict() {
-  local suffix out=''
+  local names=$1 suffix out=''
+  shift
   for suffix in "$@"; do
-    case " $kept " in
+    case " $names " in
       *" $suffix "*) out+="$suffix=kept " ;;
       *) out+="$suffix=dropped " ;;
     esac
@@ -290,58 +507,361 @@ verdict() {
   printf '%s' "${out% }"
 }
 
+# One keep or drop expectation, judged twice: off the relabel output, then off
+# what Loki received, where `kept` reads as "its marker arrived". The
+# expectation is written once, so the two arms cannot drift apart.
+report_kept_and_delivered() {
+  local description=$1 expected=$2
+  shift 2
+  report "$description" "$expected" "$(verdict "$kept" "$@")"
+  report "$description, delivered" "$expected" "$(verdict "$delivered" "$@")"
+}
+
+# One fixture's `container` label, judged twice: on its relabelled target,
+# then on the Loki stream its marker arrived on.
+report_container_and_delivered() {
+  local description=$1 expected=$2 suffix=$3
+  report "$description" "$expected" "$(container_of "$suffix")"
+  report "$description, delivered" "$expected" \
+    "$(delivered_container_of "$suffix")"
+}
+
 if run_alloy services_only; then
-  report 'services_only_keeps_service_and_cron' \
-    'service-logs-true=kept cron-logs-true=kept' \
-    "$(verdict service-logs-true cron-logs-true)"
-  report 'services_only_drops_managed_infrastructure_and_untyped' \
+  report_kept_and_delivered 'services_only_keeps_service_and_drops_cron' \
+    "service-logs-true=kept cron-logs-true=dropped $cron_pass=dropped" \
+    service-logs-true cron-logs-true "$cron_pass"
+  report_kept_and_delivered \
+    'services_only_drops_managed_infrastructure_and_untyped' \
     'managed=dropped infrastructure-logs-true=dropped untyped=dropped' \
-    "$(verdict managed infrastructure-logs-true untyped)"
-  report 'logs_false_dropped_and_logs_true_sibling_kept (services_only)' \
+    managed infrastructure-logs-true untyped
+  report_kept_and_delivered \
+    'logs_false_dropped_and_logs_true_sibling_kept (services_only)' \
     'service-logs-false=dropped service-logs-true=kept' \
-    "$(verdict service-logs-false service-logs-true)"
-  report 'logs_absent_is_kept (services_only)' \
+    service-logs-false service-logs-true
+  report_kept_and_delivered 'logs_absent_is_kept (services_only)' \
     'service-logs-absent=kept' \
-    "$(verdict service-logs-absent)"
-  report 'excluded_name_dropped (services_only)' \
+    service-logs-absent
+  report_kept_and_delivered 'excluded_name_dropped (services_only)' \
     'excluded=dropped service-logs-true=kept' \
-    "$(verdict excluded service-logs-true)"
-  report 'cron_temp_name_gets_stable_container_label' \
-    "$prefix-job" \
-    "$(container_of "$cron_pass")"
-  report 'label_less_service_falls_back_to_container_name' \
+    excluded service-logs-true
+  report_container_and_delivered \
+    'label_less_service_falls_back_to_container_name' \
     "$prefix-service-logs-true" \
-    "$(container_of service-logs-true)"
+    service-logs-true
   report_every_kept_target_labelled services_only
 fi
 
 if run_alloy all; then
-  report 'logs_false_dropped_and_logs_true_sibling_kept (all)' \
+  report_kept_and_delivered \
+    'logs_false_dropped_and_logs_true_sibling_kept (all)' \
     'service-logs-false=dropped service-logs-true=kept infrastructure-logs-false=dropped infrastructure-logs-true=kept' \
-    "$(verdict service-logs-false service-logs-true infrastructure-logs-false infrastructure-logs-true)"
-  report 'logs_absent_is_kept (all)' \
+    service-logs-false service-logs-true infrastructure-logs-false infrastructure-logs-true
+  report_kept_and_delivered 'logs_absent_is_kept (all)' \
     'service-logs-absent=kept' \
-    "$(verdict service-logs-absent)"
-  report 'all_keeps_every_non_opted_out_container' \
-    'service-logs-true=kept service-logs-absent=kept service-name-empty=kept cron-logs-true=kept managed=kept infrastructure-logs-true=kept untyped=kept' \
-    "$(verdict service-logs-true service-logs-absent service-name-empty cron-logs-true managed infrastructure-logs-true untyped)"
-  report 'managed_container_label_is_its_bondi_name_not_the_gateway_default' \
+    service-logs-absent
+  report_kept_and_delivered 'all_keeps_every_non_opted_out_non_cron_container' \
+    "service-logs-true=kept service-logs-absent=kept service-name-empty=kept cron-logs-true=dropped $cron_pass=dropped managed=kept infrastructure-logs-true=kept untyped=kept" \
+    service-logs-true service-logs-absent service-name-empty cron-logs-true "$cron_pass" managed infrastructure-logs-true untyped
+  report_container_and_delivered \
+    'managed_container_label_is_its_bondi_name_not_the_gateway_default' \
     "$prefix-managed-name" \
-    "$(container_of managed)"
-  report 'empty_bondi_name_falls_back_to_container_name' \
+    managed
+  report_container_and_delivered \
+    'empty_bondi_name_falls_back_to_container_name' \
     "$prefix-service-name-empty" \
-    "$(container_of service-name-empty)"
-  report 'excluded_name_dropped (all)' \
+    service-name-empty
+  report_kept_and_delivered 'excluded_name_dropped (all)' \
     'excluded=dropped service-logs-true=kept' \
-    "$(verdict excluded service-logs-true)"
-  report 'infrastructure_container_label_is_its_name' \
+    excluded service-logs-true
+  report_container_and_delivered 'infrastructure_container_label_is_its_name' \
     "$prefix-infrastructure-logs-true" \
-    "$(container_of infrastructure-logs-true)"
+    infrastructure-logs-true
   report_every_kept_target_labelled all
 fi
 
+# --- The journal path ---
+
+# Starts one journald fixture: a name suffix, the tag, the labels it carries,
+# then the command it runs. The logging options are the ones a cron container
+# runs with: the tag is the job name, and the four `bondi.*` labels are copied
+# into the journal as fields of their own, all printed by emit_config from
+# Run.cron_log_config. `bondi.managed=true` is named by
+# each caller, so a fixture can stand for a container outside Bondi.
+start_journald() {
+  local suffix=$1 tag=$2 labels=$3 label
+  shift 3
+  local label_args=()
+  for label in $labels; do
+    label_args+=(--label "$label")
+  done
+  local log_args
+  log_args=$("$emit_config" cron-log-args "$tag") \
+    || harness_failure "emit_config could not name the cron log options"
+  # shellcheck disable=SC2086  # one option per line, none with a space
+  docker run -d --name "$prefix-$suffix" "${label_args[@]}" $log_args \
+    "$fixture_image" "$@" > /dev/null \
+    || harness_failure "could not start fixture $prefix-$suffix"
+}
+
+# Runs one journald fixture that prints its marker and exits at once, and
+# waits for the exit: a name suffix, the tag, the labels, the marker's name.
+run_journald_pass() {
+  start_journald "$1" "$2" "$3" echo "$marker_prefix$4"
+  docker wait "$prefix-$1" > /dev/null \
+    || harness_failure "could not wait for fixture $prefix-$1"
+}
+
+# How many lines in `loki_answer` are exactly one marker, across every stream.
+marker_count() {
+  printf '%s' "$loki_answer" | jq -r --arg line "$marker_prefix$1" \
+    '[ .data.result[].values[][1] | rtrimstr("\n") | select(. == $line) ]
+     | length'
+}
+
+# One `marker=count` per marker named, in the order named.
+marker_counts() {
+  local marker out=''
+  for marker in "$@"; do
+    out+="$marker=$(marker_count "$marker") "
+  done
+  printf '%s' "${out% }"
+}
+
+# The label set of the stream holding one marker: its keys, its project, and
+# whether its service_name is its container, the way Loki derives it. `absent`
+# when no stream holds the marker.
+stream_shape() {
+  printf '%s' "$loki_answer" | jq -r --arg line "$marker_prefix$1" \
+    '[ .data.result[] | select(any(.values[]; .[1] | rtrimstr("\n") == $line))
+       | .stream
+       | "keys=\(keys | join(",")) project=\(.project // "")"
+         + " service_name_is_container=\(.container != null
+                                         and .service_name == .container)" ]
+     | if length == 0 then "absent" else unique | join(" | ") end'
+}
+
+# Waits until every marker named has arrived in the journal Loki, or the bound
+# in seconds passes, then reads Loki once more after the pause run_alloy
+# explains, into `loki_answer`. A marker still missing is a verdict, read by
+# the assertions, and not a harness failure.
+await_markers() {
+  local bound=$1 answer deadline marker missing
+  shift
+  deadline=$((SECONDS + bound))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if answer=$(query_loki "$journal_loki_address"); then
+      loki_answer=$answer
+      missing=''
+      for marker in "$@"; do
+        [ "$(marker_count "$marker")" -ge 1 ] || missing=yes
+      done
+      [ -z "$missing" ] && break
+    fi
+    sleep 1
+  done
+  sleep 3
+  loki_answer=$(query_loki "$journal_loki_address") \
+    || harness_failure 'Loki stopped answering for the journal assertions'
+}
+
+# Starts one Alloy for the journal assertions, with the arguments emit_config
+# printed, and waits until it answers ready.
+start_journal_alloy() {
+  local name=$1 deadline
+  docker run -d --name "$name" --network "container:$journal_loki" \
+    -v /var/run/docker.sock:/var/run/docker.sock:ro \
+    -v "$journal_config:/etc/alloy/config.alloy:ro,Z" \
+    "${shipped_docker_args[@]}" \
+    "$alloy_image" run --server.http.listen-addr=0.0.0.0:12345 \
+    "${shipped_alloy_args[@]}" /etc/alloy/config.alloy > /dev/null \
+    || harness_failure "could not start $alloy_image for the journal assertions"
+  deadline=$((SECONDS + 60))
+  until curl -sf --max-time 5 "http://$journal_api_address/-/ready" > /dev/null; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      docker logs "$name" 2>&1 | tail -n 40 >&2
+      harness_failure "$name was not ready within 60 seconds; this is a harness failure, not a verdict on the journal path"
+    fi
+    sleep 1
+  done
+}
+
+run_journal() {
+  local state="$work/alloy-state" out discovery deadline listed=''
+  local first="$prefix-alloy-journal-1" second="$prefix-alloy-journal-2"
+  local job="$prefix-jjob" held=jheld-1727790000.231 pass=jjob-1727790000.201
+  local noname=jnoname-1727790000.241 journal_components docker_path
+  local gap_start host_entries host_count metrics lines_read bound reread
+  local loki_address
+  journal_loki="$prefix-loki-journal"
+  journal_config="$work/journal.alloy"
+  loki_answer=''
+
+  await_loki "$journal_loki" journal
+  journal_loki_address=$loki_address
+  journal_api_address=$(docker port "$journal_loki" 12345/tcp | head -n 1)
+  [ -n "$journal_api_address" ] \
+    || harness_failure 'Loki for the journal published no port for Alloy'
+  journal_components="http://$journal_api_address/api/v0/web/components"
+
+  "$emit_config" config all "http://127.0.0.1:3100/loki/api/v1/push" \
+    "$excluded_name" > "$journal_config" \
+    || harness_failure 'emit_config could not generate the journal config'
+  load_shipped_args "$state"
+
+  start_journal_alloy "$first"
+
+  # A cron pass held running until discovery lists it, so the Docker path has
+  # its chance to ship the same line the journal does.
+  # The single quotes are the point: `$1` is expanded by the fixture's shell.
+  # shellcheck disable=SC2016
+  start_journald "$held" "$prefix-jheld" \
+    "bondi.managed=true bondi.type=cron bondi.logs=true bondi.name=$prefix-jheld" \
+    sh -c 'echo "$1"; while [ ! -e /tmp/release ]; do sleep 0.2; done' sh \
+    "${marker_prefix}journal-held"
+
+  # Passes that exit at once, each differing from the first only in what its
+  # assertion is about. The non-cron container, the container outside Bondi
+  # and the logger line carry the job's tag, so a source that matched on the
+  # tag would ship them.
+  run_journald_pass "$pass" "$job" \
+    "bondi.managed=true bondi.type=cron bondi.logs=true bondi.name=$job" \
+    journal-subsecond
+  run_journald_pass jjob-1727790000.211 "$job" \
+    "bondi.managed=true bondi.type=cron bondi.logs=false bondi.name=$job" \
+    journal-optout
+  run_journald_pass excluded-jjob-1727790000.221 "$prefix-excluded-jjob" \
+    "bondi.managed=true bondi.type=cron bondi.logs=true bondi.name=$prefix-excluded-jjob" \
+    journal-excluded
+  # An empty `bondi.name` is written as an empty field, so the container name
+  # is the fallback, as on the Docker path.
+  run_journald_pass "$noname" "$prefix-jnoname" \
+    "bondi.managed=true bondi.type=cron bondi.logs=true bondi.name=" \
+    journal-noname
+  run_journald_pass jservice "$job" \
+    "bondi.managed=true bondi.type=service bondi.logs=true bondi.name=$job" \
+    journal-service
+  # A cron-typed container that is not Bondi's: without the label, the driver
+  # writes no BONDI_MANAGED field.
+  run_journald_pass junmanaged-1727790000.251 "$job" \
+    "bondi.type=cron bondi.logs=true bondi.name=$job" journal-unmanaged
+  logger -t "$job" -- "${marker_prefix}journal-logger" \
+    || harness_failure 'logger could not write to the journal'
+
+  # Discovery refreshes every 60 seconds by default, so the bound covers one
+  # refresh after the held pass started. The held pass has to reach the
+  # Docker path's relabel component too, so its output below is a verdict on
+  # this pass.
+  deadline=$((SECONDS + 90))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if discovery=$(curl -sf --max-time 5 "$journal_components/discovery.docker.containers") \
+      && relabel=$(curl -sf --max-time 5 "$journal_components/discovery.relabel.bondi"); then
+      case " $(target_names "$discovery" exports targets) | $(target_names "$relabel" arguments targets) " in
+        *" $held "*"|"*" $held "*)
+          listed=listed
+          break
+          ;;
+      esac
+    fi
+    sleep 1
+  done
+  report 'arm_discovery_lists_the_held_cron_pass (journal)' listed \
+    "${listed:-not listed}"
+  # Loki cannot show the Docker path shipping the held pass a second time: with
+  # that path's cron drop removed, the count below still read 1 [observed --
+  # 2026-11-13]. The Docker source is assumed to read a journald container's
+  # lines back from the journal, timestamp included, so its copy is identical
+  # and Loki keeps one. What the Docker path chose to tail is read instead.
+  docker_path=$(verdict "$(target_names "$relabel" exports output)" "$held")
+  # The Docker source starts tailing once the relabelled target reaches it;
+  # the pause gives it that time before the pass exits.
+  sleep 5
+  docker exec "$prefix-$held" touch /tmp/release \
+    || harness_failure "could not release $prefix-$held"
+  docker wait "$prefix-$held" > /dev/null \
+    || harness_failure "could not wait for $prefix-$held"
+
+  await_markers 30 journal-subsecond journal-held journal-noname \
+    service-logs-true
+
+  report 'journal: sub-second cron marker in Loki' \
+    "journal-subsecond=1 container=$job" \
+    "$(marker_counts journal-subsecond) container=$(delivered_container_of journal-subsecond)"
+  report 'journal: cron pass without a bondi.name is named by its container' \
+    "journal-noname=1 container=$prefix-$noname" \
+    "$(marker_counts journal-noname) container=$(delivered_container_of journal-noname)"
+  # The service stream is the reference: a fixture the Docker path ships,
+  # re-read from its start by this Alloy.
+  if [ "$(stream_shape service-logs-true)" = absent ]; then
+    report 'arm_service_stream_delivered (journal)' present absent
+  else
+    report 'arm_service_stream_delivered (journal)' present present
+  fi
+  report 'journal: cron stream labels equal service stream labels' \
+    "$(stream_shape service-logs-true)" "$(stream_shape journal-subsecond)"
+  # Once is only a verdict on the two paths while the journal path delivers at
+  # all, so the sub-second pass's delivery is part of the expectation.
+  report 'journal: discovered cron marker shipped once' \
+    "journal-held=1 journal-subsecond=1 | docker path: $held=dropped" \
+    "$(marker_counts journal-held journal-subsecond) | docker path: $docker_path"
+  report 'journal: opted-out cron ships nothing' \
+    'journal-optout=0 journal-subsecond=1' \
+    "$(marker_counts journal-optout journal-subsecond)"
+  report 'journal: excluded cron ships nothing' \
+    'journal-excluded=0 journal-subsecond=1' \
+    "$(marker_counts journal-excluded journal-subsecond)"
+  report 'journal: non-cron journald and logger markers absent' \
+    'journal-service=0 journal-logger=0 journal-subsecond=1' \
+    "$(marker_counts journal-service journal-logger journal-subsecond)"
+  report 'journal: cron-typed container outside Bondi ships nothing' \
+    'journal-unmanaged=0 journal-subsecond=1' \
+    "$(marker_counts journal-unmanaged journal-subsecond)"
+  report 'journal: docker logs shows exited cron marker' \
+    "${marker_prefix}journal-subsecond" \
+    "$(docker logs "$prefix-$pass" 2>&1)"
+
+  # Alloy is replaced the way setup replaces it: stopped, then removed.
+  if ! { docker stop "$first" > /dev/null && docker rm "$first" > /dev/null; }; then
+    harness_failure "could not stop and remove $first"
+  fi
+  gap_start=$(date +%s)
+  # A second's pause, so the window read below starts after every entry the
+  # first Alloy could have read.
+  sleep 1
+  run_journald_pass jjob-1727790000.202 "$job" \
+    "bondi.managed=true bondi.type=cron bondi.logs=true bondi.name=$job" \
+    journal-down
+  start_journal_alloy "$second"
+  await_markers 30 journal-down
+
+  # The cron entries the host journal gained since the first Alloy stopped,
+  # every one of them, so a cron container of the host's own that logged in
+  # the gap raises the bound rather than failing the run.
+  host_entries=$(journalctl -D "$journal_dir" --since "@$gap_start" \
+    BONDI_TYPE=cron -o json -q) \
+    || harness_failure "journalctl could not read $journal_dir"
+  host_count=$(printf '%s' "$host_entries" | grep -c .)
+  bound=$((host_count + 1))
+  metrics=$(curl -sf --max-time 5 "http://$journal_api_address/metrics") \
+    || harness_failure "$second did not answer its metrics"
+  lines_read=$(printf '%s\n' "$metrics" | awk '
+    $1 ~ /^loki_source_journal_target_lines_total([{]|$)/ { sum += $2; seen = 1 }
+    END { if (seen) printf "%d", sum }')
+  if [ -z "$lines_read" ]; then
+    reread='no journal source metric'
+  elif [ "$lines_read" -ge 1 ] && [ "$lines_read" -le "$bound" ]; then
+    reread="within 1..$bound"
+  else
+    reread="$lines_read lines, bound $bound"
+  fi
+  report 'journal: marker logged while Alloy is down arrives once' \
+    "journal-down=1 journal-subsecond=1 | restarted Alloy read: within 1..$bound" \
+    "$(marker_counts journal-down journal-subsecond) | restarted Alloy read: $reread"
+}
+
+run_journal
+
 if [ "$failures" -ne 0 ]; then
-  printf '%d assertion(s) failed against a real Alloy (%s).\n' \
-    "$failures" "$alloy_image" >&2
+  printf '%d assertion(s) failed against a real Alloy (%s) writing to a real Loki (%s).\n' \
+    "$failures" "$alloy_image" "$loki_image" >&2
   exit 1
 fi

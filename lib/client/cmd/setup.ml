@@ -101,6 +101,8 @@ type action =
   | StopOrchestrator
   | RemoveOrchestrator
   | RunServer
+  | EnsureJournalStorage
+  | EnsureAlloyState
   | EnsureAlloyConfig
   | WriteAlloyEnv
   | RunAlloy
@@ -129,6 +131,8 @@ let phase_of_action : action -> Setup_phases.phase = function
   | RemoveOrchestrator
   | RunServer ->
       Setup_phases.Orchestrator
+  | EnsureJournalStorage
+  | EnsureAlloyState
   | EnsureAlloyConfig
   | WriteAlloyEnv
   | RunAlloy
@@ -664,6 +668,25 @@ let alloy_config_pre_write_account ~expected = function
           ~detail:(alloy_mode_unreadable_detail reason);
       ]
 
+(* Withdrawing alloy from the configuration takes its files off the host. It is
+   a builder rather than a literal in the interpret arm for the reason the write
+   commands are: the directory it deletes has to be the directory they wrote to,
+   and a removal naming a directory nothing writes to leaves a withdrawn
+   credential on disk with nothing failing. *)
+let alloy_remove_config_command =
+  Printf.sprintf "sudo rm -rf %s" (Filename.quote alloy_config_dir)
+
+(* The directory Alloy keeps its journal read position in, created before every
+   run because the run mounts it with --mount, which refuses a source that does
+   not exist. Every run rather than once: a box set up by an earlier release has
+   no such directory, and `mkdir -p` leaves one that exists, with what it holds,
+   untouched.
+
+   Withdrawing alloy removes the config directory and not this one, which holds
+   no credential. *)
+let alloy_state_dir_command =
+  Printf.sprintf "sudo mkdir -p %s" (Filename.quote Alloy_run_args.state_dir)
+
 (* The `docker run` that starts the sidecar. The Grafana Cloud credentials are
    read out of the file [WriteAlloyEnv] wrote rather than interpolated here.
    Interpolated, they were in this client's ssh command line and in the host's
@@ -690,23 +713,30 @@ let alloy_config_pre_write_account ~expected = function
    The paths are the module's own constants rather than literals spelled a second
    time: the file this command reads must be the file the write created, and a
    run command pointing at a path nothing wrote starts a sidecar that ships
-   nothing while every half of the pair still looks right on its own. *)
-(* Withdrawing alloy from the configuration takes its files off the host. It is
-   a builder rather than a literal in the interpret arm for the reason the write
-   commands are: the directory it deletes has to be the directory they wrote to,
-   and a removal naming a directory nothing writes to leaves a withdrawn
-   credential on disk with nothing failing. *)
-let alloy_remove_config_command =
-  Printf.sprintf "sudo rm -rf %s" (Filename.quote alloy_config_dir)
+   nothing while every half of the pair still looks right on its own.
+
+   The journal mount, the state bind and --storage.path come from
+   [Alloy_run_args] and are spelled nowhere here. The behavioural test runs the
+   real image with the arguments that module prints, so a path written a second
+   time in this command would let that test pass on a run line that does not
+   ship. The Docker options go before the image and the Alloy option after
+   `run`, because each program refuses the other's. *)
+let quoted_join options = String.concat " " (List.map Filename.quote options)
 
 let alloy_run_command ~image =
+  let journal =
+    Alloy_run_args.journal ~host_state_dir:Alloy_run_args.state_dir
+  in
   Printf.sprintf
     "docker run -d --name %s --restart %s -v \
-     /var/run/docker.sock:/var/run/docker.sock:ro -v %s:%s:ro --label \
+     /var/run/docker.sock:/var/run/docker.sock:ro -v %s:%s:ro %s --label \
      bondi.managed=true --label bondi.type=infrastructure --label \
-     bondi.logs=false --env-file %s %s run %s"
+     bondi.logs=false --env-file %s %s run %s %s"
     Builtin_container.alloy Bondi_common.Defaults.bondi_restart_policy
-    alloy_config_path alloy_config_path alloy_env_path (Filename.quote image)
+    alloy_config_path alloy_config_path
+    (quoted_join journal.docker_options)
+    alloy_env_path (Filename.quote image)
+    (quoted_join journal.alloy_options)
     alloy_config_path
 
 let orchestrator_state_of_ps_output output =
@@ -1146,12 +1176,34 @@ let plan (config : Config_file.t) ~(specs : Managed_container.t list)
      alloy precedes the managed containers here, nothing after it converges
      either. The stop stays ahead of the removal because [RemoveAlloy]'s [docker
      rm] refuses a paused or restarting container just as it refuses a running
-     one, and both are states a non-running container can be in. *)
+     one, and both are states a non-running container can be in.
+
+     The journal comes first in the phase, ahead of the stop: Alloy reads cron
+     jobs' lines from it, and a box whose journal cannot be made persistent
+     fails the run there. Read first, that failure leaves the box with the Alloy
+     it already had rather than with none. The state directory is ahead of the
+     stop for the same reason: a [mkdir] that fails after the old Alloy was
+     removed leaves the box with none. *)
   let alloy =
     match (config.alloy, ctx.alloy_state) with
     | Some _, Alloy_present ->
-        [ StopAlloy; RemoveAlloy; EnsureAlloyConfig; WriteAlloyEnv; RunAlloy ]
-    | Some _, Alloy_absent -> [ EnsureAlloyConfig; WriteAlloyEnv; RunAlloy ]
+        [
+          EnsureJournalStorage;
+          EnsureAlloyState;
+          StopAlloy;
+          RemoveAlloy;
+          EnsureAlloyConfig;
+          WriteAlloyEnv;
+          RunAlloy;
+        ]
+    | Some _, Alloy_absent ->
+        [
+          EnsureJournalStorage;
+          EnsureAlloyState;
+          EnsureAlloyConfig;
+          WriteAlloyEnv;
+          RunAlloy;
+        ]
     (* Withdrawn from configuration. A stopped container has to go too, or the
        name stays taken and the wedge outlives the withdrawal. *)
     | None, Alloy_present -> [ StopAlloy; RemoveAlloy ]
@@ -1249,6 +1301,15 @@ let plan_for_config (config : Config_file.t) (ctx : setup_context) =
      box which cannot answer. *)
   let* () =
     Server_version.answers_command_surface config.bondi_server.version
+  in
+  (* A declared alloy reads cron lines from the journal, which only a server
+     from [minimum_for_journald_capture] writes there. Held to the floor on the
+     pinned version, as above, so nothing is stopped or run first. *)
+  let* () =
+    match config.alloy with
+    | None -> Ok ()
+    | Some _ ->
+        Server_version.captures_cron_to_journald config.bondi_server.version
   in
   let* () =
     match ctx.docker_status with
@@ -1650,6 +1711,46 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
           (Printf.sprintf "%s is ready on server %s: %s"
              Builtin_container.orchestrator ip_address image);
         Ok []
+    | EnsureJournalStorage -> (
+        (* What a storage reading means, which commands it calls for and what
+           the reading taken after them means are decided in
+           [Journal_storage]; this arm takes the readings, runs the commands in
+           order and carries the verdicts out. Read here rather than with the
+           gathered context, for the reason [EnsureAlloyConfig] reads its mode
+           here: only a host that declares alloy plans this action, so only
+           that host is asked. *)
+        let read_storage () =
+          Journal_storage.reading_of_probe
+            (Remote_exec.command_output_text ?session
+               ~timeout_seconds:host_command_seconds
+               ~command:Journal_storage.probe_command server)
+        in
+        let* planned = Journal_storage.plan (read_storage ()) in
+        match planned with
+        | Journal_storage.Nothing_to_do ->
+            print_endline
+              (Printf.sprintf
+                 "Journal on server %s is stored persistently under %s"
+                 ip_address Alloy_run_args.journal_path);
+            Ok []
+        | Journal_storage.Provision_then_recheck commands ->
+            let* () =
+              List.fold_left
+                (fun ran command ->
+                  let* () = ran in
+                  let* _ =
+                    Remote_exec.command_output_text ?session
+                      ~timeout_seconds:host_command_seconds ~command server
+                  in
+                  Ok ())
+                (Ok ()) commands
+            in
+            let* () = Journal_storage.recheck (read_storage ()) in
+            print_endline
+              (Printf.sprintf
+                 "Provisioned persistent journal storage on server %s: %s"
+                 ip_address Alloy_run_args.journal_path);
+            Ok [ Setup_phases.journal_storage_provisioned ])
     | EnsureAlloyConfig -> (
         match config.alloy with
         | None -> Ok []
@@ -1790,6 +1891,13 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
               (Printf.sprintf "Wrote Alloy credentials file on server %s: %s"
                  ip_address alloy_env_path);
             Ok [])
+    | EnsureAlloyState ->
+        let* _ =
+          Remote_exec.command_output_text ?session
+            ~timeout_seconds:host_command_seconds
+            ~command:alloy_state_dir_command server
+        in
+        Ok []
     | RunAlloy -> (
         match config.alloy with
         | None -> Ok []

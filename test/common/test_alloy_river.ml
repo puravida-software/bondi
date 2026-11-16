@@ -42,22 +42,152 @@ let test_collect_mode_invalid () =
    right containers on those rules is judged by a real Alloy against real
    labelled containers, in test/alloy_real_docker. *)
 
-let keep_rule =
+let both_modes = [ R.All; R.Services_only ]
+
+(* The text of one top-level block, from its header to the brace that closes
+   it at the start of a line, so an assertion about one component cannot be met
+   by the text of another. *)
+let block ~header river =
+  match Bondi_common.String_utils.index_of ~needle:header river with
+  | None -> fail ("no block " ^ header)
+  | Some start -> (
+      let rest = String.sub river start (String.length river - start) in
+      match Bondi_common.String_utils.index_of ~needle:"\n}\n" rest with
+      | None -> fail ("block " ^ header ^ " is never closed")
+      | Some stop -> String.sub rest 0 (stop + 3))
+
+let docker_relabel river = block ~header:"discovery.relabel \"bondi\" {" river
+let journal_relabel river = block ~header:"loki.relabel \"bondi_cron\" {" river
+
+let journal_source river =
+  block ~header:"loki.source.journal \"bondi_cron\" {" river
+
+(* The keep rule as it read before cron moved to the journal: it must not come
+   back, or a cron pass discovery lists ships twice. *)
+let service_and_cron_keep_rule =
   "source_labels = [\"__meta_docker_container_label_bondi_type\"]\n\
    \t\tregex         = \"^(service|cron)$\"\n\
    \t\taction        = \"keep\""
+
+let service_keep_rule =
+  "source_labels = [\"__meta_docker_container_label_bondi_type\"]\n\
+   \t\tregex         = \"^service$\"\n\
+   \t\taction        = \"keep\""
+
+let cron_drop_rule =
+  "source_labels = [\"__meta_docker_container_label_bondi_type\"]\n\
+   \t\tregex         = \"cron\"\n\
+   \t\taction        = \"drop\""
 
 let logs_drop_rule =
   "source_labels = [\"__meta_docker_container_label_bondi_logs\"]\n\
    \t\tregex         = \"false\"\n\
    \t\taction        = \"drop\""
 
-let test_relabel_keep_rule_only_in_services_only () =
-  check bool "services_only keeps service and cron" true
-    (contains ~needle:keep_rule
-       (R.generate { base_config with collect = Services_only }));
+(* The journal field names are the ones Docker's journald driver was observed
+   writing for a cron container, and the [__journal_] names the ones Alloy
+   v1.8.0 was observed exposing for them: a label [bondi.x] is written as the
+   field [BONDI_X] and read as [__journal_bondi_x], and the container name as
+   [CONTAINER_NAME], with no leading [/]. *)
+let journal_logs_drop_rule =
+  "source_labels = [\"__journal_bondi_logs\"]\n\
+   \t\tregex         = \"false\"\n\
+   \t\taction        = \"drop\""
+
+let journal_exclusion_rule name =
+  "source_labels = [\"__journal_container_name\"]\n\t\tregex         = \".*"
+  ^ name ^ ".*\"\n\t\taction        = \"drop\""
+
+let journal_container_name_rule =
+  "source_labels = [\"__journal_container_name\"]\n\
+   \t\tregex         = \"(.+)\"\n\
+   \t\ttarget_label  = \"container\"\n\
+   \t\treplacement   = \"$1\"\n\
+   \t\taction        = \"replace\""
+
+let journal_bondi_name_rule =
+  "source_labels = [\"__journal_bondi_name\"]\n\
+   \t\tregex         = \"(.+)\"\n\
+   \t\ttarget_label  = \"container\"\n\
+   \t\treplacement   = \"$1\"\n\
+   \t\taction        = \"replace\""
+
+let test_docker_path_drops_cron_in_both_modes () =
+  List.iter
+    (fun collect ->
+      let relabel = docker_relabel (R.generate { base_config with collect }) in
+      check bool "cron drop rule on the docker path" true
+        (contains ~needle:cron_drop_rule relabel);
+      check bool "no keep rule naming cron" false
+        (contains ~needle:service_and_cron_keep_rule relabel))
+    both_modes
+
+let test_services_only_keeps_service_only_on_docker_path () =
+  check bool "services_only keeps service" true
+    (contains ~needle:service_keep_rule
+       (docker_relabel
+          (R.generate { base_config with collect = Services_only })));
   check bool "all has no keep rule" false
-    (contains ~needle:keep_rule (R.generate { base_config with collect = All }))
+    (contains ~needle:"\"keep\""
+       (docker_relabel (R.generate { base_config with collect = All })))
+
+let test_journal_source_matches_bondi_cron_entries () =
+  List.iter
+    (fun collect ->
+      let source = journal_source (R.generate { base_config with collect }) in
+      check bool "reads the host journal" true
+        (contains ~needle:"\tpath          = \"/var/log/journal\"\n" source);
+      check bool "matches bondi cron entries" true
+        (contains
+           ~needle:"\tmatches       = \"BONDI_MANAGED=true BONDI_TYPE=cron\"\n"
+           source);
+      check bool "relabels with the cron rules" true
+        (contains ~needle:"\trelabel_rules = loki.relabel.bondi_cron.rules\n"
+           source))
+    both_modes
+
+let test_journal_relabel_drops_opted_out_and_excluded () =
+  List.iter
+    (fun collect ->
+      let relabel =
+        journal_relabel
+          (R.generate
+             { base_config with collect; excluded_containers = [ "noisy-svc" ] })
+      in
+      check bool "opted-out cron dropped" true
+        (contains ~needle:journal_logs_drop_rule relabel);
+      check bool "excluded cron dropped" true
+        (contains ~needle:(journal_exclusion_rule "noisy-svc") relabel);
+      check bool "no docker meta label in the journal relabel" false
+        (contains ~needle:"__meta_docker_" relabel))
+    both_modes
+
+let test_journal_container_rule_order () =
+  let relabel = journal_relabel (R.generate base_config) in
+  let index needle = Bondi_common.String_utils.index_of ~needle relabel in
+  match (index journal_container_name_rule, index journal_bondi_name_rule) with
+  | Some fallback, Some override ->
+      check bool "container name precedes bondi.name" true (fallback < override)
+  | _ -> fail "journal container rules missing"
+
+let test_journal_relabel_drops_job_label () =
+  check bool "job label dropped" true
+    (contains
+       ~needle:
+         "\trule {\n\t\tregex  = \"job\"\n\t\taction = \"labeldrop\"\n\t}\n"
+       (journal_relabel (R.generate base_config)))
+
+let test_journal_source_forwards_to_shared_writer () =
+  List.iter
+    (fun collect ->
+      let river = R.generate { base_config with collect } in
+      check bool "journal forwards to the writer" true
+        (contains
+           ~needle:"\tforward_to    = [loki.write.grafana_cloud.receiver]\n"
+           (journal_source river));
+      check bool "the writer it names exists" true
+        (contains ~needle:"\nloki.write \"grafana_cloud\" {\n" river))
+    both_modes
 
 let test_relabel_logs_drop_rule_in_both_modes () =
   List.iter
@@ -324,8 +454,20 @@ let () =
         ] );
       ( "relabel rules",
         [
-          test_case "keep rule only in services_only" `Quick
-            test_relabel_keep_rule_only_in_services_only;
+          test_case "docker path drops cron in both modes" `Quick
+            test_docker_path_drops_cron_in_both_modes;
+          test_case "services_only keeps service only on docker path" `Quick
+            test_services_only_keeps_service_only_on_docker_path;
+          test_case "journal source matches bondi cron entries" `Quick
+            test_journal_source_matches_bondi_cron_entries;
+          test_case "journal relabel drops opted-out and excluded" `Quick
+            test_journal_relabel_drops_opted_out_and_excluded;
+          test_case "journal container rule order" `Quick
+            test_journal_container_rule_order;
+          test_case "journal relabel drops the job label" `Quick
+            test_journal_relabel_drops_job_label;
+          test_case "journal source forwards to the shared writer" `Quick
+            test_journal_source_forwards_to_shared_writer;
           test_case "logs drop rule in both modes" `Quick
             test_relabel_logs_drop_rule_in_both_modes;
           test_case "reads no dotted label names" `Quick

@@ -48,6 +48,7 @@ let test_of_volumes_empty_has_no_mounts_and_no_binds () =
       network_mode = None;
       restart_policy = Some Restart_policy.bondi_managed;
       mounts = None;
+      log_config = None;
     }
     (Workload_host_config.of_volumes None)
 

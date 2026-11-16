@@ -62,6 +62,20 @@ let generate (config : config) : string =
   let buf = Buffer.create 1024 in
   let add = Buffer.add_string buf in
   let esc = escape_river_string in
+  (* One drop rule per excluded name, over the label that carries the container
+     name on the path being relabelled. *)
+  let add_exclusions source_label =
+    List.iter
+      (fun name ->
+        add "\n";
+        add "\trule {\n";
+        add (Printf.sprintf "\t\tsource_labels = [\"%s\"]\n" source_label);
+        add
+          (Printf.sprintf "\t\tregex         = \".*%s.*\"\n" (escape_regex name));
+        add "\t\taction        = \"drop\"\n";
+        add "\t}\n")
+      config.excluded_containers
+  in
   (* Docker discovery *)
   add "discovery.docker \"containers\" {\n";
   add "\thost = \"unix:///var/run/docker.sock\"\n";
@@ -79,6 +93,16 @@ let generate (config : config) : string =
      [__meta_docker_container_label_bondi_x], and no target carries a label
      spelled [bondi.x]. A rule naming that spelling reads an empty value on
      every target, so a [keep] keeps nothing and a [drop] drops nothing. *)
+  (* Cron containers never ship from this path, under either mode: their lines
+     come from the journal source below. A pass can exit before discovery lists
+     it, so this path would miss most passes, and ship again the ones it did
+     list. *)
+  add "\n";
+  add "\trule {\n";
+  add "\t\tsource_labels = [\"__meta_docker_container_label_bondi_type\"]\n";
+  add "\t\tregex         = \"cron\"\n";
+  add "\t\taction        = \"drop\"\n";
+  add "\t}\n";
   (* Collect mode filtering *)
   (match config.collect with
   | All -> ()
@@ -86,7 +110,7 @@ let generate (config : config) : string =
       add "\n";
       add "\trule {\n";
       add "\t\tsource_labels = [\"__meta_docker_container_label_bondi_type\"]\n";
-      add "\t\tregex         = \"^(service|cron)$\"\n";
+      add "\t\tregex         = \"^service$\"\n";
       add "\t\taction        = \"keep\"\n";
       add "\t}\n");
   (* Per-service logs opt-out via bondi.logs label *)
@@ -97,16 +121,7 @@ let generate (config : config) : string =
   add "\t\taction        = \"drop\"\n";
   add "\t}\n";
   (* Excluded containers by name *)
-  List.iter
-    (fun name ->
-      add "\n";
-      add "\trule {\n";
-      add "\t\tsource_labels = [\"__meta_docker_container_name\"]\n";
-      add
-        (Printf.sprintf "\t\tregex         = \".*%s.*\"\n" (escape_regex name));
-      add "\t\taction        = \"drop\"\n";
-      add "\t}\n")
-    config.excluded_containers;
+  add_exclusions "__meta_docker_container_name";
   (* The [container] label names the workload a line came from. It is written
      to a label of its own, so the rules above read the raw container name
      whatever order they come in. The container name, without the leading [/]
@@ -138,6 +153,57 @@ let generate (config : config) : string =
   add "\thost       = \"unix:///var/run/docker.sock\"\n";
   add "\ttargets    = discovery.relabel.bondi.output\n";
   add "\tforward_to = [loki.write.grafana_cloud.receiver]\n";
+  add "}\n\n";
+  (* Relabel rules for the journal. Collect mode does not apply: cron is kept
+     under both modes, and only cron entries are read. The rules read the
+     driver's journal fields by the names Alloy gives them: a container label
+     [bondi.x] is written as the field [BONDI_X] and reaches a rule as
+     [__journal_bondi_x]; the container name is [__journal_container_name],
+     with no leading [/]. *)
+  add "loki.relabel \"bondi_cron\" {\n";
+  add "\tforward_to = []\n";
+  add "\n";
+  add "\trule {\n";
+  add "\t\tsource_labels = [\"__journal_bondi_logs\"]\n";
+  add "\t\tregex         = \"false\"\n";
+  add "\t\taction        = \"drop\"\n";
+  add "\t}\n";
+  add_exclusions "__journal_container_name";
+  (* The same precedence as the Docker path: the container name first, then
+     [bondi.name] over it when non-empty, so a pass's timestamped name never
+     wins. *)
+  add "\n";
+  add "\trule {\n";
+  add "\t\tsource_labels = [\"__journal_container_name\"]\n";
+  add "\t\tregex         = \"(.+)\"\n";
+  add "\t\ttarget_label  = \"container\"\n";
+  add "\t\treplacement   = \"$1\"\n";
+  add "\t\taction        = \"replace\"\n";
+  add "\t}\n";
+  add "\n";
+  add "\trule {\n";
+  add "\t\tsource_labels = [\"__journal_bondi_name\"]\n";
+  add "\t\tregex         = \"(.+)\"\n";
+  add "\t\ttarget_label  = \"container\"\n";
+  add "\t\treplacement   = \"$1\"\n";
+  add "\t\taction        = \"replace\"\n";
+  add "\t}\n";
+  (* The journal source labels each entry [job], which the Docker path does not
+     carry. Dropped, a cron stream carries the labels a service stream does. *)
+  add "\n";
+  add "\trule {\n";
+  add "\t\tregex  = \"job\"\n";
+  add "\t\taction = \"labeldrop\"\n";
+  add "\t}\n";
+  add "}\n\n";
+  (* Journal source. The matches are ANDed, so an entry needs both fields: a
+     container outside Bondi, or a Bondi container of another type, is never
+     read. *)
+  add "loki.source.journal \"bondi_cron\" {\n";
+  add (Printf.sprintf "\tpath          = \"%s\"\n" Defaults.journal_path);
+  add "\tmatches       = \"BONDI_MANAGED=true BONDI_TYPE=cron\"\n";
+  add "\trelabel_rules = loki.relabel.bondi_cron.rules\n";
+  add "\tforward_to    = [loki.write.grafana_cloud.receiver]\n";
   add "}\n\n";
   (* Loki write *)
   add "loki.write \"grafana_cloud\" {\n";

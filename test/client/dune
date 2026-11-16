@@ -20,13 +20,15 @@
   test_status_decode
   test_orchestrator_bind
   test_alloy_commands
+  test_alloy_run_args
   test_ssh_multiplex
   test_remote_exec
   test_private_key
   test_ssh_agent
   test_program
   test_deprecations
-  test_volume_check)
+  test_volume_check
+  test_journal_storage)
  (deps
   (glob_files fixtures/*.json)
   (glob_files fixtures/*.key))

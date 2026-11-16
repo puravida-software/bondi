@@ -23,4 +23,5 @@ let of_volumes (volumes : Bind_mount.t list option) : Docker.Client.host_config
     network_mode = None;
     restart_policy = Some Docker.Restart_policy.bondi_managed;
     mounts;
+    log_config = None;
   }
