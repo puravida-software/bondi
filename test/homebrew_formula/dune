@@ -1,0 +1,10 @@
+; The updater is a Python script that the release action runs against the tap's
+; formula. The test runs that same script, on the formula this repository ships
+; (named as a dep, not copied, so an edit to it reruns the test) and on the
+; fixtures beside it.
+
+(cram
+ (deps
+  %{project_root}/.github/actions/update-homebrew-formula/update_formula.py
+  %{project_root}/packaging/homebrew/bondi.rb
+  (glob_files fixtures/*.rb)))

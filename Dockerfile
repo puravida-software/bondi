@@ -12,7 +12,18 @@
 # [observed -- 2026-09-13] Built in each image and traced: 5.3.0 calls
 # sigaltstack with ss_size=8192, 5.5.1 with ss_size=10544.
 # Do not move this back to a 5.3 or 5.4 image.
-FROM ocaml/opam:alpine-ocaml-5.5 AS builder
+#
+# Both base images are pinned by digest as well as tag. A tag is a name the
+# registry can move, so the same commit would otherwise build on whatever the
+# tag points at that day. Each digest is the multi-arch index, so the build
+# still picks the right platform. The digest pins the base only: the opam
+# refresh below still resolves packages from upstream on the day it runs.
+# [observed -- 2026-11-16] `docker buildx imagetools inspect` resolved
+# alpine-ocaml-5.5 to the index digest below, and alpine:latest to the same
+# index as alpine:3.24.4, which is the tag the runtime stage names.
+# To move either one: resolve the tag's index digest the same way, replace
+# both the tag and the digest, and run `just`.
+FROM ocaml/opam:alpine-ocaml-5.5@sha256:85624b0b44d7f379b77144ab4e7dbe9adddcd6cc8436f8b6c3ff7c9b61044ed4 AS builder
 
 # Set build argument for version (build-time only, not available at runtime)
 ARG VERSION
@@ -106,7 +117,7 @@ RUN set -eu; \
     echo "runtime closure:"; ls -1 /runtime-libs
 
 # Final stage - minimal runtime image
-FROM alpine:latest
+FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 
 # ca-certificates is a trust store, not a linkage: no amount of scanning the
 # binary can discover it, and outbound TLS to alert sinks needs it.

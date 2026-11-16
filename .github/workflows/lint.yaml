@@ -21,8 +21,8 @@ jobs:
     if: "!github.event.pull_request.draft"
 
     steps:
-      - uses: actions/checkout@v6
-      - uses: extractions/setup-just@v3
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b # v3.1.0
         with:
           just-version: '1.46.0'
       - uses: ./.github/actions/ocaml-deps
@@ -48,16 +48,16 @@ jobs:
 
     steps:
       - name: Checkout tree
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       - name: Set-up OCaml
-        uses: ocaml/setup-ocaml@v3
+        uses: ocaml/setup-ocaml@ff66428f72b64472e749b22e0ad4dded4b2ddca6 # v3.9.1
         with:
           ocaml-compiler: 5.3.0
           dune-cache: true
           cache-prefix: v1
       - name: Install dependencies
         run: opam install -y ocamlformat
-      - uses: ocaml/setup-ocaml/lint-fmt@v3
+      - uses: ocaml/setup-ocaml/lint-fmt@ff66428f72b64472e749b22e0ad4dded4b2ddca6 # v3.9.1
 
   lint-opam:
     runs-on: ubuntu-latest
@@ -65,16 +65,16 @@ jobs:
 
     steps:
       - name: Checkout tree
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       - name: Set-up OCaml
-        uses: ocaml/setup-ocaml@v3
+        uses: ocaml/setup-ocaml@ff66428f72b64472e749b22e0ad4dded4b2ddca6 # v3.9.1
         with:
           ocaml-compiler: 5.3.0
           dune-cache: true
           cache-prefix: v1
       - name: Install dependencies
         run: opam install -y opam-dune-lint
-      - uses: ocaml/setup-ocaml/lint-opam@v3
+      - uses: ocaml/setup-ocaml/lint-opam@ff66428f72b64472e749b22e0ad4dded4b2ddca6 # v3.9.1
 
   lint-dep-bounds:
     runs-on: ubuntu-latest
@@ -82,8 +82,8 @@ jobs:
 
     steps:
       - name: Checkout tree
-        uses: actions/checkout@v6
-      - uses: extractions/setup-just@v3
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b # v3.1.0
         with:
           just-version: '1.46.0'
       - name: Check all dependencies have lower bounds

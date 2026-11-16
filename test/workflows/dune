@@ -1,0 +1,15 @@
+; The rules read the shipped workflow files, so those files are deps of the
+; runtest action: editing one reruns the check against it. The globs name every
+; workflow and every composite action, in both spellings GitHub accepts, so a
+; file added later is copied into the build tree and checked without editing
+; this list. The Dockerfile is read for the same reason: its base images are
+; checked as they ship.
+
+(test
+ (name test_workflow_rules)
+ (modules test_workflow_rules workflow_rules)
+ (deps
+  (glob_files %{project_root}/.github/workflows/*.{yaml,yml})
+  (glob_files_rec %{project_root}/.github/actions/action.{yaml,yml})
+  %{project_root}/Dockerfile)
+ (libraries alcotest test_helpers yaml))

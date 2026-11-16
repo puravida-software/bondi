@@ -25,47 +25,35 @@ runs:
   steps:
     - name: Calculate checksums
       shell: bash
+      env:
+        ARTIFACTS_PATH: ${{ inputs.artifacts-path }}
       run: |
+        tarballs=("${ARTIFACTS_PATH}/bondi-linux-x86_64"*".tar.gz")
+        if [ "${#tarballs[@]}" -ne 1 ] || [ ! -f "${tarballs[0]}" ]; then
+          echo "::error::expected exactly one bondi-linux-x86_64 tarball in ${ARTIFACTS_PATH}, found: ${tarballs[*]}"
+          exit 1
+        fi
         export LINUX_SHA
-        LINUX_SHA="$(sha256sum "${{ inputs.artifacts-path }}/bondi-linux-x86_64"*".tar.gz" | awk '{print $1}')"
+        LINUX_SHA="$(sha256sum "${tarballs[0]}" | awk '{print $1}')"
         echo "LINUX_SHA=$LINUX_SHA" >> $GITHUB_ENV
 
     - name: Update formula
       shell: bash
+      env:
+        FORMULA_PATH: ${{ inputs.formula-path }}
+        VERSION: ${{ inputs.version }}
       run: |
-        version="${{ inputs.version }}"
-        if [ -z "${version}" ]; then
+        if [ -z "${VERSION}" ]; then
           echo "::error::version input is empty; formula cannot be updated."
           exit 1
         fi
-        python - <<'PY'
-        import os
-        import re
-        import sys
-
-        formula_path = "${{ inputs.formula-path }}"
-        version = "${{ inputs.version }}".strip()
-        if not version:
-          print("::error::version must not be empty", file=sys.stderr)
-          sys.exit(1)
-        linux_sha = os.environ["LINUX_SHA"]
-
-        with open(formula_path, "r", encoding="utf-8") as f:
-          data = f.read()
-
-        data = re.sub(r'version\s+"[^"]*"', f'version "{version}"', data)
-        data = re.sub(
-          r'(url\s+"[^"]*bondi-linux-x86_64\.tar\.gz"\s*\n\s*sha256\s+")([^"]+)(")',
-          lambda m: m.group(1) + linux_sha + m.group(3),
-          data,
-        )
-
-        with open(formula_path, "w", encoding="utf-8") as f:
-          f.write(data)
-        PY
+        python3 "$GITHUB_ACTION_PATH/update_formula.py" "$FORMULA_PATH" "$VERSION" "$LINUX_SHA"
 
     - name: Show formula diff
       if: inputs.dry-run == 'true' && inputs.original-formula-path != ''
       shell: bash
+      env:
+        FORMULA_PATH: ${{ inputs.formula-path }}
+        ORIGINAL_FORMULA_PATH: ${{ inputs.original-formula-path }}
       run: |
-        diff -u "${{ inputs.original-formula-path }}" "${{ inputs.formula-path }}" || true
+        diff -u "$ORIGINAL_FORMULA_PATH" "$FORMULA_PATH" || true
