@@ -209,6 +209,27 @@ let test_mounts_volumes_unreadable_version_refuses () =
         (unmounted version))
     [ ""; "0"; "latest" ]
 
+let test_journald_capture_refuses_0_24_naming_0_25_0 () =
+  let msg =
+    refused_by Server_version.captures_cron_to_journald
+      ~gate_name:"captures_cron_to_journald" "0.24.2"
+  in
+  names ~what:"the version it refused" "0.24.2" msg;
+  names ~what:"what is required" "0.25.0" msg;
+  names ~what:"the field to set" "bondi_server.version" msg
+
+let test_journald_capture_accepts_0_25_0_and_above () =
+  List.iter
+    (fun version ->
+      accepted_by Server_version.captures_cron_to_journald
+        ~gate_name:"captures_cron_to_journald" version)
+    [ Server_version.minimum_for_journald_capture; "0.25.0"; "0.26.1"; "1.0.0" ]
+
+let test_journald_capture_unreadable_version_refuses () =
+  ignore
+    (refused_by Server_version.captures_cron_to_journald
+       ~gate_name:"captures_cron_to_journald" "latest")
+
 let () =
   Alcotest.run "Server_version"
     [
@@ -254,5 +275,14 @@ let () =
             test_mounts_volumes_accepts_0_23_0;
           Alcotest.test_case "an unreadable version is a refusal" `Quick
             test_mounts_volumes_unreadable_version_refuses;
+        ] );
+      ( "captures_cron_to_journald",
+        [
+          Alcotest.test_case "0.24 is refused, naming 0.25.0" `Quick
+            test_journald_capture_refuses_0_24_naming_0_25_0;
+          Alcotest.test_case "0.25.0 and above are accepted" `Quick
+            test_journald_capture_accepts_0_25_0_and_above;
+          Alcotest.test_case "an unreadable version is a refusal" `Quick
+            test_journald_capture_unreadable_version_refuses;
         ] );
     ]

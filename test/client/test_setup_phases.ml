@@ -45,6 +45,8 @@ let test_phase_of_each_action_is_named () =
       (Setup.StopOrchestrator, "Orchestrator");
       (Setup.RemoveOrchestrator, "Orchestrator");
       (Setup.RunServer, "Orchestrator");
+      (Setup.EnsureJournalStorage, "Alloy");
+      (Setup.EnsureAlloyState, "Alloy");
       (Setup.EnsureAlloyConfig, "Alloy");
       (Setup.WriteAlloyEnv, "Alloy");
       (Setup.RunAlloy, "Alloy");
@@ -181,6 +183,7 @@ let correction_of_site = function
       Setup_phases.restart_policy_corrected
         ~found:(Host_answer.of_host_output "no")
         ~applied:"unless-stopped"
+  | Setup_phases.Journal_storage -> Setup_phases.journal_storage_provisioned
 
 let rendered ~server corrections =
   String.concat "\n" (Setup_phases.corrections_report ~server corrections)
@@ -194,10 +197,11 @@ let test_corrections_report_names_what_was_found_and_applied () =
     [
       correction_of_site Setup_phases.Alloy_config_mode;
       correction_of_site Setup_phases.Orchestrator_restart_policy;
+      correction_of_site Setup_phases.Journal_storage;
     ]
   in
   let lines = Setup_phases.corrections_report ~server:"10.0.0.1" corrections in
-  check int "one line per correction" 2 (List.length lines);
+  check int "one line per correction" 3 (List.length lines);
   let report = String.concat "\n" lines in
   check bool "names the file it corrected" true
     (contains ~needle:alloy_config_path report);
@@ -207,7 +211,13 @@ let test_corrections_report_names_what_was_found_and_applied () =
     (contains ~needle:"bondi-orchestrator" report);
   check bool "names the policy the host had and the policy applied" true
     (contains ~needle:"was restart policy no, applied unless-stopped" report);
-  check bool "names the server both are about" true
+  check bool "names the journal, what it had and what was applied" true
+    (contains
+       ~needle:
+         "/var/log/journal on server 10.0.0.1 was storage volatile, applied \
+          persistent"
+       report);
+  check bool "names the server they are about" true
     (contains ~needle:"on server 10.0.0.1" report);
   (* The absence arm of the pair below: a run that corrected something must not
      also claim it corrected nothing. *)

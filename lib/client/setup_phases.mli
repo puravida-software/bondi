@@ -33,13 +33,14 @@
     the host reported is a {!Host_answer.t}, which is nominal rather than
     checked: nothing stops a caller from declaring a manifest value to be a
     host's answer, but it has to say so, at the one constructor named for that
-    boundary. What is left outside either guarantee is the sentence
-    {!unreadable_reading} carries, which is a [string] this client words; the
-    host's own words reach it through {!Host_answer.t} like everything else, and
-    nothing else in it comes from a manifest today. A guarantee that depends on
-    recognising a secret fails on the secret nobody recognised, so what is
-    claimed here is what the type enforces and not what the current call sites
-    happen to pass. *)
+    boundary. The journal's site takes no host value at all: the host answers it
+    by marker, and what it had is a word this module holds. What is left outside
+    either guarantee is the sentence {!unreadable_reading} carries, which is a
+    [string] this client words; the host's own words reach it through
+    {!Host_answer.t} like everything else, and nothing else in it comes from a
+    manifest today. A guarantee that depends on recognising a secret fails on
+    the secret nobody recognised, so what is claimed here is what the type
+    enforces and not what the current call sites happen to pass. *)
 
 (** One phase of a setup run, in the order the plan emits them. Two actions in
     the same phase are one line in a report: an operator recovering a host wants
@@ -97,18 +98,19 @@ val failure_message :
     nothing about it reaches this type, and no list here would catch it either.
     The guarantee is that a site which reports has said what it reports and
     about what; it is not a guarantee over the writes a run makes. *)
-type site = Alloy_config_mode | Orchestrator_restart_policy
+type site = Alloy_config_mode | Orchestrator_restart_policy | Journal_storage
 
 type correction
 (** One thing a run's read-back had to say: a divergence it found and corrected,
     or a reading it could not take at all.
 
     Abstract, and that is where such guarantee as there is lives. What it can
-    hold is what the three constructors below put in it: a value the host
-    reported about its own state, a value Bondi declares, and a site. Two of
-    those are enforced by type. The subject of every line is derived from the
-    site rather than passed in, so no caller supplies a path or a container name
-    and none can be read out of a manifest into one. The host's value is a
+    hold is what the constructors below put in it: a value the host reported
+    about its own state or, for the journal, a variant naming the state the host
+    reported by marker, a value Bondi declares, and a site. Two of those are
+    enforced by type. The subject of every line is derived from the site rather
+    than passed in, so no caller supplies a path or a container name and none
+    can be read out of a manifest into one. The host's value is a
     {!Host_answer.t}, whose one constructor is a named boundary — a caller can
     still declare a manifest value to be a host's answer, but not without
     writing that claim out.
@@ -144,8 +146,19 @@ val config_mode_corrected : found:Host_answer.t -> applied:string -> correction
     this run left at [applied].
 
     The path is not a parameter either, for the reason above: it is the path
-    Bondi declares, which is the only kind of path either site reads. It is
-    named in the line because a mode with no file is not a reading. *)
+    Bondi declares, which is the only kind of path any site reads. It is named
+    in the line because a mode with no file is not a reading. *)
+
+val journal_storage_provisioned : correction
+(** The host journal under {!Alloy_run_args.journal_path}, which the host held
+    in memory and which this run left stored persistently.
+
+    It takes no host answer, unlike the two above, because the host reports its
+    journal's storage by a marker rather than in words of its own; what it had
+    is a variant of this module's own, rendered as [volatile]. A run constructs
+    it only once the reading taken after provisioning came back present, which
+    is what makes that the state the box was in rather than a guess at it. The
+    path is derived from the site, as every subject is. *)
 
 val unreadable_reading : site:site -> detail:string -> correction
 (** A site whose reading could not be taken, and why, in this client's words.

@@ -42,6 +42,7 @@ Before you start, you need:
   - **`bondi-server` 0.16.0 or later must already be running on it.** The crontab line Bondi writes is a `docker exec` into the orchestrator that runs the server binary's `run` subcommand. That subcommand arrived in 0.15.0, but 0.15.0's own crontab writer still emits the older `curl` line and writes no run file — and the deploy that rewrites a box's crontab runs on the box, so an orchestrator below 0.16.0 answers a cron deploy with success and changes nothing. `bondi deploy` reads the orchestrator's version off the box and refuses a cron-declaring deploy against an older one, naming both versions. Run `bondi setup` first, with the version you want pinned under `bondi_server:`.
   - **`docker` must be on the `PATH` cron runs jobs with** — `/usr/bin:/bin` on Debian and Ubuntu. The line invokes `docker exec` by name, and cron gives a job a minimal environment rather than a login one, so a Docker installed under `/usr/local/bin` answers over SSH and still fails every scheduled run. `bondi setup` asks the server what an empty environment resolves and stops if the answer is nothing. The apt install `get.docker.com` performs — which is what Bondi installs — puts it at `/usr/bin/docker`.
   - **`curl` 7.76 or later**, only if the server still holds cron lines written by an older Bondi. Those lines are `curl` invocations using `--fail-with-body`, which an older curl rejects as an unknown option, and they keep firing on their schedule until each job is deployed again. What they can no longer do is succeed: a current image serves nothing, and no orchestrator `bondi setup` creates publishes a port, so on a box running a current orchestrator every such line fails at the connection whatever curl the host has. `bondi setup` still checks the version and stops with what it found; the fix that actually retires those lines is to deploy each cron job once. Debian 12 and Ubuntu 22.04 or later are fine; Debian 11 and Ubuntu 20.04 are not.
+- **If you ship logs with [Alloy](#4-alloy-grafana-cloud-logs)**, the server must run systemd's journald, because cron jobs' lines are read from its journal. `bondi setup` makes the journal persistent if it is not. See [The server's journal must be persistent](#the-servers-journal-must-be-persistent).
 
 Install the CLI:
 
@@ -333,10 +334,16 @@ setup corrected nothing on server 203.0.113.10
 
 — so a run whose account was empty and a run whose account was never taken do not read alike. The sentence claims nothing about why it was empty: a run that found a divergence and failed before it could correct it prints the same sentence, beside the failure that says what happened. The account is printed for every server and on every exit path, including a run that stopped part-way — what such a run managed to change is exactly when it matters most — and it changes no exit code, because a correction is a write that succeeded.
 
-Two divergences can appear there today. One is the orchestrator's restart policy, described below. The other is the mode of the Alloy configuration file, which `setup` reads before it rewrites the file, so that the mode the server had is reported rather than the one the write just set:
+Three divergences can appear there today. One is the orchestrator's restart policy, described below. Another is the mode of the Alloy configuration file, which `setup` reads before it rewrites the file, so that the mode the server had is reported rather than the one the write just set:
 
 ```
 /etc/bondi/alloy/config.alloy on server 203.0.113.10 was mode 0644, applied 0640
+```
+
+The third is the server's journal storage, when `setup` had to make it persistent before starting Alloy (see [The server's journal must be persistent](#the-servers-journal-must-be-persistent)). Its "was" is Bondi's own word for what the check found, not text the server returned:
+
+```
+/var/log/journal on server 203.0.113.10 was storage volatile, applied persistent
 ```
 
 A reading `setup` could not take at all is reported in the same block, as a line of its own. It corrects nothing and it claims no value — it says only what could not be read — so a run that was unable to look does not read like a run that looked and found agreement:
@@ -701,7 +708,7 @@ Both fields ride in the job's run payload alongside `env_vars` — the file the 
 
 ## 4. Alloy (Grafana Cloud Logs)
 
-Bondi can ship container logs to Grafana Cloud using [Grafana Alloy](https://grafana.com/docs/alloy/latest/). Alloy runs as a sidecar container on the server, discovers Bondi-managed containers via the Docker socket, and forwards their logs to Loki.
+Bondi can ship container logs to Grafana Cloud using [Grafana Alloy](https://grafana.com/docs/alloy/latest/). Alloy runs as a sidecar container on the server, discovers Bondi-managed containers via the Docker socket, and forwards their logs to Loki. Cron job containers are the exception: their lines are read from the server's systemd journal instead, so a run that lasts under a second still ships. See [Cron job logs come from the host journal](#cron-job-logs-come-from-the-host-journal).
 
 Add an `alloy` section to your `bondi.yaml`:
 
@@ -728,7 +735,7 @@ Then run setup to provision Alloy on the server:
 bondi setup
 ```
 
-This writes the Alloy configuration to `/etc/bondi/alloy/config.alloy` on the server and starts the `bondi-alloy` container.
+This writes the Alloy configuration to `/etc/bondi/alloy/config.alloy` on the server and starts the `bondi-alloy` container. Before it starts the container, it makes sure the server's journal is stored persistently under `/var/log/journal`, and provisions that storage if it is not. See [The server's journal must be persistent](#the-servers-journal-must-be-persistent).
 
 ### Optional settings
 
@@ -748,7 +755,7 @@ alloy:
 | Field | Default | Description |
 |---|---|---|
 | `image` | `grafana/alloy:v1.8.0` | Alloy Docker image. Override to pin or upgrade. |
-| `collect` | `all` | `all` collects logs from every Bondi-managed container (service, cron, managed containers, infrastructure) that is not opted out. `services_only` restricts to service and cron containers, excluding managed containers and infrastructure like the orchestrator and Traefik. Before `0.24.1`, `services_only` shipped nothing at all; see [Upgrading to 0.24.1](#upgrading-to-0241). |
+| `collect` | `all` | `all` collects logs from every Bondi-managed container (service, cron, managed containers, infrastructure) that is not opted out. `services_only` restricts to service and cron containers, excluding managed containers and infrastructure like the orchestrator and Traefik. Before `0.24.1`, `services_only` shipped nothing at all; see [Upgrading to 0.24.1](#upgrading-to-0241). From `0.25.0`, cron containers ship from the systemd journal; see [Upgrading to 0.25.0](#upgrading-to-0250). |
 | `labels` | _(none)_ | Key-value pairs added as external labels on every log line sent to Grafana Cloud. Useful for filtering in Loki by environment, team, etc. |
 
 ### Opting a service out of log collection
@@ -785,6 +792,46 @@ Query by it in Grafana's Explore view or any LogQL client:
 
 The value stays the same from one run to the next, so one workload is one stream, provided names differ across services, cron jobs and managed containers: two workloads sharing a name share one stream. A cron job's container runs under a name with a timestamp in it, and a blue-green deploy starts the incoming service under a temporary name; both carry a `bondi.name` label holding the workload's name, and that label is what `container` is read from. A container started before it carried `bondi.name` is labelled with its container name instead, so it is never unlabelled. For a service that is its name already; for a cron job, every run after the upgrade carries the label.
 
+### Cron job logs come from the host journal
+
+A cron job's container can finish in under a second. Alloy's Docker discovery lists only running containers, about once a minute, so it can miss a short run entirely. So the orchestrator starts every cron job container with Docker's `journald` logging driver, and Alloy reads cron lines from the server's systemd journal. Service, managed and infrastructure containers are still read through the Docker socket, exactly as before.
+
+- **Every line a cron run writes reaches Loki once**, however short the run. Alloy's Docker discovery skips cron containers under both `collect` modes, so a run it happens to list is not shipped a second time.
+- **A cron stream carries the same labels as before:** `container` (the job's name, as in the table above), the `service_name` Loki derives from it, and the `labels` you declare. Queries such as `{container="daily-backup"}` keep working.
+- **Only cron entries leave the server.** Alloy mounts `/var/log/journal` read-only, and that journal holds the rest of the host's logs too. Alloy reads only the entries that carry both `bondi.managed=true` and `bondi.type=cron`. The name exclusion `bondi setup` adds for a service with `logs: false` applies to cron lines as it always has.
+- **Lines logged while Alloy is down are shipped when it returns.** `bondi setup` replaces the Alloy container on every run. Alloy keeps its place in the journal in `/var/lib/bondi/alloy` on the server, which setup creates and every Alloy container mounts, so the next container picks up where the last one stopped. A line logged in between ships as long as the journal still holds it, and a line already shipped is not sent again.
+- **`docker logs` still shows a cron run's output.** Docker keeps a local copy of a container's output whatever its logging driver ([dual logging](https://docs.docker.com/engine/logging/dual-logging/)), unless the daemon's `log-opts` set `"cache-disabled": "true"`. A cron container's name carries a timestamp, so find it with `docker ps -a`.
+
+#### The server's journal must be persistent
+
+journald writes its journal under `/var/log/journal` only when it stores persistently. Otherwise it keeps it in memory, and an Alloy reading `/var/log/journal` would read nothing and say nothing. So whenever an `alloy` block is declared, `bondi setup` checks the server's journal before it touches Alloy. It looks for `/var/log/journal/<machine-id>`, the directory journald writes for this machine. The bare `/var/log/journal` is not enough, because with `Storage=volatile` it can exist and stay empty.
+
+If that directory is missing, setup provisions persistent storage. It creates `/var/log/journal`, runs `systemd-tmpfiles --create --prefix /var/log/journal` to give it journald's ownership and mode, and restarts `systemd-journald`. Then it checks again. The change is listed in the report setup prints at the end, with the other divergences it corrected:
+
+```
+/var/log/journal on server 203.0.113.10 was storage volatile, applied persistent
+```
+
+If the journal is still missing after that, setup stops before it starts Alloy:
+
+```
+Error: journald still stores nothing under /var/log/journal for this machine after setup created the directory and restarted it. Alloy reads cron jobs' lines from that journal, so setup will not start an Alloy that reads nothing. Check Storage= in /etc/systemd/journald.conf and its drop-ins: volatile and none keep the journal out of /var/log/journal. Set it to persistent or auto, then run bondi setup again.
+```
+
+The server therefore needs systemd's journald. Debian and Ubuntu have it.
+
+#### Upgrading to 0.25.0
+
+This change has two halves, and they ship in different places. The orchestrator starts each cron container with the `journald` driver. The CLI generates the Alloy configuration that `bondi setup` writes, which reads the journal and drops cron containers from the Docker path. Neither half works without the other, and there is no compatibility mode between them. With a new CLI and an older orchestrator, cron containers never reach the journal, and Alloy no longer ships them from Docker, so cron jobs ship nothing at all. `bondi setup` therefore refuses, while alloy is declared, when `bondi_server.version` is below 0.25.0, and names the version to pin.
+
+Move both to `0.25.0` or later in one go:
+
+1. Upgrade the `bondi` CLI to `0.25.0` or later.
+2. Set `bondi_server.version` in `bondi.yaml` to `0.25.0` or later.
+3. Run `bondi setup`. It replaces the orchestrator, checks the journal, rewrites `/etc/bondi/alloy/config.alloy` and replaces the `bondi-alloy` container.
+
+No cron job needs a redeploy. Each scheduled run is started by the orchestrator, so the first run after setup already logs to the journal.
+
 ### Upgrading to 0.24.1
 
 Before `0.24.1`, the generated Alloy configuration read the `bondi.type` and `bondi.logs` labels under names Alloy's Docker discovery never produces, so neither rule ever matched:
@@ -803,7 +850,7 @@ Your service needs no redeploy for its logs to start shipping or to carry `conta
 
 ### Removing Alloy
 
-To stop collecting logs, remove the `alloy` section from `bondi.yaml` and run `bondi setup` again. Bondi will stop and remove the Alloy container and clean up its configuration on the server.
+To stop collecting logs, remove the `alloy` section from `bondi.yaml` and run `bondi setup` again. Bondi will stop and remove the Alloy container and clean up its configuration on the server. It leaves `/var/lib/bondi/alloy`, where Alloy kept its place in the journal, and the journal storage it provisioned.
 
 If that run could not list the server's containers, it has nothing to remove the Alloy container *from* and passes over it — so a `bondi-alloy` can outlive the `alloy:` block that created it, still shipping logs with credentials your config no longer declares. It is not silent: the report `setup` prints at the end lists it in the Infrastructure section flagged `[undeclared]`, because the server is running a container nothing asks for. Check that flag after a withdrawal, and run `bondi setup` again to clear it.
 

@@ -227,6 +227,7 @@ let workload_host_config ~(mounts : Docker.mount list option) :
     restart_policy =
       Some { Docker.name = "unless-stopped"; maximum_retry_count = None };
     mounts;
+    log_config = None;
   }
 
 let test_host_config_encodes_bind_mounts () =
@@ -312,6 +313,95 @@ let test_inspect_response_decodes_reported_mounts () =
              };
            ])
         host_config.mounts
+
+(* A whole HostConfig as the Engine reports it back, recorded from Engine 29.9.3
+   (API 1.56) on 2026-11-12 with docker inspect of a container run on the
+   journald driver with a tag and a labels option [observed]; only the line
+   breaks are this file's. Every inspect now decodes LogConfig, so a reported
+   shape this client cannot read fails every inspect at once — the blue-green
+   health wait included. A container given no log options reports
+   Config as an empty object rather than omitting it [observed — same
+   Engine, same day], which is why Config is required. *)
+let recorded_journald_host_config : string =
+  {|,
+        "HostConfig": {
+          "Binds": null, "ContainerIDFile": "",
+          "LogConfig": {"Type": "journald", "Config": {
+            "labels": "bondi.managed,bondi.type,bondi.logs,bondi.name",
+            "tag": "nightly"}},
+          "NetworkMode": "bridge", "PortBindings": {},
+          "RestartPolicy": {"Name": "no", "MaximumRetryCount": 0},
+          "AutoRemove": false, "VolumeDriver": "", "VolumesFrom": null,
+          "ConsoleSize": [0, 0], "CapAdd": null, "CapDrop": null,
+          "CgroupnsMode": "private", "Dns": null, "DnsOptions": [],
+          "DnsSearch": [], "ExtraHosts": null, "GroupAdd": null,
+          "IpcMode": "private", "Cgroup": "", "Links": null, "OomScoreAdj": 0,
+          "PidMode": "", "Privileged": false, "PublishAllPorts": false,
+          "ReadonlyRootfs": false, "SecurityOpt": null, "UTSMode": "",
+          "UsernsMode": "", "ShmSize": 67108864, "Runtime": "runc",
+          "Isolation": "", "CpuShares": 0, "Memory": 0, "NanoCpus": 0,
+          "CgroupParent": "", "BlkioWeight": 0, "BlkioWeightDevice": [],
+          "BlkioDeviceReadBps": [], "BlkioDeviceWriteBps": [],
+          "BlkioDeviceReadIOps": [], "BlkioDeviceWriteIOps": [],
+          "CpuPeriod": 0, "CpuQuota": 0, "CpuRealtimePeriod": 0,
+          "CpuRealtimeRuntime": 0, "CpusetCpus": "", "CpusetMems": "",
+          "Devices": [], "DeviceCgroupRules": null, "DeviceRequests": null,
+          "MemoryReservation": 0, "MemorySwap": 0, "MemorySwappiness": null,
+          "OomKillDisable": null, "PidsLimit": null, "Ulimits": null,
+          "CpuCount": 0, "CpuPercent": 0, "IOMaximumIOps": 0,
+          "IOMaximumBandwidth": 0,
+          "MaskedPaths": ["/proc/acpi", "/proc/asound", "/proc/interrupts",
+            "/proc/kcore", "/proc/keys", "/proc/latency_stats",
+            "/proc/sched_debug", "/proc/scsi", "/proc/timer_list",
+            "/proc/timer_stats", "/sys/devices/virtual/powercap",
+            "/sys/firmware"],
+          "ReadonlyPaths": ["/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys",
+            "/proc/sysrq-trigger"]
+        }|}
+
+let show_log_config : Docker.log_config option -> string = function
+  | None -> "no log config"
+  | Some log_config ->
+      Yojson.Safe.to_string (Docker.log_config_to_yojson log_config)
+
+let test_inspect_response_decodes_log_config () =
+  let json =
+    Yojson.Safe.from_string
+      (inspect_payload ~host_config:recorded_journald_host_config)
+  in
+  let response = Docker.inspect_response_of_yojson json |> unwrap in
+  match response.host_config with
+  | None -> Alcotest.fail "inspect response carries no host config"
+  | Some host_config ->
+      Alcotest.check Alcotest.string "reported log config"
+        (show_log_config
+           (Some
+              {
+                Docker.type_ = "journald";
+                config =
+                  [
+                    ("labels", "bondi.managed,bondi.type,bondi.logs,bondi.name");
+                    ("tag", "nightly");
+                  ];
+              }))
+        (show_log_config host_config.log_config)
+
+(* The common shape: a container on the default driver reports an empty Config
+   object, which must decode rather than fail every inspect. *)
+let test_inspect_response_decodes_empty_log_config () =
+  let json =
+    Yojson.Safe.from_string
+      (inspect_payload
+         ~host_config:
+           {|, "HostConfig": {"LogConfig": {"Type": "json-file", "Config": {}}}|})
+  in
+  let response = Docker.inspect_response_of_yojson json |> unwrap in
+  match response.host_config with
+  | None -> Alcotest.fail "inspect response carries no host config"
+  | Some host_config ->
+      Alcotest.check Alcotest.string "reported log config"
+        (show_log_config (Some { Docker.type_ = "json-file"; config = [] }))
+        (show_log_config host_config.log_config)
 
 let test_update_container_serialises_the_restart_policy () =
   let request : Docker.update_container_request =
@@ -589,6 +679,13 @@ let () =
             `Quick test_host_config_without_mounts_has_no_mounts_key;
           Alcotest.test_case "inspect decodes mounts as the Engine reports them"
             `Quick test_inspect_response_decodes_reported_mounts;
+        ] );
+      ( "log config",
+        [
+          Alcotest.test_case "inspect decodes log config" `Quick
+            test_inspect_response_decodes_log_config;
+          Alcotest.test_case "inspect decodes empty log config" `Quick
+            test_inspect_response_decodes_empty_log_config;
         ] );
       ( "request bound",
         [

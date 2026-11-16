@@ -62,15 +62,29 @@ jobs:
       - name: Build
         run: just build
 
+      # The log-collection test reads the runner's journal with journalctl, so
+      # the journal must be persistent and readable by the runner user. Group
+      # membership does not reach the running job, so an ACL grants access.
+      - name: Make the journal persistent and readable
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /var/log/journal
+          sudo systemd-tmpfiles --create --prefix /var/log/journal
+          sudo systemctl restart systemd-journald
+          sudo setfacl -R -m "u:$USER:rX" /var/log/journal
+          sudo setfacl -R -d -m "u:$USER:rX" /var/log/journal
+
       # The images the log-collection test runs are pulled here, in a step of
       # their own, so a registry that cannot serve one fails this step by name
       # and never reads as a verdict on the log-collection rules; the test
-      # pulls only an image that is still absent. Both are asked of the built
-      # tree rather than written out a second time here where they could drift.
+      # pulls only an image that is still absent. The three images -- Alloy,
+      # the fixture, and the Loki the test ships lines to -- are each asked of
+      # the built tree rather than written out a second time here where they
+      # could drift.
       - name: Pull log-collection test images
         run: |
           set -euo pipefail
-          for what in image fixture-image; do
+          for what in image fixture-image loki-image; do
             docker pull "$(opam exec -- dune exec \
               ./test/alloy_real_docker/emit_config.exe -- "$what")"
           done

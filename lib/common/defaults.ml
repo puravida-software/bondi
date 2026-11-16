@@ -9,4 +9,11 @@ let network_name = "bondi-network"
    one the run touched. *)
 let alloy_config_dir = "/etc/bondi/alloy"
 let alloy_config_path = alloy_config_dir ^ "/config.alloy"
+let journal_path = "/var/log/journal"
+
+(* Under /var/lib rather than beside the config in /etc/bondi/alloy: it is state
+   Alloy writes, not configuration Bondi writes. The config directory is also
+   deleted whole and rewritten on every setup, and a read position deleted with
+   it would let the next Alloy re-read the journal from the start. *)
+let state_dir = "/var/lib/bondi/alloy"
 let bondi_restart_policy = "unless-stopped"

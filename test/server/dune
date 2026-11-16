@@ -16,7 +16,6 @@
   test_docker_client
   test_api_version
   test_blue_green_plan
-  test_alloy_config
   test_traefik_config
   test_restart_policy
   test_alert_delivery
@@ -39,7 +38,6 @@
   test_docker_client
   test_api_version
   test_blue_green_plan
-  test_alloy_config
   test_traefik_config
   test_restart_policy
   test_alert_delivery

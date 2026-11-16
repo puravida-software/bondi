@@ -18,9 +18,14 @@ succeeds, so the failure is genuinely mid-plan.
   > cat > /dev/null
   > case "$1" in
   >   *BONDI_ACME_PRESENT*) echo BONDI_ACME_PRESENT ;;
+  >   # The journal probe, answered present: this box's journald already stores
+  >   # under /var/log/journal, so the alloy phase reads it once and goes on.
+  >   # Without this arm the probe falls through to *) and answers nothing, which
+  >   # setup reads as a journal it could not read, and it stops the run there.
+  >   *BONDI_JOURNAL_PRESENT*) echo BONDI_JOURNAL_PRESENT ;;
   >   'docker --version') echo 'Docker version 27.0.0, build deadbeef' ;;
   >   *'name=^/bondi-orchestrator$'*'{{.State}}'*)
-  >     printf 'running\tmlopez1506/bondi-server:0.15.0\n' ;;
+  >     printf 'running\tmlopez1506/bondi-server:0.25.0\n' ;;
   >   *'ps -a --filter name=^/bondi-alloy$'*'{{.State}}'*) : ;;
   >   # The mode the host reports for the config file *before* setup writes it,
   >   # answered from $ALLOY_MODE_BEFORE. The declared value is the default, so
@@ -77,7 +82,7 @@ succeeds, so the failure is genuinely mid-plan.
   >   # ends the command rather than merely containing it: the probe's own
   >   # listing asks for {{.State}} and {{.Image}} together, and an arm that
   >   # matched both would answer the probe with a version.
-  >   *'name=^/bondi-orchestrator$'*"--format '{{.Image}}'") echo 'mlopez1506/bondi-server:0.15.0' ;;
+  >   *'name=^/bondi-orchestrator$'*"--format '{{.Image}}'") echo 'mlopez1506/bondi-server:0.25.0' ;;
   >   # The three readings setup takes off the box once it has started the
   >   # container: the wait for a running state, the server's own check inside
   >   # it, and a read of the container's log stream for the line the check
@@ -121,7 +126,7 @@ reads as not found — which is what a host this run never reached looks like.
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
   > bondi_server:
-  >   version: "0.15.0"
+  >   version: "0.25.0"
   > alloy:
   >   grafana_cloud:
   >     instance_id: "123456"
@@ -144,10 +149,11 @@ rather than a phase name they have to translate into one.
   $ sed 's/not reachable: .*/not reachable: <detail>/' out.log
   Setting up the servers...
   Processing server: 127.0.0.1
-  bondi-orchestrator container is already running on server 127.0.0.1: 0.15.0, skipping...
+  bondi-orchestrator container is already running on server 127.0.0.1: 0.25.0, skipping...
   Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 127.0.0.1
   ACME file permissions updated on server 127.0.0.1: /etc/traefik/acme/acme.json
+  Journal on server 127.0.0.1 is stored persistently under /var/log/journal
   Alloy config written on server 127.0.0.1: /etc/bondi/alloy/config.alloy
   Wrote Alloy credentials file on server 127.0.0.1: /etc/bondi/alloy/env
   Error: command failed (125): docker: Error response from daemon: Conflict. The container name "/bondi-alloy" is already in use by container "d671990dc231".
@@ -198,7 +204,7 @@ never declared it.
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
   > bondi_server:
-  >   version: "0.15.0"
+  >   version: "0.25.0"
   > managed_containers:
   >   - name: gateway
   >     image: example.com/ib-gateway
@@ -231,7 +237,7 @@ correction is reported beside the failure rather than lost with it.
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
   > bondi_server:
-  >   version: "0.15.0"
+  >   version: "0.25.0"
   > alloy:
   >   grafana_cloud:
   >     instance_id: "123456"

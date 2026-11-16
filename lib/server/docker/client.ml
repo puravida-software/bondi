@@ -170,12 +170,23 @@ let mount_of_yojson (json : Yojson.Safe.t) : (mount, string) result =
       { type_; source; target; read_only })
     (Reported_mount.of_yojson json)
 
+type log_config = {
+  type_ : string; [@key "Type"]
+  config : string_map; [@key "Config"]
+}
+[@@deriving yojson { strict = false }]
+(** HostConfig.LogConfig: the log driver a container writes through and that
+    driver's options. Config is required on decode: the Engine reports it as an
+    empty object when a container was given no options, rather than omitting it
+    [observed — Engine 29.9.3, 2026-11-12]. *)
+
 type host_config = {
   binds : string list option; [@key "Binds"] [@default None]
   port_bindings : port_bindings option; [@key "PortBindings"] [@default None]
   network_mode : string option; [@key "NetworkMode"] [@default None]
   restart_policy : restart_policy option; [@key "RestartPolicy"] [@default None]
   mounts : mount list option; [@key "Mounts"] [@default None]
+  log_config : log_config option; [@key "LogConfig"] [@default None]
 }
 [@@deriving yojson { strict = false }]
 
