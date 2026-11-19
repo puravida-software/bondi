@@ -142,6 +142,39 @@ let test_a_failing_observation_carries_its_reason () =
          failing Readiness.Diagnostic_sink "/proc/1/fd/2: Permission denied";
        ])
 
+(* The client reads this document with the shared decoder, and the two ends are
+   written apart: a key renamed here would still encode, and a client reading it
+   would refuse every box as not ready. So the server's own output is decoded
+   with the client's decoder, on both arms, and the flag it reads back must be
+   the verdict [plan] reached on the same observations. The expected flags are
+   also stated outright, so a [plan] and an encoder wrong together cannot agree
+   their way past this. *)
+let test_the_servers_document_decodes_with_the_shared_decoder () =
+  let decoded_ready observations =
+    match Bondi_common.Readiness_document.of_string (encoded observations) with
+    | Ok document -> Bondi_common.Readiness_document.ready document
+    | Error reason ->
+        fail ("the server's document should decode, but: " ^ reason)
+  in
+  let passing_list =
+    [ passing Readiness.Docker_socket; passing Readiness.Diagnostic_sink ]
+  in
+  let failing_list =
+    [
+      passing Readiness.Docker_socket;
+      failing Readiness.Diagnostic_sink "/proc/1/fd/2: Permission denied";
+    ]
+  in
+  check bool "a passing list decodes as ready" true (decoded_ready passing_list);
+  check bool "and that is the verdict plan reached"
+    (is_ready (Readiness.plan passing_list))
+    (decoded_ready passing_list);
+  check bool "a failing list decodes as not ready" false
+    (decoded_ready failing_list);
+  check bool "and that is the verdict plan reached"
+    (is_ready (Readiness.plan failing_list))
+    (decoded_ready failing_list)
+
 (* The divergence probe is the only one whose sources the caller can write, so
    it is the only one this file takes through [observe] rather than through
    hand-built observations. Both arms below run against the same two paths and
@@ -428,5 +461,7 @@ let () =
             test_a_ready_observation_list_encodes_every_probe;
           test_case "a failing observation carries its reason" `Quick
             test_a_failing_observation_carries_its_reason;
+          test_case "the server's document decodes with the shared decoder"
+            `Quick test_the_servers_document_decodes_with_the_shared_decoder;
         ] );
     ]

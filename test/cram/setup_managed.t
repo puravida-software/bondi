@@ -33,7 +33,7 @@ what reaches argv from what reaches stdin.
   >   # rejection rather than a pass, so a command falling through to the
   >   # catch-all below would fail this run for a reason no fixture here chose.
   >   'attempt=0; while'*) : ;;
-  >   *'bondi-server check'*) echo '{"ready":true,"observations":[]}' ;;
+  >   *'bondi-server check'*) echo '{"ready":true,"probes":[]}' ;;
   >   'docker logs --tail'*) echo 'bondi check: diagnostic sink is writable' ;;
   >   *'/var/spool/cron/crontabs/root'*) echo BONDI_CRONTAB_ABSENT ;;
   >   # The host's applied restart policy. Without this arm the command falls

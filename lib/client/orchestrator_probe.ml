@@ -114,15 +114,41 @@ let is_readiness_status failure =
   Remote_exec.exited_with ~code:Bondi_common.Readiness_exit_code.not_ready
     failure
 
+(* A clean exit is the status's half of a pass, and the document is the other:
+   the server asks one verdict for both, so a ready box writes [ready] true and
+   exits cleanly. An exit that says ready beside a document that says not, or
+   beside text that is not the document at all, is two accounts disagreeing, and
+   neither is evidence that the box is ready. The document is what names the
+   faults, so the reason carries it. *)
+let verdict_of_document output =
+  match Bondi_common.Readiness_document.of_string output with
+  | Ok document -> (
+      match Bondi_common.Readiness_document.ready document with
+      | true -> Ready
+      | false ->
+          Not_ready
+            (Printf.sprintf
+               "the check exited cleanly and its document says the box is not \
+                ready: %s"
+               (Bondi_common.Readiness_document.quote output)))
+  | Error reason ->
+      Not_ready
+        (Printf.sprintf
+           "the check exited cleanly and did not answer with the document the \
+            server writes: %s"
+           reason)
+
 let verdict_of_output reading =
   match reading with
-  | Ok output ->
-      if String.trim output = "" then
-        Unreachable
-          (nothing_obtained
-             "the check exited without writing a document, and a command that \
-              exited saying nothing is not evidence that the box is ready")
-      else Ready
+  | Ok output -> (
+      match String.trim output with
+      | "" ->
+          Unreachable
+            (nothing_obtained
+               "the check exited without writing a document, and a command \
+                that exited saying nothing is not evidence that the box is \
+                ready")
+      | _ -> verdict_of_document output)
   | Error failure ->
       if is_readiness_status failure then
         Not_ready

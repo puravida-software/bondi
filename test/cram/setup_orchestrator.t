@@ -6,9 +6,10 @@ used to present as a clean setup while the host was left with nothing listening.
   $ ROOT="$PWD"
 
 The stub answers the readings setup takes according to $ORCHESTRATOR_DIES,
-$ORCHESTRATOR_NOT_READY and $ORCHESTRATOR_LOG_SILENT, so the same configuration
-can be run against a healthy image, one that never starts, one that starts and
-is not ready, and one that is ready while nothing it writes reaches its log
+$ORCHESTRATOR_NOT_READY, $ORCHESTRATOR_OLD_SHAPE and $ORCHESTRATOR_LOG_SILENT,
+so the same configuration can be run against a healthy image, one that never
+starts, one that starts and is not ready, one that answers in a shape the server
+does not write, and one that is ready while nothing it writes reaches its log
 stream. The
 container listing the report reads afterwards answers from the first of those: a
 run whose image dies leaves an exited container behind, and one that came up
@@ -40,12 +41,23 @@ leaves a running one.
   >   # ready, which exits with the readiness code and names the fault. The
   >   # healthy arm has to write a document: a command that exits zero saying
   >   # nothing is a rejection, not a pass.
+  >   # $ORCHESTRATOR_OLD_SHAPE is a box that exits cleanly with its flag set
+  >   # beside a key the server does not write: an answer in a shape nobody
+  >   # reads, which is not a box saying it is ready.
   >   *'bondi-server check'*)
   >     if [ -n "$ORCHESTRATOR_NOT_READY" ]; then
   >       echo 'the Docker socket at /var/run/docker.sock is not readable' >&2
   >       exit 3
   >     fi
-  >     echo '{"ready":true,"observations":[]}' ;;
+  >     if [ -n "$ORCHESTRATOR_DOC_NOT_READY" ]; then
+  >       echo '{"ready":false,"probes":[{"name":"docker_socket"}]}'
+  >       exit 0
+  >     fi
+  >     if [ -n "$ORCHESTRATOR_OLD_SHAPE" ]; then
+  >       echo '{"ready":true,"observations":[]}'
+  >       exit 0
+  >     fi
+  >     echo '{"ready":true,"probes":[]}' ;;
   >   # The log-stream read setup takes after the reading. It establishes what
   >   # no probe inside the container can: that a line the server wrote to its
   >   # diagnostic sink reaches the stream an operator and a log shipper read.
@@ -306,6 +318,41 @@ the refusal above the box's own verdict rather than a command that never ran.
   $ grep -c 'bondi-server check' ssh-argv.log
   1
 
+A box that exits cleanly is ready only when what it wrote is the document the
+server writes. This one sets the flag beside a key the server does not write,
+and a reader that took any answer for a pass would call it ready on the
+strength of output it never understood. The healthy run at the top of this file
+is the same stub with the server's own shape, and it is ready; here the run
+refuses, and the refusal quotes what the box said.
+
+  $ : > "$ORCHESTRATOR_PS"
+  $ : > ssh-argv.log
+  $ ORCHESTRATOR_OLD_SHAPE=1 bondi-client setup > out.log 2>&1
+  [1]
+  $ grep -A4 'did not come up' out.log
+  Error: bondi-orchestrator did not come up on server 127.0.0.1.
+  Image: mlopez1506/bondi-server:0.15.0
+  the check exited cleanly and did not answer with the document the server writes: expected the keys ready and probes and no others, found: ready, observations; the answer was: {"ready":true,"observations":[]}
+  Container state and logs from the server:
+  status=running exit=0 oom=false error=
+  $ grep -c 'is ready on server' out.log
+  0
+  [1]
+
+A box can also exit cleanly and write the server's own document with the flag
+down. That is the box saying it is not ready, by the other route: the exit code
+is zero, so the refusal is made from the document, and it quotes it.
+
+  $ : > "$ORCHESTRATOR_PS"
+  $ : > ssh-argv.log
+  $ ORCHESTRATOR_DOC_NOT_READY=1 bondi-client setup > out.log 2>&1
+  [1]
+  $ grep -A4 'did not come up' out.log
+  Error: bondi-orchestrator did not come up on server 127.0.0.1.
+  Image: mlopez1506/bondi-server:0.15.0
+  the check exited cleanly and its document says the box is not ready: {"ready":false,"probes":[{"name":"docker_socket"}]}
+  Container state and logs from the server:
+  status=running exit=0 oom=false error=
 
 An orchestrator that answers the check is not the same fact as an orchestrator
 whose diagnostics can be seen. The check writes a line to its diagnostic sink

@@ -95,11 +95,18 @@ verify-server-image-negative TAG:
 
 # Every subcommand is exercised inside a container started by the exact command
 # an unchanged client uses, with its exit code and its JSON asserted against what
-# this tree says each one answers. The negative arm runs in the same recipe
-# rather than beside it, so this file and CI each hold one line for the pair and
-# cannot come to hold different numbers of them. The script refuses any engine
-# that is not Docker Engine: a rootless one reinterprets the two flags it
-# exercises.
+# this tree says each one answers. The deploy subcommand is also run to success,
+# under the simple and the blue-green strategy, into a local registry, network
+# and Traefik the script starts itself: each arm asserts by container id that the
+# new tag runs, the old container is gone and a request through that Traefik
+# reaches the new one. No registry credential is needed and no certificate is
+# ordered, and the arms refuse to start on an engine that already holds the
+# network Bondi deploys to, a traefik container or anything on host port 443, so
+# a box hosting a real Bondi deployment fails this recipe. The negative arm runs
+# in the same recipe rather than beside it, so this file and CI each hold one
+# line for the pair and cannot come to hold different numbers of them. The
+# script refuses any engine that is not Docker Engine: a rootless one
+# reinterprets the two flags it exercises.
 # One assertion is opt-in: the outbound-TLS handshake reaches a host outside this
 # project, so it runs only under BONDI_CHECK_TLS_HANDSHAKE=1, which both release
 # workflows set at the step that calls this recipe. A local run without it prints
