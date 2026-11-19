@@ -113,7 +113,7 @@ chose.
   >     printf '%s\n' "$1" | tr ' ' '\n' | grep '^mlopez1506/bondi-server:' > "$BOX/image"
   >     echo 'f00dcafef00d' ;;
   >   'attempt=0; while'*) : ;;
-  >   *'bondi-server check'*) echo '{"ready":true,"observations":[]}' ;;
+  >   *'bondi-server check'*) echo '{"ready":true,"probes":[]}' ;;
   >   'docker logs --tail'*) echo 'bondi check: diagnostic sink is writable' ;;
   >   *'RestartPolicy'*) echo unless-stopped ;;
   >   *'bondi-server status'*) echo 'this fixture does not answer the report' >&2; exit 1 ;;

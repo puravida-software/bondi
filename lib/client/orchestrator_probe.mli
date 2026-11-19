@@ -146,14 +146,19 @@ type verdict =
 val verdict_of_output : (string, Remote_exec.failure) result -> verdict
 (** Decide, from the outcome of running {!check_command}, what the box said.
 
-    The exit status is the verdict, which is a change from how this module used
-    to read its answer and is worth saying why. The transport now preserves the
-    remote status as a value rather than flattening it into a sentence, and the
-    server binary maps its failure classes to codes in exactly one place -- so
-    the status arrives intact and means one thing. A second classification built
-    by parsing the document would be a second mapping of the same failure
-    classes, and two mappings of one thing can disagree with no rule for which
-    to believe.
+    The exit status decides which kind of answer this is. The transport
+    preserves the remote status as a value rather than flattening it into a
+    sentence, and the server binary maps its failure classes to codes in exactly
+    one place -- so the status arrives intact and means one thing.
+
+    A clean exit is not a pass on its own, though. The server writes its
+    document and its status from one verdict, so on a ready box the two agree,
+    and a clean exit is ready only when the document beside it decodes, with
+    {!Bondi_common.Readiness_document}, and says [ready]. A document that says
+    the box is not ready, or text that is not the document the server writes, is
+    the two accounts disagreeing, and is {!Not_ready} with a reason quoting what
+    came back. A reader that took any answer for a pass would report a box ready
+    on the strength of output it never understood.
 
     The document alone would not do, either. A process that dies before its
     entry point -- a missing shared library stops the loader before [main] --

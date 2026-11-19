@@ -949,7 +949,8 @@ let test_each_reading_collapses_to_go_on_or_stop_with_a_sentence () =
       check bool "the host's own sentence survives the collapse" true
         (contains ~needle:"did not reach a running state" reason));
   (match
-     Setup.orchestrator_reading_verdict Setup.Take_check (Ok "{\"ready\":true}")
+     Setup.orchestrator_reading_verdict Setup.Take_check
+       (Ok "{\"ready\":true,\"probes\":[]}")
    with
   | Ok () -> ()
   | Error reason -> failf "a box that answered is not a rejection: %s" reason);

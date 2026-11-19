@@ -64,7 +64,7 @@ redden if the orchestrator's wording changes.
   >   # than a pass, and a rejection here would stop the run before the payload
   >   # copy this file is about.
   >   'attempt=0; while'*) : ;;
-  >   *'bondi-server check'*) echo '{"ready":true,"observations":[]}' ;;
+  >   *'bondi-server check'*) echo '{"ready":true,"probes":[]}' ;;
   >   'docker logs --tail'*) echo 'bondi check: diagnostic sink is writable' ;;
   >   *'/var/spool/cron/crontabs/root'*)
   >     echo BONDI_CRONTAB_CONTENTS

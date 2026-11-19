@@ -250,11 +250,51 @@ let log_stream_reason = function
 
 (* The subcommand writes its document whichever way its verdict goes and the
    transport preserves the remote status, so an exit the transport reports as a
-   success is the box having answered that it is ready. *)
-let test_a_clean_exit_is_ready () =
+   success, carrying the document the server writes with its flag set, is the
+   box having answered that it is ready. *)
+let test_exit_0_with_the_servers_document_is_ready () =
   let verdict = Probe.verdict_of_output (Ok ready_document) in
   check string "a check that exited cleanly is the box saying it is ready"
     "Ready" (verdict_name verdict)
+
+(* The document and the status are two accounts of one verdict, and they must
+   agree for the box to be ready. A clean exit beside a document that says the
+   box is not ready is a contradiction, and a contradiction is not evidence
+   that the box is ready: the faults the document names are what an operator
+   acts on, so the reason carries them. *)
+let test_exit_0_with_ready_false_is_not_ready () =
+  let verdict = Probe.verdict_of_output (Ok not_ready_document) in
+  check string "a clean exit does not overrule the document" "Not_ready"
+    (verdict_name verdict);
+  let reason = verdict_reason verdict in
+  check bool "and the reason quotes the probe the document named" true
+    (contains ~needle:"crontab_spool" reason);
+  check bool "and what the box said about it" true
+    (contains ~needle:"/var/spool/cron/crontabs is not writable" reason)
+
+(* A shape the server does not write: the flag is set, and the key beside it is
+   one an older reader expected rather than the one the server writes. A reader
+   that accepted it would be reporting a box ready on the strength of an answer
+   it never understood, so it is refused, and the reason quotes what came back
+   because that is the only evidence of what answered. *)
+let test_exit_0_with_the_observations_shape_is_not_ready () =
+  let answer = {|{"ready":true,"observations":[]}|} in
+  let verdict = Probe.verdict_of_output (Ok answer) in
+  check string "a document in another shape is not a pass" "Not_ready"
+    (verdict_name verdict);
+  check bool "and the reason quotes the answer" true
+    (contains ~needle:answer (verdict_reason verdict))
+
+(* Text that is not a document at all -- something other than the server wrote
+   to standard output and exited cleanly. Refused, and quoted, on the same
+   grounds as a document in the wrong shape. *)
+let test_exit_0_with_text_that_does_not_decode_is_not_ready_and_quotes_it () =
+  let answer = "Usage: bondi-server COMMAND" in
+  let verdict = Probe.verdict_of_output (Ok answer) in
+  check string "text that does not decode is not a pass" "Not_ready"
+    (verdict_name verdict);
+  check bool "and the reason quotes the text" true
+    (contains ~needle:answer (verdict_reason verdict))
 
 (* The status the readiness class leaves behind is the one code that means the
    box ran the check and named faults. Classifying it as anything else sends an
@@ -339,7 +379,7 @@ let test_every_other_failure_says_nothing_was_obtained_from_the_box () =
    for the command produces, and it is not evidence that the box is ready. The
    passing arm is asserted on the same function in the same case, because a body
    that rejected everything would satisfy the rejection on its own. *)
-let test_empty_output_is_a_rejection_not_a_pass () =
+let test_exit_0_with_empty_output_stays_unreachable () =
   let silent = Probe.verdict_of_output (Ok "") in
   check string "a command that exited saying nothing is not a pass"
     "Unreachable" (verdict_name silent);
@@ -420,7 +460,16 @@ let () =
         ] );
       ( "verdict_of_output",
         [
-          test_case "a clean exit is ready" `Quick test_a_clean_exit_is_ready;
+          test_case "exit 0 with the server's document is Ready" `Quick
+            test_exit_0_with_the_servers_document_is_ready;
+          test_case "exit 0 with ready false is Not_ready" `Quick
+            test_exit_0_with_ready_false_is_not_ready;
+          test_case "exit 0 with the observations shape is Not_ready" `Quick
+            test_exit_0_with_the_observations_shape_is_not_ready;
+          test_case
+            "exit 0 with text that does not decode is Not_ready and quotes it"
+            `Quick
+            test_exit_0_with_text_that_does_not_decode_is_not_ready_and_quotes_it;
           test_case
             "the readiness exit code is the box reporting faults, and carries \
              them"
@@ -433,8 +482,8 @@ let () =
           test_case "every other failure says nothing was obtained from the box"
             `Quick
             test_every_other_failure_says_nothing_was_obtained_from_the_box;
-          test_case "empty output is a rejection, not a pass" `Quick
-            test_empty_output_is_a_rejection_not_a_pass;
+          test_case "exit 0 with empty output stays Unreachable" `Quick
+            test_exit_0_with_empty_output_stays_unreachable;
         ] );
       ( "log_stream_of_output",
         [

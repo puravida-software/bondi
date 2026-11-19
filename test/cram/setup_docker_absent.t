@@ -58,7 +58,7 @@ succeed, so the run reaches the install rather than stopping earlier.
   >   # rejection rather than a pass, so a command falling through to the
   >   # catch-all below would fail this run for a reason no fixture here chose.
   >   'attempt=0; while'*) : ;;
-  >   *'bondi-server check'*) echo '{"ready":true,"observations":[]}' ;;
+  >   *'bondi-server check'*) echo '{"ready":true,"probes":[]}' ;;
   >   'docker logs --tail'*) echo 'bondi check: diagnostic sink is writable' ;;
   >   # The closing report's own reading, which is a different question from the
   >   # one setup takes and is answered here so that a fall-through to *) cannot

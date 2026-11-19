@@ -30,7 +30,7 @@ inspection says has a healthcheck to answer for. This host's checks pass.
   >   # rejection rather than a pass, so a command falling through to the
   >   # catch-all below would fail this run for a reason no fixture here chose.
   >   'attempt=0; while'*) : ;;
-  >   *'bondi-server check'*) echo '{"ready":true,"observations":[]}' ;;
+  >   *'bondi-server check'*) echo '{"ready":true,"probes":[]}' ;;
   >   'docker logs --tail'*) echo 'bondi check: diagnostic sink is writable' ;;
   >   *"'--name' 'bondi-gateway'"*) echo 'a1b2c3d4e5f6' ;;
   >   *BONDI_CONTAINER_TIMEOUT*) echo BONDI_CONTAINER_HEALTHY ;;

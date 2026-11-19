@@ -10,10 +10,12 @@
 # because a subcommand that works under `dune exec` and not in the image is a
 # subcommand nobody can call.
 #
-# Eight assertions. The first seven are reached with `docker exec` into a
+# Ten assertions. The first seven are reached with `docker exec` into a
 # container started from the image passed in by the exact command the client
-# produces; the eighth is asked from outside, because stopping a container is
-# not a thing the container can be asked to do from within it:
+# produces; the eighth and ninth are deploys sent through that same container
+# and judged from outside it, by container id; the tenth is asked from outside,
+# because stopping a container is not a thing the container can be asked to do
+# from within it:
 #
 #   1. `status` exits 0 and writes a document naming the infrastructure it found
 #   2. `check` reports the box ready, as JSON, exits 0, the marker it writes to
@@ -33,13 +35,29 @@
 #      `BONDI_CHECK_TLS_HANDSHAKE` is set, and prints a `skipped:` line naming
 #      that variable when it is not. Both release workflows set it at the
 #      `just check-server-image` step, so nothing CI asserts is lost.
+#   8. a `simple` deploy, `arm_simple` in `deploy-arms.sh`. A service is deployed
+#      at one tag and then at the next, into a network, a Traefik and a local
+#      registry this script starts itself and tears down after: the new
+#      container runs at the new tag, the old container is gone, and a request
+#      for the service's host through that Traefik is answered by the new
+#      container -- each asked by container id, never inferred from an exit
+#      code. Then a deploy of a tag the registry does not have exits 1 naming
+#      the tag, and the new container still runs and still answers.
+#   9. a `blue-green` deploy, `arm_blue_green`, of an image that declares a
+#      health check: the same three outcomes, asked the same way.
 #
-# then the same again with the command the client produces for a deployment that
-# configures cron, which carries `--user root` and the spool mount, and where
-# `check --cron-configured` must succeed -- and last of all, on that same
-# container, once nothing else needs it up:
+#      Before either runs, the script refuses -- fails, rather than skipping --
+#      on an engine that already holds the network a deploy attaches to, any
+#      container whose image contains `traefik`, or anything on host port 443,
+#      naming every holder and removing nothing. A deploy here would adopt the
+#      first two, so on a box running a real deployment this gate stops there.
 #
-#   8. `docker stop` is answered. The container leaves exit code 0, and leaves
+# then a second container, started by the command the client produces for a
+# deployment that configures cron, which carries `--user root` and the spool
+# mount, and in which `check --cron-configured` must succeed -- and last of all,
+# on that same container, once nothing else needs it up:
+#
+#  10. `docker stop` is answered. The container leaves exit code 0, and leaves
 #      it well inside the timeout the daemon was given rather than being killed
 #      at it. This is the one arm anywhere that runs the idling binary as a real
 #      PID 1 and then asks it to stop: `Cli.wait_forever` installs a SIGTERM
@@ -52,9 +70,19 @@
 # What this enumeration does not cover, named so its completeness is not read as
 # wider than it is:
 #
-#   - `deploy`'s success path. It needs a private registry credential and drives
-#     a Let's Encrypt production order for a real hostname; assertion 5 is its
-#     failure arm and nothing here is its success arm.
+#   - `deploy` given what a production deploy carries and assertions 8 and 9
+#     withhold. No registry credential: the gate's registry takes none, so the
+#     path that hands one to the engine is not reached. No certificate: the
+#     gate's Traefik defines no resolver, so the router is served with Traefik's
+#     default certificate and nothing is ordered. That is deliberate -- a gate
+#     run on every build must not drive a Let's Encrypt order -- and it means no
+#     certificate issuance is asserted here. No `traefik_image` and no
+#     `traefik_acme_email`, so the server adopts the gate's Traefik and the
+#     path on which it replaces one is not reached. And both arms deploy through
+#     the container the no-cron command starts, never the cron one.
+#   - a deploy that fails after its pull: a health check that never passes, a
+#     container that will not start. The one failure the arms assert is the
+#     missing tag in assertion 8.
 #   - that `status` reports the job assertion 6 ran. It does not and cannot:
 #     `status` lists cron jobs from the Bondi section of the crontab, and a job
 #     started by `run` writes no crontab entry. Manufacturing one would mean
@@ -69,15 +97,19 @@
 #     bundle. A run that skips it says so on stdout.
 #   - any signal other than SIGTERM reaching the idling PID 1. `wait_forever`
 #     resumes a sleep that some other signal's delivery merely cut short, so
-#     that a stray signal is not read as a stop; assertion 8 sends the one
+#     that a stray signal is not read as a stop; assertion 10 sends the one
 #     signal `docker stop` sends, and nothing here sends another.
 #   - the registry being reachable. Assertions 6 and 7 need a base image for the
 #     job container on the engine before either runs, and this script pulls it:
 #     `run` creates a container through the Engine API, which -- unlike the
 #     `docker run` CLI -- does not pull a missing image but answers 404 [observed
-#     against Docker Engine 29.8.0 on 2026-09-13]. A registry that rate-limits or
-#     refuses fails this gate, and nothing here can tell that apart from the
-#     image under test being broken.
+#     against Docker Engine 29.8.0 on 2026-09-13]. Assertions 8 and 9 need three
+#     more, each pinned by digest and pulled unless the engine already holds
+#     it: `registry:2` for the local registry, `traefik:v3.6.8` for the gate's
+#     Traefik, and `busybox:1.37.0`, which is both the workload's base and the
+#     probe that sends requests through that Traefik. A registry that
+#     rate-limits or refuses fails this gate, and nothing here can tell that
+#     apart from the image under test being broken.
 #
 # Assertions 6 and 7 were written from what the HTTP integration bundle this
 # repository used to carry asserted, rather than ported from a bundle that could
@@ -89,7 +121,7 @@
 # and a `skipped:` line naming the variable stands in their place; a run that
 # reaches the end having printed neither exited before it got here.
 #
-# Assertion 8 has been run both ways [observed -- 2026-09-13, Docker Engine
+# Assertion 10 has been run both ways [observed -- 2026-09-13, Docker Engine
 # 29.8.0]. Against this image it answered in 1s and exited 0. Against a
 # stand-in container whose PID 1 ignores SIGTERM it was refused twice over: the
 # stop took the full 30s and the container left 137, and each of the two arms
@@ -112,9 +144,10 @@ binary=/usr/local/bin/bondi-server
 # The name the client's command carries, and the name this check actually runs
 # under. They differ on purpose: `cleanup` and `start_container` force-remove
 # the container they work on, and `just check-server-image` is documented as a
-# recipe to run locally -- on a box with a real orchestrator up, which is the
-# ordinary case for anyone testing bondi against their own deployment, running
-# under the client's name would destroy it before a single assertion ran.
+# recipe to run locally -- on a box with a real orchestrator up, running under
+# the client's name would destroy it before a single assertion ran. The split
+# protects a real orchestrator; it does not make such a box usable, because the
+# deploy arms (see the header) still refuse an engine holding a real deployment.
 orchestrator_name=bondi-orchestrator
 container="bondi-check-$$"
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -125,7 +158,7 @@ fixture="$here/orchestrator-run-command.txt"
 # same engine, and a box slow enough to fail one is slow enough to fail both.
 attempts=30
 # How long the daemon is told to wait between the SIGTERM `docker stop` sends
-# and the SIGKILL it falls back to, and how long assertion 8 allows the stop to
+# and the SIGKILL it falls back to, and how long assertion 10 allows the stop to
 # take. The two numbers are far apart on purpose. The defect that arm exists to
 # catch is a binary that never answers the signal, and such a binary does not
 # fail to stop -- it stops at the timeout, killed -- so a bound set at the
@@ -227,9 +260,21 @@ cleanup() {
     # socket, so removing the orchestrator does not remove them.
     docker rm --force "$run_job" > /dev/null 2>&1 || true
     docker rm --force "$tls_job" > /dev/null 2>&1 || true
+    # The deploy arms' fixture, which removes only what this run recorded making,
+    # so a run its preconditions refused removes nothing. Silenced here: the
+    # reporting call is the one after the arms, and this is the backstop for an
+    # exit before it.
+    deploy_fixture_down > /dev/null 2>&1 || true
     rm -rf "$work"
 }
 trap cleanup EXIT
+
+# The deploy arms and their fixture. Sourced once the trap is set, so a name it
+# cannot derive still ends in `cleanup`. `cleanup` calls its teardown, which
+# removes only what the fixture recorded making, so on any exit before the
+# fixture is up it touches nothing.
+# shellcheck source-path=SCRIPTDIR source=deploy-arms.sh
+. "$here/deploy-arms.sh"
 
 # Docker Engine or nothing. The two flags this check exists to exercise --
 # `--group-add` against the socket's group and `--user root` -- are exactly the
@@ -531,6 +576,9 @@ echo "==> $image: check reports the box ready"
 run_subcommand /dev/null check
 expect_code "check" 0
 expect_stream_contains "check" stdout '"ready":true'
+# The client's decoder refuses a document without `probes`, so an image that
+# wrote only the verdict would be called unreadable by every client.
+expect_stream_contains "check" stdout '"probes":['
 expect_stream_contains "check" stdout '"docker_socket"'
 expect_container_log_contains "check" "$marker"
 # A deployment that configures no cron is not asked about the cron divergence,
@@ -558,6 +606,7 @@ expect_stream_contains "check --cron-configured" stderr 'crontab spool'
 # `probe_key` and `probe_name` apart on purpose, and this is the arm that shows
 # both reached their own stream.
 expect_stream_contains "check --cron-configured" stdout '"ready":false'
+expect_stream_contains "check --cron-configured" stdout '"probes":['
 expect_stream_contains "check --cron-configured" stdout '"crontab_spool"'
 # The affirmative arm for the absence asserted above: the same container, the
 # same paths, the flag the only difference, and the probe is in the document.
@@ -745,6 +794,18 @@ case "$tls_handshake" in
         echo "         It reaches $tls_sink_host over the network; set BONDI_CHECK_TLS_HANDSHAKE=1 to run it."
         ;;
 esac
+
+echo "==> the deploy fixture: what this engine already holds"
+deploy_fixture_preconditions
+echo "==> the deploy fixture: a registry, workload images, $fixture_network and $fixture_traefik"
+deploy_fixture_up
+echo "==> $image: ${#deploy_arms[@]} deploy arms, on the command a client with no cron jobs starts"
+for arm in "${deploy_arms[@]}"; do
+    "$arm"
+    remove_arm_workloads
+done
+echo "==> the deploy fixture: tearing it down"
+deploy_fixture_down
 
 echo "==> $image: the command a client with cron jobs starts an orchestrator with"
 start_container "$cron_command"

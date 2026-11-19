@@ -1,0 +1,15 @@
+; The refusals of deploy_fixture_preconditions are what keep the deploy arms off an
+; operator's own deployment. They read `docker` and `ss` output, so each is driven
+; by a stub answering with exactly the holder its case names, and no Docker engine
+; is needed. The script's own derivations read two OCaml sources, so those are
+; dependencies, at the relative paths the script reads them from.
+
+(rule
+ (alias runtest)
+ (deps
+  (:script preconditions.sh)
+  ../../scripts/deploy-arms.sh
+  ../../lib/common/defaults.ml
+  ../../lib/common/builtin_container.ml)
+ (action
+  (run bash %{script} %{dep:../../scripts/deploy-arms.sh})))
