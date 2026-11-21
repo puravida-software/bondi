@@ -1,0 +1,3 @@
+{"status":"Pulling from bondi-observe-app","id":"missing-layer"}
+{"status":"Pulling fs layer","progressDetail":{},"id":"4197fd833fcc"}
+{"error":"failed to copy: httpReadSeeker: failed open: could not fetch content descriptor sha256:4197fd833fcc164dbb84ee458cb70ec985dc8284c844053c8c46e5e2ecaeaeed (application/vnd.oci.image.layer.v1.tar+gzip) from remote: not found","errorDetail":{"code":404,"message":"failed to copy: httpReadSeeker: failed open: could not fetch content descriptor sha256:4197fd833fcc164dbb84ee458cb70ec985dc8284c844053c8c46e5e2ecaeaeed (application/vnd.oci.image.layer.v1.tar+gzip) from remote: not found"}}

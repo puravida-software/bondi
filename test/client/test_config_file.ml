@@ -68,8 +68,10 @@ traefik:
           (match config.user_service with
           | None -> fail "expected service"
           | Some service -> (
-              check string "name" "my-app" service.name;
-              check string "image" "registry.example.com/app" service.image;
+              check string "name" "my-app"
+                (Bondi_common.Router_name.to_string service.name);
+              check string "image" "registry.example.com/app"
+                (Bondi_common.Image_reference.to_string service.image);
               check int "port" 8080 service.port;
               check (option string) "registry user" (Some "registry-user")
                 service.registry_user;
@@ -98,7 +100,8 @@ traefik:
           | None -> fail "expected traefik"
           | Some t ->
               check string "traefik domain" "example.com" t.domain_name;
-              check string "traefik image" "traefik:v3.3.3" t.image;
+              check string "traefik image" "traefik:v3.3.3"
+                (Bondi_common.Image_reference.to_string t.image);
               check string "traefik email" "admin@example.com" t.acme_email);
           check bool "cron_jobs absent defaults to None" true
             (config.cron_jobs = None))
@@ -161,7 +164,8 @@ cron_jobs:
               | [] -> fail "expected at least one cron job"
               | job :: _ -> (
                   check string "cron job name" "my-job" job.name;
-                  check string "cron job image" "ghcr.io/org/my-job" job.image;
+                  check string "cron job image" "ghcr.io/org/my-job"
+                    (Bondi_common.Image_reference.to_string job.image);
                   check string "cron job schedule" "0 14 * * 3" job.schedule;
                   check (option string) "cron job registry user"
                     (Some "registry-user") job.registry_user;
@@ -212,7 +216,8 @@ cron_jobs:
               | [] -> fail "expected at least one cron job"
               | job :: _ ->
                   check string "cron job name" "my-cron" job.name;
-                  check string "cron job image" "ghcr.io/org/cron" job.image;
+                  check string "cron job image" "ghcr.io/org/cron"
+                    (Bondi_common.Image_reference.to_string job.image);
                   check string "cron job schedule" "0 * * * *" job.schedule;
                   check (option string)
                     "cron job registry user defaults to None" None
@@ -1252,9 +1257,213 @@ let test_service_volume_yes_read_only_reads_as_true () =
          read_only)
   | Ok _ -> fail "expected exactly one mount"
 
+(* A manifest whose three image fields, service name and certificate server are
+   each given by the caller, so that each arm below changes one of them and the
+   refusal can only have come from that one. The defaults are the values
+   USAGE.md shows, which read; the certificate server is absent unless given. *)
+let images_yaml ?(name = "my-api") ?(service = "ghcr.io/acme/my-api")
+    ?(traefik = "traefik:v3.6.8") ?acme_ca_server
+    ?(cron = "ghcr.io/acme/backup-job") () =
+  let acme_ca_server_line =
+    match acme_ca_server with
+    | None -> ""
+    | Some url -> Printf.sprintf "  acme_ca_server: \"%s\"\n" url
+  in
+  Printf.sprintf
+    {|service:
+  name: "%s"
+  image: "%s"
+  port: 8080
+  env_vars: {}
+  servers:
+    - ip_address: 203.0.113.10
+      ssh:
+        user: root
+bondi_server:
+  version: 0.1.0
+traefik:
+  domain_name: example.com
+  image: "%s"
+  acme_email: admin@example.com
+%scron_jobs:
+  - name: daily-backup
+    image: "%s"
+    schedule: "0 2 * * *"
+    server:
+      ip_address: 203.0.113.10
+      ssh:
+        user: root
+|}
+    name service traefik acme_ca_server_line cron
+
+let read_images yaml = with_temp_config yaml Config_file.read
+
+(* The refusal names the field and echoes what was written there. It is printed
+   only to the terminal of the operator who wrote it, so the value is theirs to
+   see, and it is the one thing that tells them which line to fix. A refusal
+   that reaches a log does not echo it; this one reaches none. *)
+let check_read_refused ~label ~expected yaml =
+  match read_images yaml with
+  | Ok _ -> fail (label ^ " was accepted")
+  | Error message -> check string label expected message
+
+let test_config_refuses_bad_image () =
+  (match read_images (images_yaml ()) with
+  | Ok _ -> ()
+  | Error message ->
+      fail ("the documented images must read, and were refused: " ^ message));
+  check_read_refused ~label:"a service image carrying a tag"
+    ~expected:
+      "invalid bondi.yaml: service.image \"ghcr.io/acme/my-api:1.0\" carries a \
+       tag or digest: give the image without one, such as ghcr.io/acme/my-api, \
+       and its tag at deploy time"
+    (images_yaml ~service:"ghcr.io/acme/my-api:1.0" ());
+  check_read_refused ~label:"a service image pinned by digest"
+    ~expected:
+      (Printf.sprintf
+         "invalid bondi.yaml: service.image \"ghcr.io/acme/my-api@sha256:%s\" \
+          carries a tag or digest: give the image without one, such as \
+          ghcr.io/acme/my-api, and its tag at deploy time"
+         (String.make 64 'a'))
+    (images_yaml
+       ~service:("ghcr.io/acme/my-api@sha256:" ^ String.make 64 'a')
+       ());
+  check_read_refused ~label:"a service image that is no reference"
+    ~expected:
+      "invalid bondi.yaml: service.image \"Acme/My-Api\" is not an image \
+       reference"
+    (images_yaml ~service:"Acme/My-Api" ());
+  check_read_refused ~label:"a traefik image with an empty tag"
+    ~expected:
+      "invalid bondi.yaml: traefik.image \"traefik:\" is not an image reference"
+    (images_yaml ~traefik:"traefik:" ());
+  check_read_refused ~label:"a cron job image that is no reference"
+    ~expected:
+      "invalid bondi.yaml: cron_jobs image \"backup job\" is not an image \
+       reference"
+    (images_yaml ~cron:"backup job" ());
+  check_read_refused ~label:"a cron job image carrying a tag"
+    ~expected:
+      "invalid bondi.yaml: cron_jobs image \"ghcr.io/acme/backup-job:1.0\" \
+       carries a tag or digest: give the image without one, such as \
+       ghcr.io/acme/backup-job, and its tag at deploy time"
+    (images_yaml ~cron:"ghcr.io/acme/backup-job:1.0" ())
+
+(* Traefik's image is a whole reference, so the shapes a service image refuses
+   are the ones it must accept: a registry on a port, and a digest pin. *)
+let test_config_accepts_traefik_reference () =
+  let pinned = "registry:5000/traefik:v3.6.8@sha256:" ^ String.make 64 'b' in
+  match read_images (images_yaml ~traefik:pinned ()) with
+  | Error message -> fail message
+  | Ok config -> (
+      match config.traefik with
+      | None -> fail "expected traefik"
+      | Some traefik ->
+          check string "the reference reads back as written" pinned
+            (Bondi_common.Image_reference.to_string traefik.image))
+
+let read_traefik yaml =
+  match read_images yaml with
+  | Error message -> fail ("expected the manifest to read: " ^ message)
+  | Ok config -> (
+      match config.traefik with
+      | None -> fail "expected traefik"
+      | Some traefik -> traefik)
+
+(* Let's Encrypt's staging directory, the value a test box would set. *)
+let staging_directory = "https://acme-staging-v02.api.letsencrypt.org/directory"
+
+(* Absent is Traefik's own default, Let's Encrypt production, and is read as no
+   value at all. A value that is set reads back exactly as written. *)
+let test_config_acme_ca_server_optional () =
+  check (option string) "absent reads as no certificate server" None
+    (Option.map Bondi_common.Acme_ca_server.to_string
+       (read_traefik (images_yaml ())).acme_ca_server);
+  check (option string) "a set value reads back as written"
+    (Some staging_directory)
+    (Option.map Bondi_common.Acme_ca_server.to_string
+       (read_traefik (images_yaml ~acme_ca_server:staging_directory ()))
+         .acme_ca_server)
+
+(* An ACME directory is served over https, so a value that is not an absolute
+   https URL is a typo, refused when the file is read and naming the field,
+   rather than a resolver that never orders. *)
+let test_config_refuses_http_acme_ca_server () =
+  check_read_refused ~label:"an http directory"
+    ~expected:
+      "invalid bondi.yaml: traefik.acme_ca_server \
+       \"http://acme-staging-v02.api.letsencrypt.org/directory\" is not an \
+       ACME directory URL: it must be an absolute https:// URL that names a \
+       host and holds no whitespace or control character"
+    (images_yaml
+       ~acme_ca_server:"http://acme-staging-v02.api.letsencrypt.org/directory"
+       ());
+  check_read_refused ~label:"a directory with no scheme"
+    ~expected:
+      "invalid bondi.yaml: traefik.acme_ca_server \
+       \"acme-staging-v02.api.letsencrypt.org/directory\" is not an ACME \
+       directory URL: it must be an absolute https:// URL that names a host \
+       and holds no whitespace or control character"
+    (images_yaml
+       ~acme_ca_server:"acme-staging-v02.api.letsencrypt.org/directory" ())
+
+(* The service name names its Traefik router, and Traefik splits a label key at
+   [.], so a name holding one would leave the service unserved. A name of one
+   character is refused too: Docker refuses it as a container name. *)
+let test_config_refuses_unroutable_service_name () =
+  check_read_refused ~label:"a name holding a dot"
+    ~expected:
+      "invalid bondi.yaml: service.name \"my.api\" cannot name a Traefik \
+       router: a router name is a lowercase letter or digit followed by one or \
+       more lowercase letters, digits, _ or -"
+    (images_yaml ~name:"my.api" ());
+  check_read_refused ~label:"a name of one character"
+    ~expected:
+      "invalid bondi.yaml: service.name \"a\" cannot name a Traefik router: a \
+       router name is a lowercase letter or digit followed by one or more \
+       lowercase letters, digits, _ or -"
+    (images_yaml ~name:"a" ());
+  check_read_refused ~label:"a name with an uppercase letter"
+    ~expected:
+      "invalid bondi.yaml: service.name \"Api\" cannot name a Traefik router: \
+       it holds an uppercase letter, and Traefik label keys are \
+       case-insensitive, so names that differ only by case would collide"
+    (images_yaml ~name:"Api" ());
+  check_read_refused ~label:"a name Bondi's own Traefik container defines"
+    ~expected:
+      "invalid bondi.yaml: service.name \"acme-http\" is reserved: Bondi's own \
+       Traefik container defines a router, middleware and service of that \
+       name, and a service of the same name would collide with them"
+    (images_yaml ~name:"acme-http" ());
+  match read_images (images_yaml ~name:"my_api-2" ()) with
+  | Error message -> fail ("a routable name was refused: " ^ message)
+  | Ok config ->
+      check (option string) "a routable name reads back as written"
+        (Some "my_api-2")
+        (Option.map
+           (fun (service : Config_file.user_service) ->
+             Bondi_common.Router_name.to_string service.name)
+           config.user_service)
+
 let () =
   run "Config_file"
     [
+      ( "images",
+        [
+          test_case "a bad image is refused, naming the field" `Quick
+            test_config_refuses_bad_image;
+          test_case "traefik takes a whole reference" `Quick
+            test_config_accepts_traefik_reference;
+        ] );
+      ( "traefik and routers",
+        [
+          test_case "acme_ca_server is optional" `Quick
+            test_config_acme_ca_server_optional;
+          test_case "an http acme_ca_server is refused, naming the field" `Quick
+            test_config_refuses_http_acme_ca_server;
+          test_case "an unroutable service name is refused, naming the field"
+            `Quick test_config_refuses_unroutable_service_name;
+        ] );
       ( "read",
         [
           test_case "reads config with env vars" `Quick test_read_config_success;

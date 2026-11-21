@@ -81,21 +81,6 @@ val inspection_command : string
     read rather than that one container's, so an unguarded template would lose
     every container to the first one without a healthcheck. *)
 
-val split_image : string -> string * string
-(** An image reference split into the image and its tag, with the empty string
-    for a reference that names no tag.
-
-    The tag is what follows the last colon of the final path segment. Splitting
-    on the first colon reads a registry's port as a tag, and a reference pinned
-    by digest names no tag at all — [org/app@sha256:abc] is one image, not
-    [org/app@sha256] at [abc].
-
-    Exposed because the report compares what two sources said about the same
-    container, and the other source splits references with a parser that answers
-    differently. Comparing the halves each produced reports drift between two
-    parsers as drift on the box; comparing what both are put back together into,
-    split once here, compares the containers. *)
-
 val health_to_wait_for : t -> string list
 (** The containers a caller waiting on declared health has something to wait
     for, in the order the host listed them.

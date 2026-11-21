@@ -1,3 +1,5 @@
+module Image_reference = Bondi_common.Image_reference
+
 type component_status = {
   name : string;
   image_name : string;
@@ -45,12 +47,17 @@ type status_context = {
 }
 (** Gathered state from Docker and crontab — input to the pure plan phase. *)
 
-(** Parse an image string into (image_name, tag). Returns Error when parsing
-    fails. *)
+(** Parse an image string into (image_name, tag), split by
+    {!Image_reference.image_and_tag}: a reference with a digest is reported
+    whole, with an empty tag, and any other is its name and its tag, the tag
+    empty when it has none. The client splits the host's own listing through the
+    same function, so the two sides agree. Returns Error when the image does not
+    parse. *)
 let parse_image image =
-  match Strategy.Simple.parse_image_and_tag image with
-  | Ok (image_name, tag) -> Ok (image_name, tag)
-  | Error _ -> Error (Printf.sprintf "failed to parse image: %s" image)
+  match Image_reference.of_string image with
+  | Error (Image_reference.Empty | Malformed _) ->
+      Error (Printf.sprintf "failed to parse image: %s" image)
+  | Ok reference -> Ok (Image_reference.image_and_tag reference)
 
 (** Build a component_status from a Docker container + inspect response. Returns
     (Some status, None) on success, or (None, Some error) on parse failure. *)

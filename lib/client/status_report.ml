@@ -31,7 +31,8 @@ type component = { name : string; observation : observation }
 let service_components (config : Config_file.t) =
   match config.user_service with
   | None -> []
-  | Some service -> [ (service.name, Service) ]
+  | Some service ->
+      [ (Bondi_common.Router_name.to_string service.name, Service) ]
 
 let cron_job_components (config : Config_file.t) =
   match config.cron_jobs with
@@ -195,28 +196,19 @@ let rows ~config ~docker ~orchestrator ~waits =
           ~declaration:Undeclared name)
       undeclared
 
-(* The reference each source was describing, put back together. The two split it
-   with different parsers — the host's knows a digest names no tag, the
-   orchestrator's splits on a colon — so comparing the halves reports two
-   containers where there is one, on every run and forever, for any image pinned
-   by digest. Rejoining and splitting once with a single parser compares what
-   the sources actually said rather than how each of them cut it up. *)
-let image_reference observation =
-  match observation.tag with
-  | "" -> observation.image
-  | tag -> observation.image ^ ":" ^ tag
-
-let normalised_image observation =
-  Host_inventory.split_image (image_reference observation)
-
 (* Only what the two sources claim is running can contradict: the image, its
    tag and the state. A restart count read a second later legitimately differs
-   and would flag a row on nothing but the gap between the two reads. *)
+   and would flag a row on nothing but the gap between the two reads.
+
+   The image and tag are compared as each source reported them. Both split a
+   reference through the one parser the two libraries share, so one container
+   is described the same way by each, and nothing is put back together here to
+   reconcile two splits: doing so is what hid the two parsers' drift. An
+   orchestrator from before the shared parser splits a digest at its colon, and
+   its row reads as a disagreement until the box is upgraded. *)
 let same_component host orchestrator =
-  let host_image, host_tag = normalised_image host in
-  let orchestrator_image, orchestrator_tag = normalised_image orchestrator in
-  String.equal host_image orchestrator_image
-  && String.equal host_tag orchestrator_tag
+  String.equal host.image orchestrator.image
+  && String.equal host.tag orchestrator.tag
   && String.equal host.state orchestrator.state
 
 let disagrees row =

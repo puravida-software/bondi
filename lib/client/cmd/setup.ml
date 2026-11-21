@@ -1381,7 +1381,8 @@ let plan_for_config (config : Config_file.t) (ctx : setup_context) =
 
 let excluded_containers_from_config (config : Config_file.t) =
   match config.user_service with
-  | Some svc when svc.logs = Some false -> [ svc.name ]
+  | Some svc when svc.logs = Some false ->
+      [ Bondi_common.Router_name.to_string svc.name ]
   | Some _
   | None ->
       []
@@ -2357,7 +2358,7 @@ let run () =
       print_endline "Setting up the servers...";
       let service_name =
         match config.user_service with
-        | Some service -> Some service.name
+        | Some service -> Some (Bondi_common.Router_name.to_string service.name)
         | None -> None
       in
       let outcomes =

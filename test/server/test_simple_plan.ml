@@ -1,6 +1,7 @@
 open Alcotest
 module Simple = Bondi_server__Strategy__Simple
 module Docker = Bondi_server__Docker__Client
+module Image_reference = Bondi_common.Image_reference
 
 let mock_container ~id ~image =
   {
@@ -15,15 +16,16 @@ let mock_container ~id ~image =
 
 let minimal_input =
   {
-    Simple.service_name = Some "my-service";
-    image = Some "myapp:v1";
+    Simple.service_name = Some (Test_helpers.router_name "my-service");
+    image = Some (Test_helpers.image_reference "myapp:v1");
     port = Some 8080;
     registry_user = None;
     registry_pass = None;
     env_vars = None;
     traefik_domain_name = Some "example.com";
-    traefik_image = Some "traefik:v3.3.0";
+    traefik_image = Some (Test_helpers.image_reference "traefik:v3.3.0");
     traefik_acme_email = Some "admin@example.com";
+    traefik_acme_ca_server = None;
     force_traefik_redeploy = None;
     cron_jobs = None;
     drain_grace_period = None;
@@ -46,8 +48,14 @@ let action_string = function
       "CreateNetwork(" ^ network_name ^ ")"
   | Simple.EnsureTraefik _ -> "EnsureTraefik"
   | Simple.StopAndRemoveContainer _ -> "StopAndRemoveContainer"
-  | Simple.PullImage { image; tag; with_auth } ->
-      "PullImage(" ^ image ^ ":" ^ tag ^ "," ^ string_of_bool with_auth ^ ")"
+  | Simple.PullImage { image; with_auth } ->
+      "PullImage("
+      ^ Image_reference.name image
+      ^ ":"
+      ^ Image_reference.pull_tag image
+      ^ ","
+      ^ string_of_bool with_auth
+      ^ ")"
   | Simple.RunWorkload { container_name; _ } ->
       "RunWorkload(" ^ container_name ^ ")"
 
@@ -73,6 +81,7 @@ let test_plan_empty_context_with_traefik () =
       check (list string) "includes traefik setup"
         [
           "CreateNetwork(bondi-network)";
+          "PullImage(traefik:v3.3.0,false)";
           "EnsureTraefik";
           "PullImage(myapp:v1,false)";
           "RunWorkload(my-service)";
@@ -111,11 +120,20 @@ let position_of matches actions =
   in
   go 0 actions
 
-let is_pull = function
-  | Simple.PullImage _ -> true
+let is_pull_of ~image = function
+  | Simple.PullImage { image = pulled; _ } ->
+      Image_reference.to_string pulled = image
   | Simple.CreateNetwork _
   | Simple.EnsureTraefik _
   | Simple.StopAndRemoveContainer _
+  | Simple.RunWorkload _ ->
+      false
+
+let is_stop = function
+  | Simple.StopAndRemoveContainer _ -> true
+  | Simple.CreateNetwork _
+  | Simple.EnsureTraefik _
+  | Simple.PullImage _
   | Simple.RunWorkload _ ->
       false
 
@@ -162,7 +180,7 @@ let test_redeploy_pulls_before_stop () =
   | Error e -> Alcotest.fail ("plan failed: " ^ e)
   | Ok actions -> (
       match
-        ( position_of is_pull actions,
+        ( position_of (is_pull_of ~image:"myapp:v1") actions,
           position_of (is_stop_of ~container_id:"workload-1") actions,
           position_of is_run_workload actions )
       with
@@ -179,29 +197,187 @@ let test_redeploy_pulls_before_stop () =
             "expected PullImage, StopAndRemoveContainer of the workload and \
              RunWorkload")
 
-(* Reordering the service's pull must not move Traefik's stop: the old proxy is
-   still stopped before the new one is ensured. *)
-let test_traefik_redeploy_keeps_order () =
-  let traefik = mock_container ~id:"traefik-1" ~image:"traefik:v2.0" in
-  let workload = mock_container ~id:"workload-1" ~image:"myapp:v0.9" in
-  let context =
-    { Simple.current_traefik = Some traefik; current_workload = Some workload }
+(* A registry with a port puts a second ':' in the reference. Read by a split on
+   ':', it named no image, the pull was dropped, and the old service was stopped
+   for an image that was never on the box. The pull is of the repository,
+   registry and port included, at the declared tag. No Traefik is declared, so
+   the service's pull is the only one planned. *)
+let test_registry_port_reference_pulls_before_stop () =
+  let workload =
+    mock_container ~id:"workload-1" ~image:"registry:5000/app:1.2.2"
   in
-  match Simple.plan minimal_input context with
+  let context =
+    { Simple.current_traefik = None; current_workload = Some workload }
+  in
+  let input =
+    {
+      minimal_input with
+      image = Some (Test_helpers.image_reference "registry:5000/app:1.2.3");
+      traefik_image = None;
+      traefik_acme_email = None;
+    }
+  in
+  match Simple.plan input context with
   | Error e -> Alcotest.fail ("plan failed: " ^ e)
   | Ok actions -> (
+      let pulled =
+        List.filter_map
+          (function
+            | Simple.PullImage { image; _ } ->
+                Some (Image_reference.name image, Image_reference.pull_tag image)
+            | Simple.CreateNetwork _
+            | Simple.EnsureTraefik _
+            | Simple.StopAndRemoveContainer _
+            | Simple.RunWorkload _ ->
+                None)
+          actions
+      in
+      check
+        (list (pair string string))
+        "the one pull is the repository at the declared tag"
+        [ ("registry:5000/app", "1.2.3") ]
+        pulled;
       match
-        ( position_of (is_stop_of ~container_id:"traefik-1") actions,
-          position_of is_ensure_traefik actions )
+        ( position_of (is_pull_of ~image:"registry:5000/app:1.2.3") actions,
+          position_of (is_stop_of ~container_id:"workload-1") actions )
       with
-      | Some stop, Some ensure ->
-          check_before
-            ~first:("StopAndRemoveContainer of Traefik", stop)
-            ~second:("EnsureTraefik", ensure)
+      | Some pull, Some stop ->
+          check_before ~first:("PullImage", pull)
+            ~second:("StopAndRemoveContainer", stop)
       | None, _
       | _, None ->
           Alcotest.fail
-            "expected StopAndRemoveContainer of Traefik and EnsureTraefik")
+            "expected PullImage and StopAndRemoveContainer of the workload")
+
+(* A Traefik running [running], with no service container, so the only stop
+   the plan can hold is Traefik's own. *)
+let plan_traefik_against ~running input =
+  let traefik = mock_container ~id:"traefik-1" ~image:running in
+  let context =
+    { Simple.current_traefik = Some traefik; current_workload = None }
+  in
+  match Simple.plan input context with
+  | Error e -> Alcotest.fail ("plan failed: " ^ e)
+  | Ok actions -> actions
+
+let check_traefik_pulled_before_stop actions =
+  match
+    ( position_of (is_pull_of ~image:"traefik:v3.3.0") actions,
+      position_of (is_stop_of ~container_id:"traefik-1") actions,
+      position_of is_ensure_traefik actions )
+  with
+  | Some pull, Some stop, Some ensure ->
+      check_before
+        ~first:("PullImage of Traefik", pull)
+        ~second:("StopAndRemoveContainer of Traefik", stop);
+      check_before
+        ~first:("StopAndRemoveContainer of Traefik", stop)
+        ~second:("EnsureTraefik", ensure)
+  | None, _, _
+  | _, None, _
+  | _, _, None ->
+      Alcotest.fail
+        "expected PullImage of Traefik, StopAndRemoveContainer of Traefik and \
+         EnsureTraefik"
+
+(* A Traefik image that cannot be pulled must leave the running proxy in place,
+   so the new image is on the box before the old proxy is stopped, and the old
+   proxy is stopped before the new one is created. *)
+let test_traefik_pull_before_stop () =
+  check_traefik_pulled_before_stop
+    (plan_traefik_against ~running:"traefik:v2.0" minimal_input)
+
+(* The twin of the case above. A Traefik already at the requested tag is neither
+   pulled nor stopped; forcing a redeploy of it stops it, after the pull. *)
+let test_traefik_unchanged_plans_no_pull_or_stop () =
+  let unchanged = plan_traefik_against ~running:"traefik:v3.3.0" in
+  let actions = unchanged minimal_input in
+  check bool "no container is stopped" false (List.exists is_stop actions);
+  check bool "Traefik is not pulled" false
+    (List.exists (is_pull_of ~image:"traefik:v3.3.0") actions);
+  check_traefik_pulled_before_stop
+    (unchanged { minimal_input with force_traefik_redeploy = Some true })
+
+(* Across the whole plan, with both Traefik and the service being replaced, every
+   container stopped has its replacement pulled at an earlier position. *)
+let test_every_replacement_pulled_before_its_stop () =
+  let replacement_of =
+    [ ("traefik-1", "traefik:v3.3.0"); ("workload-1", "myapp:v1") ]
+  in
+  let context =
+    {
+      Simple.current_traefik =
+        Some (mock_container ~id:"traefik-1" ~image:"traefik:v2.0");
+      current_workload =
+        Some (mock_container ~id:"workload-1" ~image:"myapp:v0.9");
+    }
+  in
+  match Simple.plan minimal_input context with
+  | Error e -> Alcotest.fail ("plan failed: " ^ e)
+  | Ok actions ->
+      let stops =
+        List.filter_map
+          (fun (index, action) ->
+            match action with
+            | Simple.StopAndRemoveContainer container ->
+                Some (container.Docker.id, index)
+            | Simple.CreateNetwork _
+            | Simple.EnsureTraefik _
+            | Simple.PullImage _
+            | Simple.RunWorkload _ ->
+                None)
+          (List.mapi (fun index action -> (index, action)) actions)
+      in
+      check (list string) "both Traefik and the service are stopped"
+        [ "traefik-1"; "workload-1" ]
+        (List.sort String.compare (List.map fst stops));
+      List.iter
+        (fun (container_id, stop) ->
+          match List.assoc_opt container_id replacement_of with
+          | None ->
+              Alcotest.fail ("stop of an unexpected container " ^ container_id)
+          | Some image -> (
+              match position_of (is_pull_of ~image) actions with
+              | None -> Alcotest.fail ("no pull of the replacement " ^ image)
+              | Some pull ->
+                  check_before
+                    ~first:("PullImage of " ^ image, pull)
+                    ~second:("StopAndRemoveContainer of " ^ container_id, stop)))
+        stops
+
+(* The Engine API reads an empty [tag] on an image pull as every tag of the
+   repository, so an untagged [traefik.image] must be pulled as [latest], which
+   is what the engine creates the container from. *)
+let test_untagged_traefik_pulls_latest () =
+  let context = { Simple.current_traefik = None; current_workload = None } in
+  let input =
+    {
+      minimal_input with
+      traefik_image = Some (Test_helpers.image_reference "traefik");
+    }
+  in
+  match Simple.plan input context with
+  | Error e -> Alcotest.fail ("plan failed: " ^ e)
+  | Ok actions ->
+      let traefik_pulls =
+        List.filter_map
+          (function
+            | Simple.PullImage { image; _ }
+              when Image_reference.name image = "traefik" ->
+                Some (Image_reference.name image, Image_reference.pull_tag image)
+            | Simple.PullImage _
+            | Simple.CreateNetwork _
+            | Simple.EnsureTraefik _
+            | Simple.StopAndRemoveContainer _
+            | Simple.RunWorkload _ ->
+                None)
+          actions
+      in
+      check
+        (list (pair string string))
+        "Traefik is pulled at latest, never with an empty tag"
+        [ ("traefik", "latest") ]
+        traefik_pulls
 
 let test_plan_traefik_version_mismatch () =
   let traefik = mock_container ~id:"traefik-1" ~image:"traefik:v2.0" in
@@ -238,22 +414,62 @@ let test_plan_traefik_same_version_skips_redeploy () =
         (List.mem "CreateNetwork(bondi-network)" action_strs)
         true
 
+(* A digest is the version of a reference pinned by one, exactly as a tag is, so
+   a new pin redeploys Traefik and the same pin does not. The name is still not
+   compared: a Traefik already running under the same pin is left alone. *)
+let test_traefik_digest_change_redeploys () =
+  let pin hex = "traefik@sha256:" ^ String.make 64 hex in
+  let plan_against ~running =
+    let context =
+      {
+        Simple.current_traefik =
+          Some (mock_container ~id:"traefik-1" ~image:running);
+        current_workload = None;
+      }
+    in
+    let input =
+      {
+        minimal_input with
+        traefik_image = Some (Test_helpers.image_reference (pin 'b'));
+      }
+    in
+    match Simple.plan input context with
+    | Error e -> Alcotest.fail ("plan failed: " ^ e)
+    | Ok actions -> List.map action_string actions
+  in
+  check bool "a new digest stops the running Traefik" true
+    (List.mem "StopAndRemoveContainer" (plan_against ~running:(pin 'a')));
+  check bool "the same digest leaves it running" false
+    (List.mem "StopAndRemoveContainer" (plan_against ~running:(pin 'b')))
+
+(* A bare image id parses, as name [sha256] with the hex as its tag, so it is
+   compared like any other version and Traefik is redeployed over it. A new name
+   at the same tag is not a new version, so Traefik is left alone. *)
+let test_traefik_bare_id_redeploys_and_name_change_does_not () =
+  let stops ~running =
+    let context =
+      {
+        Simple.current_traefik =
+          Some (mock_container ~id:"traefik-1" ~image:running);
+        current_workload = None;
+      }
+    in
+    match Simple.plan minimal_input context with
+    | Error e -> Alcotest.fail ("plan failed: " ^ e)
+    | Ok actions ->
+        List.mem "StopAndRemoveContainer" (List.map action_string actions)
+  in
+  check bool "a bare image id is redeployed over" true
+    (stops ~running:("sha256:" ^ String.make 64 'a'));
+  check bool "another name at the same tag is left running" false
+    (stops ~running:"registry:5000/proxy:v3.3.0")
+
 let test_plan_with_registry_auth () =
   let context = { Simple.current_traefik = None; current_workload = None } in
   match Simple.plan input_with_registry context with
   | Error _ -> Alcotest.fail "plan should succeed"
   | Ok actions -> (
-      let pull =
-        List.find_opt
-          (function
-            | Simple.PullImage _ -> true
-            | Simple.CreateNetwork _
-            | Simple.EnsureTraefik _
-            | Simple.StopAndRemoveContainer _
-            | Simple.RunWorkload _ ->
-                false)
-          actions
-      in
+      let pull = List.find_opt (is_pull_of ~image:"myapp:v1") actions in
       match pull with
       | Some (Simple.PullImage { with_auth; _ }) ->
           check bool "PullImage uses auth" true with_auth
@@ -269,7 +485,7 @@ let test_plan_cron_only_skips_workload () =
     {
       minimal_input with
       traefik_domain_name = None;
-      traefik_image = Some "traefik:v3";
+      traefik_image = Some (Test_helpers.image_reference "traefik:v3");
       traefik_acme_email = Some "a@b.com";
     }
   in
@@ -434,17 +650,112 @@ let test_service_labels_carry_service_name () =
             (Some "my-service")
             (List.assoc_opt "bondi.name" labels))
 
+(* Two services behind one Traefik feed one load balancer if they share a
+   router or service name, so each is named after its own service. The keys are
+   the ones Traefik v3.6.8 was observed to serve a container by: the router's
+   rule and entrypoints and the service's load-balancer port. *)
+let test_router_named_after_service () =
+  let context = { Simple.current_traefik = None; current_workload = None } in
+  let traefik_keys service_name =
+    match
+      Simple.plan
+        {
+          minimal_input with
+          service_name = Some (Test_helpers.router_name service_name);
+        }
+        context
+    with
+    | Error e -> Alcotest.failf "plan for %s failed: %s" service_name e
+    | Ok actions -> (
+        match extract_workload_labels actions with
+        | None -> Alcotest.fail "expected labels on workload container"
+        | Some labels ->
+            List.map fst labels
+            |> List.filter (fun key ->
+                String.starts_with ~prefix:"traefik.http.routers." key
+                || String.starts_with ~prefix:"traefik.http.services." key))
+  in
+  let expected name =
+    [
+      "traefik.http.routers." ^ name ^ ".rule";
+      "traefik.http.routers." ^ name ^ ".entrypoints";
+      "traefik.http.routers." ^ name ^ ".tls";
+      "traefik.http.routers." ^ name ^ ".tls.certresolver";
+      "traefik.http.services." ^ name ^ ".loadbalancer.server.port";
+    ]
+  in
+  let api = traefik_keys "api" and web = traefik_keys "web-app" in
+  check (list string) "the api service's keys are named api" (expected "api")
+    api;
+  check (list string) "the web-app service's keys are named web-app"
+    (expected "web-app") web;
+  check (list string) "the two services share no key" []
+    (List.filter (fun key -> List.mem key web) api);
+  check (list string) "no key is named bondi" []
+    (List.filter
+       (fun key -> Bondi_common.String_utils.contains ~needle:".bondi." key)
+       (api @ web))
+
+(* A reference with no tag and no digest is the one the engine resolves as
+   [latest]. The registry-port case is the one a split on ':' read as a tag. *)
 let test_service_image_reference () =
+  let reference = Test_helpers.image_reference in
   check string "untagged gains :latest" "myapp:latest"
-    (Simple.service_image_reference "myapp");
+    (Simple.service_image_reference (reference "myapp"));
+  check string "untagged behind a registry port gains :latest"
+    "registry:5000/app:latest"
+    (Simple.service_image_reference (reference "registry:5000/app"));
   check string "tagged is kept" "myapp:v1"
-    (Simple.service_image_reference "myapp:v1");
-  check string "unparseable is kept as written" "a:b:c"
-    (Simple.service_image_reference "a:b:c")
+    (Simple.service_image_reference (reference "myapp:v1"));
+  check string "a digest is kept as written"
+    ("old/worker@sha256:" ^ String.make 64 'a')
+    (Simple.service_image_reference
+       (reference ("old/worker@sha256:" ^ String.make 64 'a')))
+
+(* The certificate server the deploy carries reaches the command of the Traefik
+   the plan ensures, so the resolver orders from it rather than from Traefik's
+   default. *)
+let test_acme_ca_server_reaches_traefik_config () =
+  let url = "https://pebble:14000/dir" in
+  match Bondi_common.Acme_ca_server.of_string url with
+  | Error msg -> fail ("the fixture URL was refused: " ^ msg)
+  | Ok server -> (
+      let input = { minimal_input with traefik_acme_ca_server = Some server } in
+      let context =
+        { Simple.current_traefik = None; current_workload = None }
+      in
+      match Simple.plan input context with
+      | Error e -> fail ("plan failed: " ^ e)
+      | Ok actions ->
+          let commands =
+            List.filter_map
+              (function
+                | Simple.EnsureTraefik { traefik_config; _ } ->
+                    Some
+                      (Option.value ~default:[]
+                         traefik_config.container_config.cmd)
+                | Simple.CreateNetwork _
+                | Simple.StopAndRemoveContainer _
+                | Simple.PullImage _
+                | Simple.RunWorkload _ ->
+                    None)
+              actions
+          in
+          check (list bool) "one EnsureTraefik, whose command carries the URL"
+            [ true ]
+            (List.map
+               (List.mem
+                  ("--certificatesResolvers.bondi_resolver.acme.caServer=" ^ url))
+               commands))
 
 let () =
   run "Simple.plan"
     [
+      ( "traefik command",
+        [
+          test_case "acme_ca_server reaches the traefik config" `Quick
+            test_acme_ca_server_reaches_traefik_config;
+        ] );
       ( "empty context",
         [
           test_case "no traefik config" `Quick
@@ -460,13 +771,25 @@ let () =
             test_plan_traefik_version_mismatch;
           test_case "skips traefik redeploy when same version" `Quick
             test_plan_traefik_same_version_skips_redeploy;
+          test_case "redeploys traefik when its digest changes" `Quick
+            test_traefik_digest_change_redeploys;
+          test_case "bare id redeploys, name change at same tag does not" `Quick
+            test_traefik_bare_id_redeploys_and_name_change_does_not;
+          test_case "an untagged traefik pulls latest" `Quick
+            test_untagged_traefik_pulls_latest;
         ] );
       ( "ordering",
         [
           test_case "redeploy pulls before it stops" `Quick
             test_redeploy_pulls_before_stop;
-          test_case "traefik redeploy keeps its order" `Quick
-            test_traefik_redeploy_keeps_order;
+          test_case "a registry-port reference pulls before it stops" `Quick
+            test_registry_port_reference_pulls_before_stop;
+          test_case "traefik pulls before it stops" `Quick
+            test_traefik_pull_before_stop;
+          test_case "an unchanged traefik plans no pull or stop" `Quick
+            test_traefik_unchanged_plans_no_pull_or_stop;
+          test_case "every replacement is pulled before its stop" `Quick
+            test_every_replacement_pulled_before_its_stop;
         ] );
       ( "registry",
         [
@@ -505,5 +828,7 @@ let () =
             test_deploy_adds_bondi_logs_label;
           test_case "carries the service name" `Quick
             test_service_labels_carry_service_name;
+          test_case "router named after the service" `Quick
+            test_router_named_after_service;
         ] );
     ]

@@ -146,6 +146,48 @@ let test_inventory_reads_image_and_tag_separately () =
         ]
         pairs
 
+(* The references the orchestrator's own status splits, read from the host's
+   listing. A registry on a port is not a tag, a host with no dot is still a
+   registry when it has a port, and a reference pinned by digest is reported
+   whole with no tag, which is how the orchestrator reports it: the two sources
+   must agree on where every split falls, or the status report flags one
+   container as two. *)
+let test_split_registry_port_reference () =
+  let digest = "sha256:" ^ String.make 64 'c' in
+  let pinned = "registry:5000/app:1.2.3@" ^ digest in
+  let listing =
+    listing_of
+      [
+        ("tagged", "registry:5000/app:1.2.3", "running");
+        ("untagged", "localhost:5000/app", "running");
+        ("pinned", pinned, "running");
+      ]
+  in
+  let inspection =
+    inspection_of
+      [
+        ("tagged", "undeclared", "", "0", created);
+        ("untagged", "undeclared", "", "0", created);
+        ("pinned", "undeclared", "", "0", created);
+      ]
+  in
+  match inventory ~listing:(Ok listing) ~inspection:(Ok inspection) () with
+  | Inventory.Unreadable_listing failure ->
+      failf "expected an observed inventory, got unreadable: %s"
+        (Remote_exec.message failure)
+  | Inventory.Observed containers ->
+      check
+        (list (pair string string))
+        "each reference is split where the orchestrator splits it"
+        [
+          ("registry:5000/app", "1.2.3");
+          ("localhost:5000/app", "");
+          (pinned, "");
+        ]
+        (List.map
+           (fun (c : Inventory.container) -> (c.image, c.tag))
+           containers)
+
 (* Docker reports nothing at all for a container that declares no healthcheck,
    and a report that turns silence into a positive result is the defect this
    module exists to prevent. *)
@@ -406,6 +448,8 @@ let () =
             test_inventory_parses_ps_listing;
           test_case "reads the image and its tag as separate fields" `Quick
             test_inventory_reads_image_and_tag_separately;
+          test_case "splits a registry port reference as the server does" `Quick
+            test_split_registry_port_reference;
           test_case "a listing that could not be run is not an empty inventory"
             `Quick test_inventory_unreadable_listing_is_not_empty_inventory;
           test_case "a listing that found nothing is an empty inventory" `Quick

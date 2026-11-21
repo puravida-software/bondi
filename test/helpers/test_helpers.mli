@@ -43,6 +43,16 @@ val bind_mount :
     lives here, not in the server helpers, because the client suites need it too
     and only this library is reachable from both. *)
 
+val router_name : string -> Bondi_common.Router_name.t
+(** [router_name text] is the name [text] parses to, failing the test when
+    {!Bondi_common.Router_name.of_string} refuses it. *)
+
+val image_reference : string -> Bondi_common.Image_reference.t
+(** [image_reference text] is the reference [text] parses to, failing the test
+    when {!Bondi_common.Image_reference.of_string} refuses it, so a suite that
+    needs a valid reference as a fixture does not restate the match. It lives
+    here for the reason {!bind_mount} does. *)
+
 val mount_fields : Bondi_common.Bind_mount.t -> string * string * bool
 (** [mount_fields mount] is [(host, container, read_only)], the shape suites
     compare mounts by. *)

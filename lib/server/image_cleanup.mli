@@ -34,8 +34,17 @@ val declared_of_input : Strategy.Simple.deploy_input -> string list
 (** Pure. The image references a deploy declares, each as [name:tag]: the
     service image when the request carries one, then every cron job's image in
     the order declared. An untagged service image is declared as [name:latest],
-    the tag its container runs under. A reference that does not parse is
-    declared as written. *)
+    the tag its container runs under. Every other reference is declared as
+    written, registry and port included. *)
+
+val repositories : string list -> string list
+(** Pure. The repositories the image listing is filtered by, one for each
+    distinct repository the declared references name, sorted: each reference's
+    {!Bondi_common.Image_reference.name}, so a registry and its port stay in it
+    and a port's [:] is never read as a tag. A reference that does not parse
+    names none and is left out, so cleanup lists less rather than guessing.
+
+    Exposed for its test: [run] is the only caller, and it needs Docker. *)
 
 val plan : context -> action list
 (** Pure. The replaced ids followed by the candidate ids, minus every id in

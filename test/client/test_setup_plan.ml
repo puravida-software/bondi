@@ -139,8 +139,8 @@ let minimal_server =
 
 let minimal_user_service =
   {
-    Config_file.name = "my-service";
-    Config_file.image = "app";
+    Config_file.name = Test_helpers.router_name "my-service";
+    Config_file.image = Test_helpers.image_reference "app";
     Config_file.port = 8080;
     Config_file.registry_user = None;
     Config_file.registry_pass = None;
@@ -1408,7 +1408,7 @@ let test_plan_cron_jobs_force_restart () =
   let cron_job =
     {
       Config_file.name = "backup";
-      Config_file.image = "backup:v1";
+      Config_file.image = Test_helpers.image_reference "backup";
       Config_file.schedule = "0 0 * * *";
       Config_file.network = None;
       Config_file.env_vars = None;
@@ -1465,7 +1465,7 @@ let test_plan_cron_only_no_acme () =
   let cron_job =
     {
       Config_file.name = "backup";
-      Config_file.image = "backup:v1";
+      Config_file.image = Test_helpers.image_reference "backup";
       Config_file.schedule = "0 0 * * *";
       Config_file.network = None;
       Config_file.env_vars = None;
@@ -1513,7 +1513,7 @@ let test_plan_requires_curl_when_cron_jobs_declared () =
   let cron_job =
     {
       Config_file.name = "backup";
-      Config_file.image = "backup:v1";
+      Config_file.image = Test_helpers.image_reference "backup";
       Config_file.schedule = "0 0 * * *";
       Config_file.network = None;
       Config_file.env_vars = None;
@@ -1571,7 +1571,7 @@ let test_plan_requires_cron_docker_when_cron_jobs_declared () =
   let cron_job =
     {
       Config_file.name = "backup";
-      Config_file.image = "backup:v1";
+      Config_file.image = Test_helpers.image_reference "backup";
       Config_file.schedule = "0 0 * * *";
       Config_file.network = None;
       Config_file.env_vars = None;

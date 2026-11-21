@@ -176,7 +176,7 @@ Every subcommand leaves behind one of these:
 |---|---|
 | `0` | Success. |
 | `1` | A failure to carry out a well-formed request. |
-| `2` | A request that was wrong as written — a payload that does not decode, an image with no tag. |
+| `2` | A request that was wrong as written — a payload that does not decode or holds a value the server refuses (a malformed image reference, an image with neither tag nor digest, an unroutable or reserved service name, a bad `acme_ca_server`). |
 | `3` | The box is not ready; it named what is wrong. |
 
 `123`, `124` and `125` belong to the command-line library itself and mean an

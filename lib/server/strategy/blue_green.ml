@@ -253,11 +253,11 @@ let config_of_input (input : Simple.deploy_input) :
     (blue_green_config, string) result =
   let container_name =
     match input.service_name with
-    | Some name -> name
+    | Some name -> Bondi_common.Router_name.to_string name
     | None -> "bondi-service"
   in
   let temp_container_name = container_name ^ "-new" in
-  let* service_cfg = Simple.service_config input in
+  let* _, service_cfg = Simple.service_config input in
   let drain_grace_period =
     Option.value ~default:default_drain_grace_period input.drain_grace_period
   in

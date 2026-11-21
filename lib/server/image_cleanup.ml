@@ -22,7 +22,8 @@ let declared_of_input : Simple.deploy_input -> string list =
   in
   let cron =
     List.map
-      (fun (job : Simple.cron_job) -> job.image)
+      (fun (job : Simple.cron_job) ->
+        Bondi_common.Image_reference.to_string job.image)
       (Option.value input.cron_jobs ~default:[])
   in
   service @ cron
@@ -95,20 +96,23 @@ let interpret :
     actions
 
 (* The repository a declared reference names, which is what the listing's
-   [reference] filter is given so that every tag of it is listed. A reference
-   that does not parse names no repository and lists nothing: cleanup removes
-   less rather than guessing at a name. *)
+   [reference] filter is given so that every tag of it is listed: the
+   reference's name, registry and port included. A reference that does not
+   parse names no repository and lists nothing: cleanup removes less rather
+   than guessing at a name. Every declared reference was printed from a parsed
+   one, so none fails here in practice. *)
 let repository reference =
-  match Simple.parse_image_and_tag reference with
-  | Ok (name, _) -> Some name
-  | Error _ -> None
+  match Bondi_common.Image_reference.of_string reference with
+  | Ok parsed -> Some (Bondi_common.Image_reference.name parsed)
+  | Error (Bondi_common.Image_reference.Empty | Malformed _) -> None
+
+let repositories declared =
+  List.sort_uniq String.compare (List.filter_map repository declared)
 
 let gather ~client ~net ~clock ~replaced ~declared =
   Docker.Client.with_request_bound ~clock ~what:"image cleanup lookups"
   @@ fun () ->
-  let repositories =
-    List.sort_uniq String.compare (List.filter_map repository declared)
-  in
+  let repositories = repositories declared in
   let rec list_candidates acc = function
     | [] -> Ok (List.concat (List.rev acc))
     | reference :: rest ->

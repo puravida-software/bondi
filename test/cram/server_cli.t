@@ -18,7 +18,7 @@ carries registry credentials and environment variables.
   > {"image": 5}
   > EOF
   $ bondi-server deploy < wrong-shape.json
-  invalid deploy payload: Simple.deploy_input.image
+  invalid deploy payload: image: not a valid image reference. A reference is [registry/]path[:tag][@digest], with a lowercase path, and a digest of sha256, sha384 or sha512 in lowercase hex
   [2]
 
 A body that is not JSON at all is a different refusal, which is what shows that

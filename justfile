@@ -99,10 +99,16 @@ verify-server-image-negative TAG:
 # under the simple and the blue-green strategy, into a local registry, network
 # and Traefik the script starts itself: each arm asserts by container id that the
 # new tag runs, the old container is gone and a request through that Traefik
-# reaches the new one. No registry credential is needed and no certificate is
-# ordered, and the arms refuse to start on an engine that already holds the
-# network Bondi deploys to, a traefik container or anything on host port 443, so
-# a box hosting a real Bondi deployment fails this recipe. The negative arm runs
+# reaches the new one, two services deployed side by side are each reached
+# through their own container, and a deploy whose pull fails on a layer the
+# registry does not have leaves the old container serving. A deploy asking for a
+# Traefik image that cannot be pulled leaves the running Traefik serving, and
+# the last arm has a deploy replace that Traefik with one that orders its
+# certificate from a local Pebble the script also starts. No registry credential
+# is needed and no Let's Encrypt certificate is ordered, and the arms refuse to
+# start on an engine that already holds the network Bondi deploys to, a traefik
+# container, anything on host port 80, 443 or the registry's, or the host's
+# acme.json, so a box hosting a real Bondi deployment fails this recipe. The negative arm runs
 # in the same recipe rather than beside it, so this file and CI each hold one
 # line for the pair and cannot come to hold different numbers of them. The
 # script refuses any engine that is not Docker Engine: a rootless one

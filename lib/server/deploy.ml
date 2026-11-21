@@ -1,4 +1,5 @@
 module Simple = Strategy.Simple
+module Image_reference = Bondi_common.Image_reference
 
 let ( let* ) = Result.bind
 
@@ -25,41 +26,52 @@ let deployment_strategy_of_string = function
 (* Pure helpers (testable)                                                   *)
 (* ------------------------------------------------------------------------- *)
 
-(* Extract registry host from image name for AuthConfig.serveraddress.
-   e.g. registry.gitlab.com/org/repo:tag -> registry.gitlab.com *)
-let serveraddress_from_image image =
-  let name =
-    match String.split_on_char ':' image with
-    | n :: _ -> n
-    | [] -> image
-  in
-  match String.split_on_char '/' name with
-  | registry :: _ :: _ -> Ok registry
-  | _ ->
-      Error
-        (Printf.sprintf
-           "cannot determine registry from image %s — use a fully qualified \
-            image (e.g. registry.example.com/org/app)"
-           image)
+let auth_config_json ~user ~pass ~serveraddress =
+  `Assoc
+    [
+      ("serveraddress", `String serveraddress);
+      ("username", `String user);
+      ("password", `String pass);
+    ]
 
-let auth_config_json ~user ~pass ?serveraddress () =
-  let base = [ ("username", `String user); ("password", `String pass) ] in
-  let entries =
-    match serveraddress with
-    | Some addr -> ("serveraddress", `String addr) :: base
-    | None -> base
-  in
-  `Assoc entries
+(* The registry is the reference's own, as the one parser both ends share reads
+   it, so the credentials go to the registry the pull goes to, a port included.
 
-let registry_auth (input : Simple.deploy_input) =
-  match (input.image, input.registry_user, input.registry_pass) with
-  | Some image, Some user, Some pass -> (
-      match serveraddress_from_image image with
-      | Ok server ->
-          let json = auth_config_json ~user ~pass ~serveraddress:server () in
-          Some (Base64.encode_string (Yojson.Safe.to_string json))
-      | Error _ -> None)
-  | _ -> None
+   A reference that names no registry but has a namespace, as a private Docker
+   Hub repository's [myorg/app] does, keeps what earlier releases sent: the
+   credentials, with the first path component ([myorg]) as serveraddress, so the
+   Engine is handed them for the Docker Hub pull exactly as before. A
+   single-component name ([nginx]) never sent credentials and sends none.
+
+   The Engine reads the header as base64url, so a credential whose standard
+   encoding carries '+' or '/' would reach it as something else. Padding is
+   kept, as Python's urlsafe_b64encode keeps it. *)
+let registry_auth reference ~user ~pass =
+  let serveraddress =
+    match Image_reference.registry reference with
+    | Some registry -> Some registry
+    | None -> (
+        let name = Image_reference.name reference in
+        match String.index_opt name '/' with
+        | Some slash -> Some (String.sub name 0 slash)
+        | None -> None)
+  in
+  match (serveraddress, user, pass) with
+  | Some serveraddress, Some user, Some pass ->
+      let json = auth_config_json ~user ~pass ~serveraddress in
+      Some
+        (Base64.encode_string ~pad:true ~alphabet:Base64.uri_safe_alphabet
+           (Yojson.Safe.to_string json))
+  | None, _, _
+  | _, None, _
+  | _, _, None ->
+      None
+
+let registry_auth_for_service (input : Simple.deploy_input) =
+  match input.image with
+  | Some image ->
+      registry_auth image ~user:input.registry_user ~pass:input.registry_pass
+  | None -> None
 
 (* Both of the job's files are placed on the box here, at deploy time, and read
    back when the job fires: the run payload the crontab line points at, and the
@@ -92,22 +104,12 @@ let write_cron_files (cron_jobs : Simple.cron_job list option) :
     (Option.value cron_jobs ~default:[])
 
 let registry_auth_for_cron (c : Simple.cron_job) =
-  match (c.registry_user, c.registry_pass) with
-  | Some user, Some pass -> (
-      match serveraddress_from_image c.image with
-      | Ok server ->
-          let json = auth_config_json ~user ~pass ~serveraddress:server () in
-          Some (Base64.encode_string (Yojson.Safe.to_string json))
-      | Error _ -> None)
-  | _ -> None
+  registry_auth c.image ~user:c.registry_user ~pass:c.registry_pass
 
-let image_name_and_tag image = Simple.require_image_and_tag image
-
-let tag_from_image image =
-  match Simple.parse_image_and_tag image with
-  | Ok (_name, "") -> "unknown"
-  | Ok (_name, tag) -> tag
-  | Error _ -> "unknown"
+let tag_from_image reference =
+  match Image_reference.tag reference with
+  | Some tag -> tag
+  | None -> "unknown"
 
 (* ------------------------------------------------------------------------- *)
 (* Types                                                                     *)
@@ -115,7 +117,6 @@ let tag_from_image image =
 
 type deploy_action =
   | EnsureCronNetwork
-  | PullCronImages of Simple.cron_job list
   | UpsertCrontab of Simple.cron_job list option
   | UpdateRestartPolicy of {
       container_id : string;
@@ -221,7 +222,7 @@ let cron_plan (input : Simple.deploy_input) :
   | Some jobs ->
       let* () = cron_name_check jobs in
       let* network_actions = cron_network_action jobs in
-      Ok (network_actions @ [ PullCronImages jobs; UpsertCrontab (Some jobs) ])
+      Ok (network_actions @ [ UpsertCrontab (Some jobs) ])
 
 (* The reverse proxy's restart policy is decided here rather than inside a
    strategy. It is a property of the box, not of how the service is rolled
@@ -274,23 +275,78 @@ let traefik_policy_plan ~strategy (input : Simple.deploy_input)
             };
         ]
 
+type pull =
+  | PullWorkload of Image_reference.t
+  | PullTraefik of Image_reference.t
+  | PullCronImage of Simple.cron_job
+
+(* Every image the deploy will run, named before anything on the box moves.
+   Ordering is a decision made here, not by the interpreters: [deploy] runs this
+   list to its end ahead of the restart-policy write, the snapshot, the
+   workload's stop and create, and the crontab write, so a pull that fails
+   leaves the box exactly as it was.
+
+   The proxy is pulled only when the simple strategy will create or replace it:
+   blue-green refers to no proxy, and a proxy that is kept is not recreated. A
+   cron-only deploy has no service, so it has no workload and no proxy.
+   [workload_pulled] is true when selecting the strategy already pulled the
+   workload, which it must do to read the image's healthcheck. *)
+let pull_plan ~strategy ~workload_pulled (input : Simple.deploy_input)
+    (context : Simple.deploy_context) : pull list =
+  let has_service = Option.is_some input.service_name in
+  let traefik =
+    match (strategy, input.traefik_image) with
+    | Simple, Some image when has_service && Simple.should_run_traefik input
+      -> (
+        match Simple.traefik_decision input context with
+        | Simple.Traefik_keep -> []
+        | Simple.Traefik_absent
+        | Simple.Traefik_replace _ ->
+            [ PullTraefik image ])
+    | Simple, _
+    | Blue_green, _ ->
+        []
+  in
+  let workload =
+    match input.image with
+    | Some image when has_service && not workload_pulled ->
+        [ PullWorkload image ]
+    | Some _
+    | None ->
+        []
+  in
+  let cron =
+    List.map
+      (fun job -> PullCronImage job)
+      (Option.value ~default:[] input.cron_jobs)
+  in
+  traefik @ workload @ cron
+
 (* ------------------------------------------------------------------------- *)
 (* Phase 2: Interpreter                                                      *)
 (* ------------------------------------------------------------------------- *)
 
+let interpret_pulls ~client ~net (input : Simple.deploy_input)
+    (pulls : pull list) : (unit, string) result =
+  let pull_one = function
+    | PullWorkload reference ->
+        Docker.Client.pull_image client ~net ~reference
+          ~registry_auth:(registry_auth_for_service input)
+    | PullTraefik reference ->
+        Docker.Client.pull_image_no_auth client ~net ~reference
+    | PullCronImage c ->
+        let* reference = Payload_codec.require_tag_or_digest c.image in
+        Docker.Client.pull_image client ~net ~reference
+          ~registry_auth:(registry_auth_for_cron c)
+  in
+  List.fold_left
+    (fun acc pull ->
+      let* () = acc in
+      pull_one pull)
+    (Ok ()) pulls
+
 let interpret ~clock ~client ~net (actions : deploy_action list) :
     (unit, string) result =
-  let rec pull_cron_images = function
-    | [] -> Ok ()
-    | (c : Simple.cron_job) :: rest ->
-        let* image_name, tag = image_name_and_tag c.image in
-        let auth = registry_auth_for_cron c in
-        let* () =
-          Docker.Client.pull_image client ~net ~image:image_name ~tag
-            ~registry_auth:auth
-        in
-        pull_cron_images rest
-  in
   let rec run = function
     | [] -> Ok ()
     | EnsureCronNetwork :: rest ->
@@ -298,9 +354,6 @@ let interpret ~clock ~client ~net (actions : deploy_action list) :
           Docker.Client.create_network_if_not_exists client ~net
             ~network_name:Bondi_common.Defaults.network_name
         in
-        run rest
-    | PullCronImages jobs :: rest ->
-        let* () = pull_cron_images jobs in
         run rest
     | UpsertCrontab cron_jobs :: rest -> (
         (* The job's files are written before the crontab, not after: a line
@@ -335,7 +388,8 @@ let interpret ~clock ~client ~net (actions : deploy_action list) :
    caller wrote that failed a precondition, which is [Invalid_request] and
    carries that class's exit code. The two messages are unchanged: they were
    written to be read after a caller-supplied prefix and are still worded that
-   way. *)
+   way. An image reference that does not parse is refused by the deploy input's
+   own codec, so it arrives here as a payload that did not decode. *)
 let decode_input body : (Simple.deploy_input, Handler_error.t) result =
   match Yojson.Safe.from_string body with
   | exception Yojson.Json_error msg ->
@@ -367,16 +421,14 @@ let has_healthcheck ~client ~net ~image =
 let try_pull_main_image ~client ~net input =
   match input.Simple.image with
   | None -> Error "image is required for service deployment"
-  | Some image ->
-      let auth = registry_auth input in
-      let* image_name, tag = image_name_and_tag image in
-      Docker.Client.pull_image client ~net ~image:image_name ~tag
-        ~registry_auth:auth
-      |> Result.map_error (fun msg ->
-          Printf.sprintf "failed to pull image %s: %s" image msg)
+  | Some reference ->
+      let auth = registry_auth_for_service input in
+      (* [pull_image] names the reference in its failure itself. The reference
+         has a tag or a digest: decode refused one that has neither. *)
+      Docker.Client.pull_image client ~net ~reference ~registry_auth:auth
 
 let select_strategy_and_prepare ~client ~net input :
-    (deployment_strategy * string, string) result =
+    (deployment_strategy * string * bool, string) result =
   match input.Simple.deployment_strategy with
   | Some s -> (
       match deployment_strategy_of_string s with
@@ -386,18 +438,22 @@ let select_strategy_and_prepare ~client ~net input :
                "unknown deployment_strategy: %s (valid values: blue-green, \
                 simple)"
                s)
-      | Some Simple -> Ok (Simple, "configured in bondi.yaml")
+      | Some Simple -> Ok (Simple, "configured in bondi.yaml", false)
       | Some Blue_green ->
-          let* () = try_pull_main_image ~client ~net input in
-          Ok (Blue_green, "configured in bondi.yaml"))
+          (* Pulled with the rest, by [pull_plan], before anything moves. *)
+          if Option.is_none input.image then
+            Error "image is required for service deployment"
+          else Ok (Blue_green, "configured in bondi.yaml", false))
   | None -> (
       let* () = try_pull_main_image ~client ~net input in
       match input.image with
       | None -> Error "image is required for service deployment"
       | Some image ->
-          if has_healthcheck ~client ~net ~image then
-            Ok (Blue_green, "image has HEALTHCHECK")
-          else Ok (Simple, "image has no HEALTHCHECK"))
+          if
+            has_healthcheck ~client ~net
+              ~image:(Image_reference.to_string image)
+          then Ok (Blue_green, "image has HEALTHCHECK", true)
+          else Ok (Simple, "image has no HEALTHCHECK", true))
 
 let deploy_workload ~clock ~client ~net ~strategy input =
   match strategy with
@@ -444,9 +500,34 @@ let converge_traefik_restart_policy ~clock ~client ~net ~strategy input :
 
 (* Everything below the plan is Bondi acting on the caller's behalf, so a
    failure there is Bondi's fault by construction. [cron_plan] is the one step
-   that can fail on what the caller wrote, and it classifies its own error. *)
+   in [deploy] that can fail on what the caller wrote, and it classifies its own
+   error; [decode_input] refused the rest before [deploy] was called. *)
 let orchestrator_step result =
   Result.map_error (fun m -> Handler_error.Orchestrator_failure m) result
+
+(* The order of the whole deploy, as a value. [deploy] only interprets it, so
+   where a pull sits relative to every change is decided here and can be read
+   and tested without a daemon. Every image is pulled first; the restart-policy
+   write, the snapshot, the workload and the crontab follow; cleanup is last. *)
+type deploy_step =
+  | Pull_images
+  | Converge_restart_policy
+  | Snapshot_replaced
+  | Deploy_workload
+  | Apply_cron
+  | Clean_up
+
+let deploy_steps ~has_service =
+  if has_service then
+    [
+      Pull_images;
+      Converge_restart_policy;
+      Snapshot_replaced;
+      Deploy_workload;
+      Apply_cron;
+      Clean_up;
+    ]
+  else [ Pull_images; Apply_cron; Clean_up ]
 
 (* The whole decision, naming no transport. [decode_input] runs above it and
    the response encoder below it, and neither is this function's business.
@@ -465,7 +546,7 @@ let deploy ~clock ~net input : (deploy_response, Handler_error.t) result =
   try
     let client =
       let unnegotiated =
-        Docker.Client.create ?registry_auth:(registry_auth input) ()
+        Docker.Client.create ?registry_auth:(registry_auth_for_service input) ()
       in
       match Docker.Client.negotiate unnegotiated ~net with
       | Ok client -> client
@@ -487,40 +568,60 @@ let deploy ~clock ~net input : (deploy_response, Handler_error.t) result =
       Image_cleanup.run ~client ~net ~clock ~replaced
         ~declared:(Image_cleanup.declared_of_input input)
     in
-    match input.Simple.service_name with
-    | None ->
-        (* Cron-only deploy: skip main image pull and workload deployment *)
-        let* () = orchestrator_step (interpret ~clock ~client ~net actions) in
-        clean_up ~replaced:[];
-        Ok
-          (build_response ~strategy:Simple ~strategy_reason:"cron-only deploy"
-             input)
-    | Some service_name ->
-        let* strategy, strategy_reason =
+    let* strategy, strategy_reason, workload_pulled =
+      match input.Simple.service_name with
+      | None -> Ok (Simple, "cron-only deploy", false)
+      | Some _ ->
           orchestrator_step (select_strategy_and_prepare ~client ~net input)
-        in
-        (* Before the workload moves, and outside the strategy dispatch: both
-           strategies leave the proxy running, so neither is a place this can be
-           done once. *)
-        let* () =
+    in
+    let service_name = input.service_name in
+    let replaced = ref [] in
+    let run_step = function
+      | Pull_images ->
+          (* Every image the deploy needs, before the first thing changes. A
+             pull that fails here has moved nothing. Reading the box to plan
+             it is read-only. *)
+          orchestrator_step
+            (let* context =
+               match service_name with
+               | None ->
+                   Ok { Simple.current_traefik = None; current_workload = None }
+               | Some _ -> Simple.gather_context ~client ~net input
+             in
+             interpret_pulls ~client ~net input
+               (pull_plan ~strategy ~workload_pulled input context))
+      | Converge_restart_policy ->
           orchestrator_step
             (converge_traefik_restart_policy ~clock ~client ~net ~strategy input)
-        in
-        (* Immediately before the workload moves, because afterwards the
-           replaced containers are gone and so is the record of what they ran.
-           A snapshot that fails removes only the replaced images from cleanup
-           and must not block the deploy, the rule [gather_traefik_policy]
-           follows for the same reason. *)
-        let replaced =
-          Image_cleanup.snapshot_replaced ~client ~net ~clock ~service_name
-        in
-        let* () =
+      | Snapshot_replaced ->
+          (* Immediately before the workload moves, because afterwards the
+             replaced containers are gone and so is the record of what they
+             ran. A snapshot that fails removes only the replaced images from
+             cleanup and must not block the deploy. *)
+          Option.iter
+            (fun name ->
+              replaced :=
+                Image_cleanup.snapshot_replaced ~client ~net ~clock
+                  ~service_name:(Bondi_common.Router_name.to_string name))
+            service_name;
+          Ok ()
+      | Deploy_workload ->
           orchestrator_step
             (deploy_workload ~clock ~client ~net ~strategy input)
-        in
-        let* () = orchestrator_step (interpret ~clock ~client ~net actions) in
-        clean_up ~replaced;
-        Ok (build_response ~strategy ~strategy_reason input)
+      | Apply_cron -> orchestrator_step (interpret ~clock ~client ~net actions)
+      | Clean_up ->
+          clean_up ~replaced:!replaced;
+          Ok ()
+    in
+    let* () =
+      List.fold_left
+        (fun acc step ->
+          let* () = acc in
+          run_step step)
+        (Ok ())
+        (deploy_steps ~has_service:(Option.is_some service_name))
+    in
+    Ok (build_response ~strategy ~strategy_reason input)
   with
   | Eio.Cancel.Cancelled _ as cancelled -> raise cancelled
   | exn -> Error (Handler_error.Orchestrator_failure (Printexc.to_string exn))

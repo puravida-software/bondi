@@ -46,7 +46,19 @@ let networking_conf_of_network :
       in
       Some { endpoints_config = Some [ (network, endpoint) ] }
 
-let parse_image image = Strategy.Simple.require_image_and_tag image
+(* The image to run, as written, when it parses and pins a tag or a digest. The
+   reference is printed back whole, so a registry port and a digest reach the
+   container unchanged. A refusal of an image that does not parse names the
+   field and restates the grammar, in the deploy decoder's words, without the
+   rejected text: it may hold a pasted credential, and the message never
+   carries a value from the payload (see [Handler_error.message]). *)
+let parse_image image =
+  match Bondi_common.Image_reference.of_string image with
+  | Error (Bondi_common.Image_reference.Empty | Malformed _) ->
+      Error (Payload_codec.image_reference_refusal ~field:"image")
+  | Ok reference ->
+      Result.map Bondi_common.Image_reference.to_string
+        (Payload_codec.require_tag_or_digest reference)
 
 let temp_container_name job =
   let ts = Unix.gettimeofday () |> Float.to_string in
@@ -180,7 +192,7 @@ let prepare ~deliver body : (run_payload * string, Handler_error.t) result =
   | Error msg ->
       dispatch_alert ~deliver ~payload ~outcome:(outcome_of_result (Error msg));
       Error (Handler_error.Invalid_request msg)
-  | Ok (image_name, tag) -> Ok (payload, image_name ^ ":" ^ tag)
+  | Ok full_image -> Ok (payload, full_image)
 
 (* Classify the container lifecycle result: a Docker-level failure is Bondi's
    fault, not the caller's. *)

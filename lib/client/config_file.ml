@@ -51,9 +51,96 @@ type volumes = Bondi_common.Bind_mount.t list
 let volumes_of_yojson = Bondi_common.Bind_mount.list_of_yojson
 let volumes_to_yojson = Bondi_common.Bind_mount.list_to_yojson
 
+module Image_reference = Bondi_common.Image_reference
+
+(* Every image the file names is decoded through the reference type the
+   orchestrator decodes its payload with, so a reference this client accepts is
+   one the server splits the same way, and one it refuses is refused here,
+   before any server is contacted.
+
+   The refusal names the field and echoes the value. Unlike the orchestrator's
+   refusal, which reaches logs and cron mail and so leaves the value out, this
+   one is printed only to the terminal of the operator who wrote the file, and
+   the value is what tells them which line to fix. *)
+let reference_of_yojson ~field = function
+  | `String text -> (
+      match Image_reference.of_string text with
+      | Ok reference -> Ok reference
+      | Error (Image_reference.Empty | Image_reference.Malformed _) ->
+          Error (Printf.sprintf "%s %S is not an image reference" field text))
+  | (`Null | `Bool _ | `Int _ | `Intlit _ | `Float _ | `Assoc _ | `List _) as
+    other ->
+      Error
+        (Printf.sprintf "%s must be a string, got %s" field
+           (Yojson.Safe.to_string other))
+
+(* The service's image and each cron job's are names the deploy appends the
+   command line's tag to, so a tag or a digest written here has nowhere to go:
+   the composed reference would carry two. Refused here rather than when the
+   tag is appended, so the message can say which field to change. *)
+let untagged_name_of_yojson ~field json =
+  let ( let* ) = Result.bind in
+  let* reference = reference_of_yojson ~field json in
+  match (Image_reference.tag reference, Image_reference.digest reference) with
+  | None, None -> Ok reference
+  | Some _, _
+  | None, Some _ ->
+      Error
+        (Printf.sprintf
+           "%s %S carries a tag or digest: give the image without one, such as \
+            %s, and its tag at deploy time"
+           field
+           (Image_reference.to_string reference)
+           (Image_reference.name reference))
+
+(* One alias per field so the deriver finds each field's own codec by name, and
+   each refusal can name the field it came from. *)
+type service_image = Image_reference.t
+
+let service_image_of_yojson = untagged_name_of_yojson ~field:"service.image"
+let service_image_to_yojson = Image_reference.to_yojson
+
+type traefik_image = Image_reference.t
+
+let traefik_image_of_yojson = reference_of_yojson ~field:"traefik.image"
+let traefik_image_to_yojson = Image_reference.to_yojson
+
+type cron_image = Image_reference.t
+
+let cron_image_of_yojson = untagged_name_of_yojson ~field:"cron_jobs image"
+let cron_image_to_yojson = Image_reference.to_yojson
+
+(* The service's router and its load-balancer service are named after it on the
+   box, so the name is a segment of a Traefik label key. One that cannot be is
+   refused here, naming the field and echoing the value as the image refusals
+   above do, rather than by the orchestrator after a session to every box. *)
+type service_name = Bondi_common.Router_name.t
+
+let service_name_of_yojson =
+  Bondi_common.Router_name.of_yojson ~field:"service.name"
+
+let service_name_to_yojson = Bondi_common.Router_name.to_yojson
+
+(* The ACME directory Traefik orders certificates from. [Acme_ca_server]'s
+   refusal quotes the value and restates the rule but names no field, so the
+   field is named here. *)
+type traefik_acme_ca_server = Bondi_common.Acme_ca_server.t
+
+let traefik_acme_ca_server_of_yojson = function
+  | `String text ->
+      Bondi_common.Acme_ca_server.of_string text
+      |> Result.map_error (fun reason -> "traefik.acme_ca_server " ^ reason)
+  | (`Null | `Bool _ | `Int _ | `Intlit _ | `Float _ | `Assoc _ | `List _) as
+    other ->
+      Error
+        (Printf.sprintf "traefik.acme_ca_server must be a string, got %s"
+           (Yojson.Safe.to_string other))
+
+let traefik_acme_ca_server_to_yojson = Bondi_common.Acme_ca_server.to_yojson
+
 type user_service = {
-  name : string;
-  image : string; (* Base image without tag, e.g. registry.com/app *)
+  name : service_name;
+  image : service_image;
   port : int;
   registry_user : string option; [@default None]
   registry_pass : string option; [@default None]
@@ -95,7 +182,14 @@ type bondi_server = {
 }
 [@@deriving yojson]
 
-type traefik = { domain_name : string; image : string; acme_email : string }
+type traefik = {
+  domain_name : string;
+  image : traefik_image;
+  acme_email : string;
+  (* Absent means Bondi sends Traefik no certificate-server flag, so Traefik's
+     own default, Let's Encrypt production, applies. *)
+  acme_ca_server : traefik_acme_ca_server option; [@default None]
+}
 [@@deriving yojson]
 
 module Alert = Bondi_common.Alert
@@ -116,7 +210,7 @@ let exit_code_severities_to_yojson = Alert.severity_map_to_yojson
 
 type cron_job = {
   name : string;
-  image : string; (* Base image without tag *)
+  image : cron_image;
   schedule : string;
   network : string option; [@default None]
   env_vars : string_map option; [@default None]

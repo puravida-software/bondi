@@ -39,27 +39,14 @@ let nonempty_lines output =
   |> String.split_on_char '\n'
   |> List.filter (fun line -> String.trim line <> "")
 
-(* The tag is what follows the last colon of the final path segment. Splitting
-   on the first colon would read a registry's port as a tag, and a digest
-   reference names no tag at all. *)
-let split_image image =
-  let name_start =
-    match Bondi_common.String_utils.last_index_of_char image '/' with
-    | None -> 0
-    | Some index -> index + 1
-  in
-  let final_segment =
-    String.sub image name_start (String.length image - name_start)
-  in
-  match Bondi_common.String_utils.last_index_of_char final_segment '@' with
-  | Some _ -> (image, "")
-  | None -> (
-      match Bondi_common.String_utils.last_index_of_char final_segment ':' with
-      | None -> (image, "")
-      | Some index ->
-          let colon = name_start + index in
-          ( String.sub image 0 colon,
-            String.sub image (colon + 1) (String.length image - colon - 1) ))
+(* Split by the parser the orchestrator's own status splits with, so the two
+   sources describe one container the same way. A line whose image does not
+   parse is still a container on the box: it is reported whole, with no tag,
+   rather than dropped from the report. *)
+let image_and_tag image =
+  match Bondi_common.Image_reference.of_string image with
+  | Ok reference -> Bondi_common.Image_reference.image_and_tag reference
+  | Error (Bondi_common.Image_reference.Empty | Malformed _) -> (image, "")
 
 (* Health is what Docker recorded, never what the container is doing: a process
    that is up is the thing a healthcheck exists to look past. An empty field is
@@ -128,7 +115,7 @@ let container_of_line ~inspection line =
   match String.split_on_char '\t' line with
   | [ name; image; state ] ->
       let name = String.trim name in
-      let image, tag = split_image (String.trim image) in
+      let image, tag = image_and_tag (String.trim image) in
       let state = String.trim state in
       let health, restart_count, created_at =
         match inspection with

@@ -105,8 +105,10 @@ val prepare :
     unit) ->
   string ->
   (run_payload * string, Handler_error.t) result
-(** Decode a request body and require a tagged image, before anything is
-    started. Returns the payload alongside the fully-qualified image.
+(** Decode a request body and require an image that parses and is pinned by a
+    tag or a digest, before anything is started. Returns the payload alongside
+    the image to run, which is the reference as written, registry port and
+    digest included.
 
     A payload that decoded names its job and carries its sinks, so a failure
     here dispatches an alert through [deliver] rather than short-circuiting past

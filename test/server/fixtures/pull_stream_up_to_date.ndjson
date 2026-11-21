@@ -1,0 +1,3 @@
+{"status":"Pulling from library/alpine","id":"3.21"}
+{"status":"Digest: sha256:bc21487101ae47172509130ee1092cc273a831968d64b617776d1f69c81e42ab"}
+{"status":"Status: Image is up to date for alpine:3.21"}

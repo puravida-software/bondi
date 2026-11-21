@@ -27,7 +27,8 @@
   test_cmd_io
   test_cli
   test_workload_host_config
-  test_image_cleanup)
+  test_image_cleanup
+  test_pull_stream)
  (modules
   test_env
   test_simple_plan
@@ -49,9 +50,13 @@
   test_cmd_io
   test_cli
   test_workload_host_config
-  test_image_cleanup)
+  test_image_cleanup
+  test_pull_stream)
+ (deps
+  (glob_files fixtures/*.ndjson))
  (libraries
   alcotest
+  base64
   bondi.client
   bondi.common
   bondi.server
