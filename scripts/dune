@@ -7,7 +7,7 @@
 (executable
  (name print_orchestrator_run_command)
  (modules print_orchestrator_run_command)
- (libraries bondi.client))
+ (libraries bondi.client bondi.common))
 
 (rule
  (with-stdout-to

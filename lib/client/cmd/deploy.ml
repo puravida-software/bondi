@@ -23,6 +23,7 @@ type deploy_payload = {
   traefik_domain_name : string option; [@default None]
   traefik_image : string option; [@default None]
   traefik_acme_email : string option; [@default None]
+  traefik_acme_ca_server : Bondi_common.Acme_ca_server.t option; [@default None]
   registry_user : string option; [@default None]
   registry_pass : string option; [@default None]
   force_traefik_redeploy : bool option; [@default None]
@@ -45,6 +46,27 @@ let parse_name_tag s : (string * string, string) result =
       if tag = "" then Error "missing tag (expected name:tag)"
       else Ok (name, tag)
 
+(* The image a target is deployed at: the name the file gives, with the tag the
+   command line gave, composed by the parser the orchestrator decodes it with.
+   The file's name already carries no tag or digest, so what can fail here is
+   the tag. The refusal echoes the composed text, which this client prints only
+   to the operator's terminal. *)
+let composed_image ~target ~name ~tag =
+  match
+    Bondi_common.Image_reference.of_name_and_tag
+      ~name:(Bondi_common.Image_reference.to_string name)
+      ~tag
+  with
+  | Ok reference -> Ok (Bondi_common.Image_reference.to_string reference)
+  | Error (Bondi_common.Image_reference.Malformed composed) ->
+      Error
+        (Printf.sprintf "%s:%s cannot be deployed: %S is not an image reference"
+           target tag composed)
+  | Error Bondi_common.Image_reference.Empty ->
+      Error
+        (Printf.sprintf "%s:%s cannot be deployed: its image is empty" target
+           tag)
+
 let cron_job_to_deploy (j : Config_file.cron_job) ~image : deploy_cron_job =
   {
     name = j.name;
@@ -61,26 +83,29 @@ let cron_job_to_deploy (j : Config_file.cron_job) ~image : deploy_cron_job =
 
 let cron_jobs_for_server ip_address
     (cron_jobs : Config_file.cron_job list option)
-    (deployments : (string * string) list) : deploy_cron_job list option =
+    (deployments : (string * string) list) :
+    (deploy_cron_job list option, string) result =
   let tag_of_name name = List.assoc_opt name deployments in
   match cron_jobs with
-  | None -> None
-  | Some jobs ->
+  | None -> Ok None
+  | Some jobs -> (
       let filtered =
         List.filter
           (fun (j : Config_file.cron_job) -> j.server.ip_address = ip_address)
           jobs
       in
-      let with_tags =
-        List.filter_map
-          (fun (j : Config_file.cron_job) ->
-            match tag_of_name j.name with
-            | Some tag ->
-                Some (cron_job_to_deploy j ~image:(j.image ^ ":" ^ tag))
-            | None -> None)
-          filtered
+      let with_tag acc (j : Config_file.cron_job) =
+        let* jobs = acc in
+        match tag_of_name j.name with
+        | None -> Ok jobs
+        | Some tag ->
+            let* image = composed_image ~target:j.name ~name:j.image ~tag in
+            Ok (cron_job_to_deploy j ~image :: jobs)
       in
-      if with_tags = [] then None else Some with_tags
+      let* with_tags = List.fold_left with_tag (Ok []) filtered in
+      match List.rev with_tags with
+      | [] -> Ok None
+      | _ :: _ as jobs -> Ok (Some jobs))
 
 (* The reads this command makes of its own are all of something already on the
    box -- the crontab, the payload directory, and whether the host paths a
@@ -370,7 +395,7 @@ let validate_deployments (config : Config_file.t) deployments :
     ((string * string) list, string) result =
   let service_names =
     match config.user_service with
-    | Some s -> [ s.name ]
+    | Some s -> [ Bondi_common.Router_name.to_string s.name ]
     | None -> []
   in
   let cron_names =
@@ -414,7 +439,7 @@ let payload_for (config : Config_file.t) ~deployments ~force_traefik_redeploy
     match config.user_service with
     | None -> None
     | Some service -> (
-        match tag_of_name service.name with
+        match tag_of_name (Bondi_common.Router_name.to_string service.name) with
         | None -> None
         | Some tag -> (
             match is_service_server ip_address with
@@ -423,60 +448,75 @@ let payload_for (config : Config_file.t) ~deployments ~force_traefik_redeploy
   in
   match service_and_tag with
   | Some ((service : Config_file.user_service), tag) ->
-      {
-        service_name = Some service.name;
-        image = Some (service.image ^ ":" ^ tag);
-        port = Some service.port;
-        env_vars = service.env_vars;
-        traefik_domain_name =
-          Option.map
-            (fun (tr : Config_file.traefik) -> tr.domain_name)
-            config.traefik;
-        traefik_image =
-          Option.map (fun (tr : Config_file.traefik) -> tr.image) config.traefik;
-        traefik_acme_email =
-          Option.map
-            (fun (tr : Config_file.traefik) -> tr.acme_email)
-            config.traefik;
-        registry_user = service.registry_user;
-        registry_pass = service.registry_pass;
-        force_traefik_redeploy = Some force_traefik_redeploy;
-        cron_jobs;
-        drain_grace_period = Option.map float_of_int service.drain_grace_period;
-        deployment_strategy = service.deployment_strategy;
-        health_timeout = Option.map float_of_int service.health_timeout;
-        poll_interval = Option.map float_of_int service.poll_interval;
-        logs = service.logs;
-        (* An empty list mounts nothing, so it is sent as the field's absence:
-           a payload that mounts nothing stays one an older orchestrator
-           reads. *)
-        volumes =
-          (match service.volumes with
-          | None
-          | Some [] ->
-              None
-          | Some (_ :: _) -> service.volumes);
-      }
+      let* image =
+        composed_image
+          ~target:(Bondi_common.Router_name.to_string service.name)
+          ~name:service.image ~tag
+      in
+      Ok
+        {
+          service_name = Some (Bondi_common.Router_name.to_string service.name);
+          image = Some image;
+          port = Some service.port;
+          env_vars = service.env_vars;
+          traefik_domain_name =
+            Option.map
+              (fun (tr : Config_file.traefik) -> tr.domain_name)
+              config.traefik;
+          traefik_image =
+            Option.map
+              (fun (tr : Config_file.traefik) ->
+                Bondi_common.Image_reference.to_string tr.image)
+              config.traefik;
+          traefik_acme_email =
+            Option.map
+              (fun (tr : Config_file.traefik) -> tr.acme_email)
+              config.traefik;
+          traefik_acme_ca_server =
+            Option.bind config.traefik (fun (tr : Config_file.traefik) ->
+                tr.acme_ca_server);
+          registry_user = service.registry_user;
+          registry_pass = service.registry_pass;
+          force_traefik_redeploy = Some force_traefik_redeploy;
+          cron_jobs;
+          drain_grace_period =
+            Option.map float_of_int service.drain_grace_period;
+          deployment_strategy = service.deployment_strategy;
+          health_timeout = Option.map float_of_int service.health_timeout;
+          poll_interval = Option.map float_of_int service.poll_interval;
+          logs = service.logs;
+          (* An empty list mounts nothing, so it is sent as the field's
+             absence: a payload that mounts nothing stays one an older
+             orchestrator reads. *)
+          volumes =
+            (match service.volumes with
+            | None
+            | Some [] ->
+                None
+            | Some (_ :: _) -> service.volumes);
+        }
   | None ->
-      {
-        service_name = None;
-        image = None;
-        port = None;
-        env_vars = [];
-        traefik_domain_name = None;
-        traefik_image = None;
-        traefik_acme_email = None;
-        registry_user = None;
-        registry_pass = None;
-        force_traefik_redeploy = Some force_traefik_redeploy;
-        cron_jobs;
-        drain_grace_period = None;
-        deployment_strategy = None;
-        health_timeout = None;
-        poll_interval = None;
-        logs = None;
-        volumes = None;
-      }
+      Ok
+        {
+          service_name = None;
+          image = None;
+          port = None;
+          env_vars = [];
+          traefik_domain_name = None;
+          traefik_image = None;
+          traefik_acme_email = None;
+          traefik_acme_ca_server = None;
+          registry_user = None;
+          registry_pass = None;
+          force_traefik_redeploy = Some force_traefik_redeploy;
+          cron_jobs;
+          drain_grace_period = None;
+          deployment_strategy = None;
+          health_timeout = None;
+          poll_interval = None;
+          logs = None;
+          volumes = None;
+        }
 
 let run force_traefik_redeploy deployments =
   print_endline "Deployment process initiated...";
@@ -531,15 +571,32 @@ let run force_traefik_redeploy deployments =
          different answers -- the gate holds a server to the floor of what it
          is about to be sent, cron jobs and volumes both, and the check asks
          about the paths it is about to mount, because both read them from the
-         payload itself. *)
+         payload itself. It is built before any session is opened, so an image
+         the run's tags do not compose into is refused before anything is
+         staged, dialled or stopped. *)
+      let payload_of (server : Config_file.server) =
+        let* cron_jobs =
+          cron_jobs_for_server server.ip_address config.cron_jobs deployments
+        in
+        let* payload =
+          payload_for config ~deployments ~force_traefik_redeploy server
+            cron_jobs
+        in
+        Ok (server, payload)
+      in
       let payloads_per_server =
-        List.map
-          (fun (server : Config_file.server) ->
-            ( server,
-              payload_for config ~deployments ~force_traefik_redeploy server
-                (cron_jobs_for_server server.ip_address config.cron_jobs
-                   deployments) ))
-          servers
+        match
+          List.fold_left
+            (fun acc server ->
+              let* payloads = acc in
+              let* payload = payload_of server in
+              Ok (payload :: payloads))
+            (Ok []) servers
+        with
+        | Ok payloads -> List.rev payloads
+        | Error message ->
+            prerr_endline ("Error: " ^ message);
+            exit 1
       in
       (* The gate's read is the only thing this server has been asked for when
          it is made, so a session that could not be staged is the same failure

@@ -22,6 +22,19 @@ let bind_mount ~host ~container ~read_only =
   | Ok mount -> mount
   | Error e -> Alcotest.fail (Bondi_common.Bind_mount.error_to_string e)
 
+let image_reference text =
+  match Bondi_common.Image_reference.of_string text with
+  | Ok reference -> reference
+  | Error Bondi_common.Image_reference.Empty ->
+      Alcotest.fail "the empty string is not an image reference"
+  | Error (Bondi_common.Image_reference.Malformed rejected) ->
+      Alcotest.failf "not an image reference: %S" rejected
+
+let router_name text =
+  match Bondi_common.Router_name.of_string ~field:"service.name" text with
+  | Ok name -> name
+  | Error message -> Alcotest.failf "not a router name: %s" message
+
 let mount_fields mount =
   Bondi_common.Bind_mount.(host mount, container mount, read_only mount)
 

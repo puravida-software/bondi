@@ -4,21 +4,23 @@ module Docker = Bondi_server__Docker__Client
 module Simple = Bondi_server__Strategy__Simple
 module Crontab = Bondi_server__Crontab
 module Run = Bondi_server__Run
+module Payload_codec = Bondi_server__Payload_codec
 module Alert = Bondi_common.Alert
 module Client_deploy = Bondi_client.Cmd.Deploy
 module Client_config = Bondi_client.Config_file
 
 let minimal_input =
   {
-    Simple.service_name = Some "my-service";
-    image = Some "myapp:v1";
+    Simple.service_name = Some (Test_helpers.router_name "my-service");
+    image = Some (Test_helpers.image_reference "myapp:v1");
     port = Some 8080;
     registry_user = None;
     registry_pass = None;
     env_vars = None;
     traefik_domain_name = Some "example.com";
-    traefik_image = Some "traefik:v3.3.0";
+    traefik_image = Some (Test_helpers.image_reference "traefik:v3.3.0");
     traefik_acme_email = Some "admin@example.com";
+    traefik_acme_ca_server = None;
     force_traefik_redeploy = None;
     cron_jobs = None;
     drain_grace_period = None;
@@ -34,7 +36,6 @@ let minimal_input =
 let action_string = function
   | Deploy.EnsureCronNetwork ->
       "EnsureCronNetwork(" ^ Bondi_common.Defaults.network_name ^ ")"
-  | Deploy.PullCronImages _ -> "PullCronImages"
   | Deploy.UpsertCrontab jobs -> (
       match jobs with
       | None -> "UpsertCrontab(None)"
@@ -66,7 +67,6 @@ let upsert_job_names ~context input =
               List.map (fun (job : Simple.cron_job) -> job.name) jobs
           | Deploy.UpsertCrontab None
           | Deploy.EnsureCronNetwork
-          | Deploy.PullCronImages _
           | Deploy.UpdateRestartPolicy _ ->
               [])
         actions
@@ -93,37 +93,164 @@ let result_testable ok_t =
       | Error _, Ok _ ->
           false)
 
-let test_serveraddress_from_image () =
-  Alcotest.check
-    (result_testable Alcotest.string)
-    "registry from full image" (Ok "registry.gitlab.com")
-    (Deploy.serveraddress_from_image "registry.gitlab.com/org/repo:v1.2.3");
-  (match Deploy.serveraddress_from_image "nginx:latest" with
-  | Error _ -> ()
-  | Ok _ -> Alcotest.fail "expected error for image without registry");
-  Alcotest.check
-    (result_testable Alcotest.string)
-    "first path component" (Ok "library")
-    (Deploy.serveraddress_from_image "library/nginx")
+(* The AuthConfig a registry auth header carries, decoded back from the header
+   the engine is handed, read with the base64url alphabet the header is
+   written in. *)
+let auth_config_of_header header =
+  match Base64.decode ~pad:true ~alphabet:Base64.uri_safe_alphabet header with
+  | Ok json -> Yojson.Safe.from_string json
+  | Error (`Msg msg) -> Alcotest.failf "the header is not base64url: %s" msg
+
+let field name json =
+  match Yojson.Safe.Util.member name json with
+  | `String value -> value
+  | other ->
+      Alcotest.failf "AuthConfig field %s is not a string: %s" name
+        (Yojson.Safe.to_string other)
+
+(* The registry is read from the reference, so a registry behind a port is
+   named with its port, where splitting the text at its first colon finds no
+   registry at all and sends no credentials. A reference that names no registry
+   still sends none, and neither does a reference with half a credential. *)
+let test_registry_auth_serveraddress_from_reference () =
+  let auth ?(user = Some "deployer") ?(pass = Some "s3cret") image =
+    Deploy.registry_auth (Test_helpers.image_reference image) ~user ~pass
+  in
+  (match auth "registry:5000/app:1.2.3" with
+  | None ->
+      Alcotest.fail "credentials for a registry behind a port must be sent"
+  | Some header ->
+      let config = auth_config_of_header header in
+      Alcotest.(check string)
+        "serveraddress is the registry, port included" "registry:5000"
+        (field "serveraddress" config);
+      Alcotest.(check string)
+        "the credentials are the ones declared" "deployer"
+        (field "username" config));
+  (match auth "registry.gitlab.com/org/repo:v1.2.3" with
+  | None -> Alcotest.fail "credentials for a named registry must be sent"
+  | Some header ->
+      Alcotest.(check string)
+        "serveraddress is the registry host" "registry.gitlab.com"
+        (field "serveraddress" (auth_config_of_header header)));
+  (* A reference that names no registry but has a namespace keeps what earlier
+     releases sent: the credentials, with the first path component as
+     serveraddress, so the Engine is handed them for the Docker Hub pull exactly
+     as before. A single-component name never sent any, and still sends
+     none. *)
+  let namespace_serveraddress image =
+    match auth image with
+    | None ->
+        Alcotest.fail
+          (image
+         ^ ": credentials for a namespaced Docker Hub image must be sent")
+    | Some header -> field "serveraddress" (auth_config_of_header header)
+  in
+  Alcotest.(check string)
+    "a namespace/name image sends the namespace as serveraddress" "myorg"
+    (namespace_serveraddress "myorg/app:1.2.3");
+  Alcotest.(check string)
+    "a deeper path sends its first component" "myorg"
+    (namespace_serveraddress "myorg/team/app:1.2.3");
+  Alcotest.(check string)
+    "a digest-pinned namespaced image sends its first component" "old"
+    (namespace_serveraddress ("old/worker@sha256:" ^ String.make 64 'a'));
+  Alcotest.(check (option string))
+    "a single-component image sends no credentials" None (auth "nginx:1.27");
+  Alcotest.(check (option string))
+    "an untagged single-component image sends no credentials" None
+    (auth "nginx");
+  Alcotest.(check (option string))
+    "no password, no credentials" None
+    (auth ~pass:None "registry:5000/app:1.2.3");
+  Alcotest.(check (option string))
+    "no user, no credentials, for a namespaced image too" None
+    (auth ~user:None "myorg/app:1.2.3")
+
+(* The Engine API reads X-Registry-Auth as base64url-encoded JSON. A password
+   is chosen whose standard encoding carries both characters the two alphabets
+   disagree on: the '~' of "abc~" encodes to '+', and the '?' encodes to '/'.
+   The expected header is Python's encoding of the same JSON, padding kept,
+   produced by:
+
+   python3 -c 'import base64; print(base64.urlsafe_b64encode(b"{\"serveraddress\":\"registry:5000\",\"username\":\"use\",\"password\":\"abc~ab?\"}").decode())' *)
+let test_registry_auth_base64url () =
+  let json =
+    {|{"serveraddress":"registry:5000","username":"use","password":"abc~ab?"}|}
+  in
+  let standard =
+    Base64.encode_string ~pad:true ~alphabet:Base64.default_alphabet json
+  in
+  Alcotest.(check bool)
+    "the fixture's standard encoding carries a '+'" true
+    (String.contains standard '+');
+  Alcotest.(check bool)
+    "the fixture's standard encoding carries a '/'" true
+    (String.contains standard '/');
+  match
+    Deploy.registry_auth
+      (Test_helpers.image_reference "registry:5000/app:1.2.3")
+      ~user:(Some "use") ~pass:(Some "abc~ab?")
+  with
+  | None -> Alcotest.fail "credentials for a registry behind a port are sent"
+  | Some header ->
+      Alcotest.(check string)
+        "the header is the base64url encoding Python gives for the same JSON"
+        "eyJzZXJ2ZXJhZGRyZXNzIjoicmVnaXN0cnk6NTAwMCIsInVzZXJuYW1lIjoidXNlIiwicGFzc3dvcmQiOiJhYmN-YWI_In0="
+        header;
+      Alcotest.(check bool)
+        "the header carries no '+'" false
+        (String.contains header '+');
+      Alcotest.(check bool)
+        "the header carries no '/'" false
+        (String.contains header '/')
 
 let test_tag_from_image () =
   Alcotest.check Alcotest.string "extracts tag" "v1.2.3"
-    (Deploy.tag_from_image "registry.example.com/app:v1.2.3");
+    (Deploy.tag_from_image
+       (Test_helpers.image_reference "registry.example.com/app:v1.2.3"));
   Alcotest.check Alcotest.string "unknown when no tag" "unknown"
-    (Deploy.tag_from_image "registry.example.com/app")
+    (Deploy.tag_from_image
+       (Test_helpers.image_reference "registry.example.com/app"))
 
-let test_image_name_and_tag () =
+(* A digest pins the image as exactly as a tag does, so it is pulled by its
+   digest rather than refused; only an image naming neither is refused. The
+   repository and the [tag] query are what the pull sends for the reference
+   that passes. *)
+let test_require_tag_or_digest () =
+  let name_and_tag image =
+    Payload_codec.require_tag_or_digest (Test_helpers.image_reference image)
+    |> Result.map (fun pinned ->
+        ( Bondi_common.Image_reference.name pinned,
+          Bondi_common.Image_reference.pull_tag pinned ))
+  in
+  let digest = "sha256:" ^ String.make 64 'a' in
   Alcotest.check
     (result_testable (Alcotest.pair Alcotest.string Alcotest.string))
     "name and tag"
     (Ok ("backup", "v1"))
-    (Deploy.image_name_and_tag "backup:v1");
-  match Deploy.image_name_and_tag "backup" with
+    (name_and_tag "backup:v1");
+  Alcotest.check
+    (result_testable (Alcotest.pair Alcotest.string Alcotest.string))
+    "a registry behind a port stays in the name"
+    (Ok ("registry:5000/backup", "v1"))
+    (name_and_tag "registry:5000/backup:v1");
+  Alcotest.check
+    (result_testable (Alcotest.pair Alcotest.string Alcotest.string))
+    "a digest-pinned image is pulled by its digest"
+    (Ok ("old/worker", digest))
+    (name_and_tag ("old/worker@" ^ digest));
+  match name_and_tag "backup" with
   | Error _ -> ()
   | Ok _ -> Alcotest.fail "expected error for missing tag"
 
 let test_build_response () =
-  let input = { minimal_input with image = Some "app:v2.0" } in
+  let input =
+    {
+      minimal_input with
+      image = Some (Test_helpers.image_reference "app:v2.0");
+    }
+  in
   let response =
     Deploy.build_response ~strategy:Deploy.Simple
       ~strategy_reason:"image has no HEALTHCHECK" input
@@ -139,7 +266,7 @@ let test_build_response () =
 let cron_job_on_network ~name ~network : Simple.cron_job =
   {
     name;
-    image = "backup:v1";
+    image = Test_helpers.image_reference "backup:v1";
     schedule = "0 0 * * *";
     network;
     env_vars = None;
@@ -162,8 +289,7 @@ let test_cron_plan_with_cron_jobs () =
   let input = { minimal_input with cron_jobs = Some [ cron ] } in
   Alcotest.check
     (Alcotest.list Alcotest.string)
-    "includes PullCronImages and UpsertCrontab"
-    [ "PullCronImages"; "UpsertCrontab(1)" ]
+    "plans the crontab write and no pull" [ "UpsertCrontab(1)" ]
     (planned_actions ~context:"one cron job" input)
 
 (* A job declaring the network Bondi owns gets it ensured on the deploy path,
@@ -178,7 +304,7 @@ let test_cron_plan_ensures_shared_network () =
   Alcotest.check
     (Alcotest.list Alcotest.string)
     "ensures the shared network before pulling"
-    [ "EnsureCronNetwork(bondi-network)"; "PullCronImages"; "UpsertCrontab(1)" ]
+    [ "EnsureCronNetwork(bondi-network)"; "UpsertCrontab(1)" ]
     (planned_actions ~context:"job on the shared network" input);
   (* The ensure is idempotent and there is only one name it can carry, so two
      jobs declaring it plan one action, not two. *)
@@ -197,7 +323,7 @@ let test_cron_plan_ensures_shared_network () =
   Alcotest.check
     (Alcotest.list Alcotest.string)
     "two jobs on the shared network ensure it once"
-    [ "EnsureCronNetwork(bondi-network)"; "PullCronImages"; "UpsertCrontab(2)" ]
+    [ "EnsureCronNetwork(bondi-network)"; "UpsertCrontab(2)" ]
     (planned_actions ~context:"two jobs on the shared network" two_jobs)
 
 (* Creating a typo'd network would hand the job an empty network it cannot reach
@@ -289,8 +415,7 @@ let test_cron_plan_without_network_unchanged () =
   let input = { minimal_input with cron_jobs = Some [ cron ] } in
   Alcotest.check
     (Alcotest.list Alcotest.string)
-    "no network action for a job declaring none"
-    [ "PullCronImages"; "UpsertCrontab(1)" ]
+    "no network action for a job declaring none" [ "UpsertCrontab(1)" ]
     (planned_actions ~context:"job declaring no network" input)
 
 (* The job's name is interpolated into the path of the run file the crontab line
@@ -478,7 +603,7 @@ let alerting_config_cron_job () : Client_config.cron_job =
   in
   {
     name = "backup";
-    image = "img";
+    image = Test_helpers.image_reference "img";
     schedule = "* * * * *";
     network = None;
     env_vars = None;
@@ -642,6 +767,7 @@ let test_decode_input_accepts_volumes () =
       traefik_domain_name = Some "example.com";
       traefik_image = None;
       traefik_acme_email = None;
+      traefik_acme_ca_server = None;
       registry_user = None;
       registry_pass = None;
       force_traefik_redeploy = None;
@@ -724,6 +850,98 @@ let test_decode_input_rejects_control_character_volume () =
   check_volume_refused ~what:"a control character in a path"
     ~leaked:[ "comalito"; "/app/invoices" ]
     {|{"service_name":"my-service","volumes":[{"host":"/srv/comalito\u0001/invoices","container":"/app/invoices","read_only":false}]}|}
+
+(* A field that does not decode is refused at decode, before any plan exists,
+   as the caller's mistake. The message names the field and restates the
+   grammar but does not carry what the field held: a refusal's message never
+   carries a value from the payload, and a reference that failed to parse is
+   unvalidated text that may hold a pasted credential. *)
+let check_field_refused ~what ~field ~leaked body =
+  match Deploy.decode_input body with
+  | Ok _ -> Alcotest.failf "%s was accepted" what
+  | Error (Handler_error.Orchestrator_failure msg) ->
+      Alcotest.failf
+        "%s is the caller's mistake, but it answered Orchestrator_failure: %s"
+        what msg
+  | Error (Handler_error.Not_ready msg) ->
+      Alcotest.failf "%s is the caller's mistake, but it answered Not_ready: %s"
+        what msg
+  | Error (Handler_error.Invalid_request msg) ->
+      Alcotest.(check bool)
+        (Printf.sprintf "%s: the message names the field %s (got %S)" what field
+           msg)
+        true
+        (String.starts_with
+           ~prefix:("invalid deploy payload: " ^ field ^ ": ")
+           msg);
+      List.iter
+        (fun needle ->
+          Alcotest.(check bool)
+            (what ^ ": the message does not echo " ^ needle)
+            false
+            (Bondi_common.String_utils.contains ~needle msg))
+        leaked
+
+(* Credentials pasted into a reference: the registry's port is not a number, so
+   it does not parse. *)
+let pasted_credentials = "deployer:t0ken@registry.example.com/app:1.0"
+
+let test_decode_refuses_bad_reference () =
+  let leaked = [ "t0ken"; "deployer"; "registry.example.com" ] in
+  check_field_refused ~what:"a bad service image" ~field:"image" ~leaked
+    (Printf.sprintf {|{"service_name":"my-service","image":%S}|}
+       pasted_credentials);
+  check_field_refused ~what:"an untagged service image" ~field:"image"
+    ~leaked:[]
+    {|{"service_name":"my-service","image":"registry.example.com/app"}|};
+  check_field_refused ~what:"a bad Traefik image" ~field:"traefik_image" ~leaked
+    (Printf.sprintf {|{"traefik_image":%S}|} pasted_credentials);
+  check_field_refused ~what:"a bad cron image" ~field:"cron_jobs[].image"
+    ~leaked
+    (Printf.sprintf
+       {|{"cron_jobs":[{"name":"backup","image":%S,"schedule":"0 * * * *"}]}|}
+       pasted_credentials)
+
+(* A service name becomes the segment of its router's label keys. Traefik drops
+   a container whose label key holds a [.] and Docker refuses a one-character
+   container name, so either is refused at decode, before anything is stopped,
+   rather than deployed to a service that is never served. *)
+let test_decode_refuses_unroutable_service_name () =
+  check_field_refused ~what:"a service name holding a dot" ~field:"service_name"
+    ~leaked:[ "shop.example" ]
+    {|{"service_name":"shop.example","image":"myapp:v1","port":8080,"traefik_domain_name":"example.com"}|};
+  check_field_refused ~what:"a one-character service name" ~field:"service_name"
+    ~leaked:[ {|"q"|} ]
+    {|{"service_name":"q","image":"myapp:v1","port":8080,"traefik_domain_name":"example.com"}|};
+  check_field_refused ~what:"a service name with an uppercase letter"
+    ~field:"service_name" ~leaked:[ "Shop" ]
+    {|{"service_name":"Shop","image":"myapp:v1","port":8080,"traefik_domain_name":"example.com"}|};
+  check_field_refused ~what:"a service name Bondi's Traefik container defines"
+    ~field:"service_name" ~leaked:[ "acme-http" ]
+    {|{"service_name":"acme-http","image":"myapp:v1","port":8080,"traefik_domain_name":"example.com"}|};
+  check_field_refused ~what:"a service name that is not a string"
+    ~field:"service_name" ~leaked:[ "4242" ]
+    {|{"service_name":4242,"image":"myapp:v1","port":8080,"traefik_domain_name":"example.com"}|}
+
+(* The certificate server arrives as [traefik_acme_ca_server]. An https URL is
+   read as written. Anything else is refused at decode as the caller's mistake,
+   naming the field without echoing what it held. *)
+let test_decode_acme_ca_server () =
+  let url = "https://pebble:14000/dir" in
+  (match
+     Deploy.decode_input (Printf.sprintf {|{"traefik_acme_ca_server":%S}|} url)
+   with
+  | Error e ->
+      Alcotest.failf "an https certificate server was refused: %s"
+        (Handler_error.message e)
+  | Ok (input : Simple.deploy_input) ->
+      Alcotest.(check (option string))
+        "the certificate server is read as written" (Some url)
+        (Option.map Bondi_common.Acme_ca_server.to_string
+           input.traefik_acme_ca_server));
+  check_field_refused ~what:"a plain-http certificate server"
+    ~field:"traefik_acme_ca_server" ~leaked:[ "ca.example.com" ]
+    {|{"traefik_acme_ca_server":"http://ca.example.com/dir"}|}
 
 (* ------------------------------------------------------------------------- *)
 (* Traefik restart policy                                                    *)
@@ -825,6 +1043,147 @@ let test_traefik_not_declared_plans_no_update () =
        (traefik_policy_context ~traefik_image:"traefik:v3.3.0"
           ~policy:(Some (applied_policy "no"))))
 
+(* --- Deploy.pull_plan: every pull the deploy needs, before anything moves --- *)
+
+let pull_string = function
+  | Deploy.PullWorkload image ->
+      "PullWorkload(" ^ Bondi_common.Image_reference.to_string image ^ ")"
+  | Deploy.PullTraefik image ->
+      "PullTraefik(" ^ Bondi_common.Image_reference.to_string image ^ ")"
+  | Deploy.PullCronImage job -> "PullCronImage(" ^ job.Simple.name ^ ")"
+
+let pulls ~strategy ?(workload_pulled = false) ?(traefik = None) input =
+  let context : Simple.deploy_context =
+    { current_traefik = traefik; current_workload = None }
+  in
+  List.map pull_string
+    (Deploy.pull_plan ~strategy ~workload_pulled input context)
+
+let running_traefik image =
+  Some
+    (Server_test_helpers.mk_container ~id:"traefik-1" ~image
+       ~names:[ "/bondi-traefik" ] ())
+
+let two_cron_input =
+  {
+    minimal_input with
+    cron_jobs =
+      Some
+        [
+          cron_job_on_network ~name:"backup" ~network:None;
+          cron_job_on_network ~name:"report" ~network:None;
+        ];
+  }
+
+(* The guarantee, as a plan: a first deploy needs the proxy, the workload and
+   every cron image, and the plan names all of them. [deploy] runs this list to
+   its end before a restart policy is written, a container is stopped or
+   created, or the crontab is touched, so a failure anywhere in it leaves the
+   box as it was. *)
+let test_pull_plan_names_every_image_a_first_deploy_needs () =
+  let names = pulls ~strategy:Deploy.Simple two_cron_input in
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "proxy, workload, then each cron image"
+    [
+      "PullTraefik(traefik:v3.3.0)";
+      "PullWorkload(myapp:v1)";
+      "PullCronImage(backup)";
+      "PullCronImage(report)";
+    ]
+    names
+
+let test_pull_plan_pulls_a_replaced_traefik () =
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "a proxy at another version is replaced, so its image is pulled"
+    [ "PullTraefik(traefik:v3.3.0)"; "PullWorkload(myapp:v1)" ]
+    (pulls ~strategy:Deploy.Simple
+       ~traefik:(running_traefik "traefik:v2.0")
+       minimal_input)
+
+let test_pull_plan_leaves_a_kept_traefik_unpulled () =
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "a proxy that stays is not pulled"
+    [ "PullWorkload(myapp:v1)" ]
+    (pulls ~strategy:Deploy.Simple
+       ~traefik:(running_traefik "traefik:v3.3.0")
+       minimal_input)
+
+let test_pull_plan_blue_green_never_pulls_traefik () =
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "blue-green refers to no proxy, so pulls none"
+    [
+      "PullWorkload(myapp:v1)"; "PullCronImage(backup)"; "PullCronImage(report)";
+    ]
+    (pulls ~strategy:Deploy.Blue_green two_cron_input)
+
+let test_pull_plan_skips_a_workload_already_pulled () =
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "auto selection pulled it to inspect it"
+    [ "PullCronImage(backup)"; "PullCronImage(report)" ]
+    (pulls ~strategy:Deploy.Blue_green ~workload_pulled:true two_cron_input)
+
+let test_pull_plan_cron_only_deploy () =
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "no service, so no proxy and no workload"
+    [ "PullCronImage(backup)"; "PullCronImage(report)" ]
+    (pulls ~strategy:Deploy.Simple
+       { two_cron_input with service_name = None; image = None })
+
+(* The order of the whole deploy, as a value. Every step that changes the box is
+   named here, so "every pull precedes the first change" is a property of the
+   plan and not of how [deploy] happens to be written. *)
+let mutating = function
+  | Deploy.Pull_images
+  | Deploy.Clean_up ->
+      false
+  | Deploy.Converge_restart_policy
+  | Deploy.Snapshot_replaced
+  | Deploy.Deploy_workload
+  | Deploy.Apply_cron ->
+      true
+
+let check_pulls_first ~context ~has_service =
+  let steps = Deploy.deploy_steps ~has_service in
+  let rec before_first_change = function
+    | [] -> Alcotest.fail (context ^ ": no pull step")
+    | Deploy.Pull_images :: _ -> ()
+    | step :: _ when mutating step ->
+        Alcotest.fail (context ^ ": a changing step precedes the pulls")
+    | _ :: rest -> before_first_change rest
+  in
+  before_first_change steps;
+  Alcotest.check Alcotest.int
+    (context ^ ": pulled once")
+    1
+    (List.length (List.filter (( = ) Deploy.Pull_images) steps))
+
+(* Simple, blue-green and auto differ in which images [pull_plan] names, pinned
+   above, and share this order; a cron-only deploy is the one without a service. *)
+let test_every_pull_precedes_the_first_change () =
+  check_pulls_first ~context:"a service deploy" ~has_service:true;
+  check_pulls_first ~context:"a cron-only deploy" ~has_service:false
+
+let test_the_workload_moves_before_the_crontab () =
+  let steps = Deploy.deploy_steps ~has_service:true in
+  let index step =
+    let rec go i = function
+      | [] -> Alcotest.fail "step missing"
+      | x :: _ when x = step -> i
+      | _ :: rest -> go (i + 1) rest
+    in
+    go 0 steps
+  in
+  Alcotest.check Alcotest.bool "workload then crontab" true
+    (index Deploy.Deploy_workload < index Deploy.Apply_cron);
+  Alcotest.check Alcotest.bool "cleanup last" true
+    (index Deploy.Clean_up = List.length steps - 1)
+
 (* --- Deploy.deploy: the composition the plans sit underneath --- *)
 
 (* [deploy]'s catch-all is reachable through no pure seam: [cron_plan] answers
@@ -867,14 +1226,33 @@ let () =
     [
       ( "pure helpers",
         [
-          Alcotest.test_case "serveraddress_from_image" `Quick
-            test_serveraddress_from_image;
+          Alcotest.test_case "registry auth serveraddress from reference" `Quick
+            test_registry_auth_serveraddress_from_reference;
+          Alcotest.test_case "registry auth is base64url" `Quick
+            test_registry_auth_base64url;
           Alcotest.test_case "tag_from_image" `Quick test_tag_from_image;
-          Alcotest.test_case "image_name_and_tag" `Quick test_image_name_and_tag;
+          Alcotest.test_case "require_tag_or_digest" `Quick
+            test_require_tag_or_digest;
           Alcotest.test_case "build_response" `Quick test_build_response;
         ] );
       ( "cron plan",
         [
+          Alcotest.test_case "pull plan names every image" `Quick
+            test_pull_plan_names_every_image_a_first_deploy_needs;
+          Alcotest.test_case "pull plan pulls a replaced proxy" `Quick
+            test_pull_plan_pulls_a_replaced_traefik;
+          Alcotest.test_case "pull plan leaves a kept proxy" `Quick
+            test_pull_plan_leaves_a_kept_traefik_unpulled;
+          Alcotest.test_case "pull plan blue-green no proxy" `Quick
+            test_pull_plan_blue_green_never_pulls_traefik;
+          Alcotest.test_case "pull plan skips a pulled workload" `Quick
+            test_pull_plan_skips_a_workload_already_pulled;
+          Alcotest.test_case "every pull precedes the first change" `Quick
+            test_every_pull_precedes_the_first_change;
+          Alcotest.test_case "workload before crontab" `Quick
+            test_the_workload_moves_before_the_crontab;
+          Alcotest.test_case "pull plan cron-only" `Quick
+            test_pull_plan_cron_only_deploy;
           Alcotest.test_case "no cron jobs" `Quick test_cron_plan_no_cron_jobs;
           Alcotest.test_case "empty cron jobs" `Quick
             test_cron_plan_empty_cron_jobs;
@@ -937,6 +1315,15 @@ let () =
             test_decode_input_rejects_unknown_volume_key;
           Alcotest.test_case "decode input rejects a control character" `Quick
             test_decode_input_rejects_control_character_volume;
+        ] );
+      ( "image references",
+        [
+          Alcotest.test_case "decode refuses a bad reference" `Quick
+            test_decode_refuses_bad_reference;
+          Alcotest.test_case "decode refuses an unroutable service name" `Quick
+            test_decode_refuses_unroutable_service_name;
+          Alcotest.test_case "decode reads and refuses the certificate server"
+            `Quick test_decode_acme_ca_server;
         ] );
       ( "strategy dispatch",
         [

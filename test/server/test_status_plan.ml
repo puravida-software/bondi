@@ -201,6 +201,49 @@ let test_plan_image_tag_parsed () =
       check string "cron image_name" "ghcr.io/org/backup" first_cron.image_name;
       check string "cron tag" "v2.1.0" first_cron.tag
 
+(* A digest names no tag, so a digest-pinned image is reported whole with an
+   empty tag, which is how the host's own listing reads it too. Split at its
+   last colon it would report the digest's hex as a tag; split at every colon,
+   a digest behind a registry port would not parse and would vanish into
+   [errors]. The tagged cron job beside them is the arm that shows the plan
+   still splits a reference that carries no digest. *)
+let test_status_digest_reference () =
+  let digest = "sha256:" ^ String.make 64 'a' in
+  let pinned = "old/worker@" ^ digest in
+  let behind_port = "registry:5000/app:1.2.3@" ^ digest in
+  let context =
+    {
+      full_context with
+      service_inspection =
+        Some
+          ( mk_container ~id:"svc1" ~image:pinned ~names:[ "/myapp" ] (),
+            mk_inspect ~created_at:"2026-03-01T00:00:00Z" ~restart_count:0
+              ~status:"running" () );
+      scheduled_cron_jobs =
+        [
+          { Crontab.name = "report"; image = behind_port };
+          { Crontab.name = "backup"; image = "ghcr.io/org/backup:v2.1.0" };
+        ];
+    }
+  in
+  let result = Status.plan ~service_name:(Some "myapp") context in
+  check (list string) "nothing failed to parse" [] result.errors;
+  (match result.service with
+  | Some s ->
+      check string "service image_name is the whole reference" pinned
+        s.image_name;
+      check string "service tag is empty" "" s.tag
+  | None -> fail "expected service to be present");
+  match result.cron_jobs with
+  | [ report; backup ] ->
+      check string "cron image_name is the whole reference" behind_port
+        report.image_name;
+      check string "cron tag is empty" "" report.tag;
+      check string "a tagged cron image is still split" "ghcr.io/org/backup"
+        backup.image_name;
+      check string "and keeps its tag" "v2.1.0" backup.tag
+  | jobs -> failf "expected the two cron jobs, got %d" (List.length jobs)
+
 (* 8. test_plan_grouping *)
 let test_plan_grouping () =
   let result = Status.plan ~service_name:(Some "myapp") full_context in
@@ -621,6 +664,7 @@ let () =
             test_plan_cron_jobs_from_crontab;
           test_case "no cron jobs" `Quick test_plan_no_cron_jobs;
           test_case "image tag parsed" `Quick test_plan_image_tag_parsed;
+          test_case "digest reference" `Quick test_status_digest_reference;
           test_case "grouping" `Quick test_plan_grouping;
           test_case "no errors" `Quick test_plan_no_errors;
           test_case "cron error propagation" `Quick

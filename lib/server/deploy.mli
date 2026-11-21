@@ -58,22 +58,32 @@ val deployment_strategy_of_string : string -> deployment_strategy option
     {!deploy} reports to the caller rather than resolving to a default: a
     misspelled strategy must not silently deploy by the other one. *)
 
-val serveraddress_from_image : string -> (string, string) result
-(** The registry host an image name implies, for the [serveraddress] field of
-    the Engine's [AuthConfig]. An image with no registry component yields an
-    error rather than a guess, and the caller then sends no credentials at all:
-    offering a password to the wrong registry is worse than failing to
-    authenticate. *)
+val registry_auth :
+  Bondi_common.Image_reference.t ->
+  user:string option ->
+  pass:string option ->
+  string option
+(** The [X-Registry-Auth] header for pulling the reference: the Engine's
+    [AuthConfig] holding both credentials, with [serveraddress] set to
+    {!Bondi_common.Image_reference.registry}, port included, base64url-encoded
+    with its padding kept, as the Engine API specifies the header. The service's
+    pull and each cron job's pull build theirs here.
 
-val image_name_and_tag : string -> (string * string, string) result
-(** Split an image into its name and its tag. An image with no tag is refused: a
-    pull with no tag is a pull of [latest], which is not the image the operator
-    declared. *)
+    A reference that names no registry but has a namespace ([myorg/app], a
+    Docker Hub repository) sends the credentials with the first path component
+    ([myorg]) as [serveraddress], exactly as earlier releases did, so a private
+    Docker Hub repository's pull is handed the same credentials it was before.
 
-val tag_from_image : string -> string
-(** The tag to report back in the response, ["unknown"] when the image carries
-    none or does not parse. This is reporting rather than validation -- the
-    refusal is {!image_name_and_tag}'s job -- so it answers for every input
+    [None], and so no credentials sent at all, when either credential is absent
+    or when the reference is a single component with no registry ([nginx]),
+    which earlier releases never sent credentials for either. *)
+
+val tag_from_image : Bondi_common.Image_reference.t -> string
+(** The tag to report back in the response, ["unknown"] when the reference
+    carries none, as a reference pinned only by digest does. This is reporting
+    rather than validation -- refusing a reference with neither a tag nor a
+    digest is the decoder's job, done before anything is planned or pulled, and
+    a service image that gets here has one -- so it answers for every reference
     instead of failing beside a deploy that has already happened. *)
 
 (** One step of a deploy that is not the workload itself. The list is produced
@@ -84,9 +94,6 @@ type deploy_action =
       (** Create the one network Bondi manages if it is absent. It carries no
           name because there is only ever that one, and it is idempotent, so any
           number of jobs declaring it plan a single action. *)
-  | PullCronImages of Strategy.Simple.cron_job list
-      (** Pull each declared job's image, with that job's own registry
-          credentials. *)
   | UpsertCrontab of Strategy.Simple.cron_job list option
       (** Replace each job's files and the crontab with the declared set. A job
           gets a run file, which is the definition its crontab line points at,
@@ -118,6 +125,43 @@ val cron_plan :
     compares against the one managed name and cannot see which networks exist on
     the box, so a network created by hand is invisible to it and every remedy
     the message offers is one the operator can apply in [bondi.yaml]. *)
+
+(** An image the deploy runs, to be pulled before anything on the box changes.
+*)
+type pull =
+  | PullWorkload of Bondi_common.Image_reference.t
+  | PullTraefik of Bondi_common.Image_reference.t
+      (** Pulled without credentials. *)
+  | PullCronImage of Strategy.Simple.cron_job
+      (** Pulled with that job's own registry credentials. *)
+
+val pull_plan :
+  strategy:deployment_strategy ->
+  workload_pulled:bool ->
+  Strategy.Simple.deploy_input ->
+  Strategy.Simple.deploy_context ->
+  pull list
+(** Every image the deploy needs, purely. {!deploy} runs the whole list before a
+    restart policy is written, a container is stopped, removed or created, or
+    the crontab is touched, so a pull that fails leaves the box as it was. The
+    proxy is listed only when the simple strategy will create or replace it, and
+    the workload is left out when [workload_pulled] says choosing the strategy
+    already pulled it. A request with no service names no workload and no proxy.
+*)
+
+(** One step of a deploy, in the order [deploy] takes them. *)
+type deploy_step =
+  | Pull_images  (** Every image from {!pull_plan}; changes nothing. *)
+  | Converge_restart_policy
+  | Snapshot_replaced
+  | Deploy_workload
+  | Apply_cron
+  | Clean_up  (** Image removal; last, and cannot fail the deploy. *)
+
+val deploy_steps : has_service:bool -> deploy_step list
+(** The whole deploy's order, purely. {!Pull_images} precedes every step that
+    changes the box, on every strategy; a request with no service has no
+    restart-policy write, snapshot or workload step. *)
 
 type traefik_policy_context = {
   traefik : Docker.Client.container option;
@@ -158,6 +202,13 @@ val decode_input :
     naming which it was, so an operator can tell a malformed file from a
     misdeclared one.
 
+    An image reference that does not parse, for the service, for Traefik or for
+    a cron job, is refused here too, so no plan is made from a reference that
+    could not be read. The refusal names the field and restates the grammar, but
+    does not carry the rejected text: {!Handler_error.message} never carries a
+    value from the payload, and a reference that failed to parse may hold a
+    pasted credential.
+
     Refusals are [Invalid_request], so this decision carries an exit code like
     every other one this module makes. It is separate from {!deploy} rather than
     folded into it because the two failures answer with different wording, and a
@@ -172,13 +223,18 @@ val deploy :
     rather than passed in because the registry credentials it carries come out
     of the request.
 
-    Only the cron plan can answer [Invalid_request]: it is the one step that
-    fails on what the caller wrote. Everything after it is Bondi acting on the
-    caller's behalf, so its failures are [Orchestrator_failure] by construction,
-    and an exception escaping a gather or a strategy is reported as one too
-    rather than escaping into the transport. [Eio.Cancel.Cancelled] is the
-    exception to that: it propagates rather than being classified, because a
-    cancelled fiber that returned a value would break structured concurrency.
+    Of the steps inside it, only the cron plan can answer [Invalid_request]: it
+    is the one that fails on what the caller wrote. Everything after the cron
+    plan is Bondi acting on the caller's behalf, so its failures are
+    [Orchestrator_failure] by construction, and an exception escaping a gather
+    or a strategy is reported as one too rather than escaping into the
+    transport. [Eio.Cancel.Cancelled] is the exception to that: it propagates
+    rather than being classified, because a cancelled fiber that returned a
+    value would break structured concurrency.
+
+    The other refusals of what the caller wrote, a body that does not decode and
+    an image reference that does not parse, are {!decode_input}'s, made before
+    this is called.
 
     Precondition: it drives Docker through Eio -- [Cohttp_eio] under an
     [Eio.Switch] -- so it must be called from inside an Eio fiber, and [~clock]

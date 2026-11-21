@@ -42,7 +42,7 @@ let run_payload_of_cron_job (c : Strategy.Simple.cron_job) : Yojson.Safe.t =
   run_payload_to_yojson
     {
       job = c.name;
-      image = c.image;
+      image = Bondi_common.Image_reference.to_string c.image;
       network = c.network;
       env_vars = c.env_vars;
       alert_sinks = c.alert_sinks;

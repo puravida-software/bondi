@@ -27,7 +27,7 @@ let mk_cron_job ?network ?env_vars ?alert_sinks ?exit_code_severities ~name
     ~image ~schedule () : Bondi_server__Strategy__Simple.cron_job =
   {
     name;
-    image;
+    image = Test_helpers.image_reference image;
     schedule;
     network;
     env_vars;

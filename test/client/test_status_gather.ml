@@ -114,8 +114,8 @@ let config : Config_file.t =
     user_service =
       Some
         {
-          name = "my-service";
-          image = "acme/app";
+          name = Test_helpers.router_name "my-service";
+          image = Test_helpers.image_reference "acme/app";
           port = 8080;
           registry_user = None;
           registry_pass = None;

@@ -240,7 +240,7 @@ module Simple = Bondi_server__Strategy__Simple
 let cron_job ~name ~image : Simple.cron_job =
   {
     name;
-    image;
+    image = Test_helpers.image_reference image;
     schedule = "*/5 * * * *";
     network = None;
     env_vars = None;
@@ -257,14 +257,15 @@ let cron_job ~name ~image : Simple.cron_job =
 let deploy_input ~service_name ~image ~cron_jobs : Simple.deploy_input =
   {
     service_name;
-    image;
+    image = Option.map Test_helpers.image_reference image;
     port = Some 8080;
     registry_user = Some "deployer";
     registry_pass = Some "s3cret";
     env_vars = Some [ ("API_KEY", "k3y") ];
     traefik_domain_name = Some "app.example.com";
-    traefik_image = Some "traefik:v3.3.0";
+    traefik_image = Some (Test_helpers.image_reference "traefik:v3.3.0");
     traefik_acme_email = Some "ops@example.com";
+    traefik_acme_ca_server = None;
     force_traefik_redeploy = None;
     cron_jobs;
     drain_grace_period = None;
@@ -279,7 +280,8 @@ let deploy_input ~service_name ~image ~cron_jobs : Simple.deploy_input =
    in a repository of its own on a private registry. *)
 let test_declared_covers_service_and_cron_images () =
   let input =
-    deploy_input ~service_name:(Some "app")
+    deploy_input
+      ~service_name:(Some (Test_helpers.router_name "app"))
       ~image:(Some "registry.example.com/org/app:0.37.1")
       ~cron_jobs:
         (Some
@@ -318,22 +320,35 @@ let test_declared_for_cron_only_deploy () =
    tag the listing reports for it and the one that must be declared. *)
 let test_declared_defaults_untagged_service_to_latest () =
   let input =
-    deploy_input ~service_name:(Some "app")
+    deploy_input
+      ~service_name:(Some (Test_helpers.router_name "app"))
       ~image:(Some "registry.example.com/org/app") ~cron_jobs:None
   in
   check (list string) "the untagged service image as latest"
     [ "registry.example.com/org/app:latest" ]
     (Image_cleanup.declared_of_input input)
 
-(* A service image the parser rejects is declared as written, so a malformed
-   reference is never silently dropped from what is kept. *)
-let test_declared_keeps_unparsable_service_image_as_written () =
+(* A service image behind a registry port is declared as written, whole, and
+   listed under its repository with the port, so the port's ':' is never read
+   as the start of a tag. Split there, the reference names no repository, its
+   earlier tags are never listed, and cleanup silently removes nothing for it.
+   The portless cron image beside it is the arm that shows a plain repository
+   is listed too. *)
+let test_declared_registry_port_reference () =
   let input =
-    deploy_input ~service_name:(Some "app") ~image:(Some "host:5000/app:1.0")
-      ~cron_jobs:None
+    deploy_input
+      ~service_name:(Some (Test_helpers.router_name "app"))
+      ~image:(Some "registry:5000/app:1.2.3")
+      ~cron_jobs:
+        (Some [ cron_job ~name:"alert-check" ~image:"app-alert-check:1.2.3" ])
   in
-  check (list string) "declared as written" [ "host:5000/app:1.0" ]
-    (Image_cleanup.declared_of_input input)
+  let declared = Image_cleanup.declared_of_input input in
+  check (list string) "declared as written"
+    [ "registry:5000/app:1.2.3"; "app-alert-check:1.2.3" ]
+    declared;
+  check (list string) "each listed under its repository, port included"
+    [ "app-alert-check"; "registry:5000/app" ]
+    (Image_cleanup.repositories declared)
 
 (* A declared tag keeps a replaced id even when it arrives through [replaced]
    and the redeploy reuses the tag, with nothing referencing it yet. *)
@@ -398,8 +413,8 @@ let () =
             test_declared_for_cron_only_deploy;
           test_case "declared defaults untagged service to latest" `Quick
             test_declared_defaults_untagged_service_to_latest;
-          test_case "declared keeps unparsable service image as written" `Quick
-            test_declared_keeps_unparsable_service_image_as_written;
+          test_case "declared registry port reference" `Quick
+            test_declared_registry_port_reference;
         ] );
       ( "plan",
         [

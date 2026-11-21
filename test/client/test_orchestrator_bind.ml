@@ -22,7 +22,7 @@ let cfg ?bind_address ?api_token ?cron_jobs () =
 let a_cron_job : Config_file.cron_job =
   {
     Config_file.name = "levtra-paper";
-    image = "registry.example.com/org/levtra";
+    image = Test_helpers.image_reference "registry.example.com/org/levtra";
     schedule = "10 22 * * 1-5";
     network = None;
     env_vars = None;

@@ -44,6 +44,13 @@ let test_parse_name_tag_colon_in_tag () =
     (Ok ("name", "tag:extra"))
     (Deploy.parse_name_tag "name:tag:extra")
 
+(* What a builder answered for a fixture whose images compose. A refusal here is
+   the fixture's fault, said as such, rather than a test of the refusal. *)
+let composed = function
+  | Ok value -> value
+  | Error message ->
+      Alcotest.fail ("the fixture's image did not compose: " ^ message)
+
 (* validate_deployments *)
 
 let mk_config ?user_service ?cron_jobs () : Config_file.t =
@@ -58,8 +65,8 @@ let mk_config ?user_service ?cron_jobs () : Config_file.t =
 
 let mk_service name : Config_file.user_service =
   {
-    name;
-    image = "img";
+    name = Test_helpers.router_name name;
+    image = Test_helpers.image_reference "img";
     port = 8080;
     registry_user = None;
     registry_pass = None;
@@ -77,7 +84,7 @@ let mk_cron_job ?network ?alert_sinks ?exit_code_severities name ip :
     Config_file.cron_job =
   {
     name;
-    image = "img";
+    image = Test_helpers.image_reference "img";
     schedule = "* * * * *";
     network;
     env_vars = None;
@@ -118,7 +125,9 @@ let test_validate_deployments_empty () =
 let test_cron_jobs_for_server_matching () =
   let jobs = [ mk_cron_job "backup" "1.2.3.4" ] in
   let deployments = [ ("backup", "v1") ] in
-  match Deploy.cron_jobs_for_server "1.2.3.4" (Some jobs) deployments with
+  match
+    composed @@ Deploy.cron_jobs_for_server "1.2.3.4" (Some jobs) deployments
+  with
   | Some [ j ] ->
       check string "job name" "backup" j.name;
       check string "image has tag" "img:v1" j.image
@@ -130,15 +139,54 @@ let test_cron_jobs_for_server_matching () =
 let test_cron_jobs_for_server_non_matching () =
   let jobs = [ mk_cron_job "backup" "1.2.3.4" ] in
   let deployments = [ ("backup", "v1") ] in
-  match Deploy.cron_jobs_for_server "5.6.7.8" (Some jobs) deployments with
+  match
+    composed @@ Deploy.cron_jobs_for_server "5.6.7.8" (Some jobs) deployments
+  with
   | None -> ()
   | Some _ -> Alcotest.fail "expected no matching jobs for different server"
 
 let test_cron_jobs_for_server_none () =
   let deployments = [ ("backup", "v1") ] in
-  match Deploy.cron_jobs_for_server "1.2.3.4" None deployments with
+  match composed @@ Deploy.cron_jobs_for_server "1.2.3.4" None deployments with
   | None -> ()
   | Some _ -> Alcotest.fail "expected None when no cron jobs"
+
+(* A tag the command line was given is appended to an image the file names, and
+   the two together must be a reference the orchestrator will take. [v1:rc]
+   reads as a tag to the command line's split, which cuts at the first colon,
+   but no reference carries a colon in its tag, so the orchestrator would refuse
+   it. It is refused here instead, before a session is opened, naming the
+   target and echoing what the two composed into. *)
+let test_cron_jobs_for_server_refuses_a_tag_that_composes_no_reference () =
+  match
+    Deploy.cron_jobs_for_server "1.2.3.4"
+      (Some [ mk_cron_job "backup" "1.2.3.4" ])
+      [ ("backup", "v1:rc") ]
+  with
+  | Ok _ -> Alcotest.fail "a tag that composes no reference was accepted"
+  | Error message ->
+      check string "the refusal names the target and the composed text"
+        "backup:v1:rc cannot be deployed: \"img:v1:rc\" is not an image \
+         reference"
+        message
+
+let test_payload_for_refuses_a_tag_that_composes_no_reference () =
+  let server : Config_file.server =
+    { ip_address = "10.0.0.5"; ssh = None; port = None }
+  in
+  let config =
+    mk_config ~user_service:{ (mk_service "web") with servers = [ server ] } ()
+  in
+  match
+    Deploy.payload_for config
+      ~deployments:[ ("web", "v1:rc") ]
+      ~force_traefik_redeploy:false server None
+  with
+  | Ok _ -> Alcotest.fail "a tag that composes no reference was accepted"
+  | Error message ->
+      check string "the refusal names the target and the composed text"
+        "web:v1:rc cannot be deployed: \"img:v1:rc\" is not an image reference"
+        message
 
 (* cron_job_to_deploy *)
 
@@ -320,13 +368,14 @@ let test_deploy_payload_includes_logs_flag () =
   in
   let payload : Deploy.deploy_payload =
     {
-      service_name = Some service.name;
-      image = Some (service.image ^ ":v1");
+      service_name = Some (Bondi_common.Router_name.to_string service.name);
+      image = Some (Bondi_common.Image_reference.to_string service.image ^ ":v1");
       port = Some service.port;
       env_vars = service.env_vars;
       traefik_domain_name = None;
       traefik_image = None;
       traefik_acme_email = None;
+      traefik_acme_ca_server = None;
       registry_user = service.registry_user;
       registry_pass = service.registry_pass;
       force_traefik_redeploy = None;
@@ -369,9 +418,10 @@ let service_payload_json volumes =
         { (mk_service "web") with servers = [ payload_server ]; volumes }
       ()
   in
-  Deploy.payload_for config
-    ~deployments:[ ("web", "v1") ]
-    ~force_traefik_redeploy:false payload_server None
+  composed
+  @@ Deploy.payload_for config
+       ~deployments:[ ("web", "v1") ]
+       ~force_traefik_redeploy:false payload_server None
   |> Deploy.deploy_payload_to_yojson
 
 let wire_keys = function
@@ -405,6 +455,66 @@ let test_payload_carries_volumes_when_declared () =
         (Some [ ("/srv/comalito/invoices", "/data/invoices", false) ])
         (Option.map (List.map mount_fields) decoded.volumes)
 
+(* deploy_payload traefik_acme_ca_server
+
+   One fixture differing only in whether the manifest names a certificate
+   server. An orchestrator that predates the field refuses a payload carrying
+   it, so a manifest that names none sends no key at all, not a null. *)
+
+let ca_server_payload_json acme_ca_server =
+  let traefik : Config_file.traefik =
+    {
+      domain_name = "web.example.com";
+      image = Test_helpers.image_reference "traefik:v3.6.8";
+      acme_email = "ops@example.com";
+      acme_ca_server;
+    }
+  in
+  let config =
+    {
+      (mk_config
+         ~user_service:{ (mk_service "web") with servers = [ payload_server ] }
+         ())
+      with
+      traefik = Some traefik;
+    }
+  in
+  composed
+  @@ Deploy.payload_for config
+       ~deployments:[ ("web", "v1") ]
+       ~force_traefik_redeploy:false payload_server None
+  |> Deploy.deploy_payload_to_yojson
+
+let staging_directory = "https://acme-staging-v02.api.letsencrypt.org/directory"
+
+let test_payload_omits_absent_ca_server () =
+  let keys = wire_keys (ca_server_payload_json None) in
+  check bool "the payload carries the traefik block" true
+    (List.mem "traefik_acme_email" keys);
+  check bool "no certificate-server key at all, not a null" false
+    (List.mem "traefik_acme_ca_server" keys)
+
+let test_payload_carries_ca_server () =
+  let server =
+    match Bondi_common.Acme_ca_server.of_string staging_directory with
+    | Ok server -> server
+    | Error message -> fail ("the fixture's URL was refused: " ^ message)
+  in
+  match ca_server_payload_json (Some server) with
+  | `Assoc fields ->
+      check (option string) "the URL is sent under the field's wire name"
+        (Some (Yojson.Safe.to_string (`String staging_directory)))
+        (Option.map Yojson.Safe.to_string
+           (List.assoc_opt "traefik_acme_ca_server" fields))
+  | `Null
+  | `Bool _
+  | `Int _
+  | `Float _
+  | `String _
+  | `List _
+  | `Intlit _ ->
+      fail "expected a JSON object"
+
 let test_payload_treats_empty_volumes_as_none () =
   check string "an empty list is sent as no list"
     (Yojson.Safe.to_string (service_payload_json None))
@@ -419,9 +529,10 @@ let test_payload_treats_empty_volumes_as_none () =
    rather than from anything the server answers. *)
 let test_cron_deploy_against_an_under_version_box_is_refused () =
   let jobs =
-    Deploy.cron_jobs_for_server "1.2.3.4"
-      (Some [ mk_cron_job "backup" "1.2.3.4" ])
-      [ ("backup", "v1") ]
+    composed
+    @@ Deploy.cron_jobs_for_server "1.2.3.4"
+         (Some [ mk_cron_job "backup" "1.2.3.4" ])
+         [ ("backup", "v1") ]
   in
   let read_version () = Ok "0.12.0" in
   match Deploy.version_gate ~read_version ~volumes:None jobs with
@@ -499,9 +610,10 @@ let test_a_deploy_against_an_unreadable_box_is_refused () =
    all. *)
 let test_cron_deploy_against_a_supported_box_proceeds () =
   let jobs =
-    Deploy.cron_jobs_for_server "1.2.3.4"
-      (Some [ mk_cron_job "backup" "1.2.3.4" ])
-      [ ("backup", "v1") ]
+    composed
+    @@ Deploy.cron_jobs_for_server "1.2.3.4"
+         (Some [ mk_cron_job "backup" "1.2.3.4" ])
+         [ ("backup", "v1") ]
   in
   let read_version () = Ok Bondi_client.Server_version.minimum_for_exec_lines in
   match Deploy.version_gate ~read_version ~volumes:None jobs with
@@ -544,9 +656,10 @@ let test_gate_with_volumes_holds_to_volume_floor () =
    operator to an image that is refused again. *)
 let test_gate_with_volumes_and_cron_holds_to_highest_floor () =
   let jobs =
-    Deploy.cron_jobs_for_server "1.2.3.4"
-      (Some [ mk_cron_job "backup" "1.2.3.4" ])
-      [ ("backup", "v1") ]
+    composed
+    @@ Deploy.cron_jobs_for_server "1.2.3.4"
+         (Some [ mk_cron_job "backup" "1.2.3.4" ])
+         [ ("backup", "v1") ]
   in
   let volumes = Some [ invoices_mount () ] in
   let exec_floor = Bondi_client.Server_version.minimum_for_exec_lines in
@@ -565,9 +678,10 @@ let test_gate_with_volumes_and_cron_holds_to_highest_floor () =
    nothing either, so it is held the same as [None]. *)
 let test_gate_without_volumes_unchanged_at_0_22 () =
   let jobs =
-    Deploy.cron_jobs_for_server "1.2.3.4"
-      (Some [ mk_cron_job "backup" "1.2.3.4" ])
-      [ ("backup", "v1") ]
+    composed
+    @@ Deploy.cron_jobs_for_server "1.2.3.4"
+         (Some [ mk_cron_job "backup" "1.2.3.4" ])
+         [ ("backup", "v1") ]
   in
   check (result_testable unit) "no volumes, no cron jobs" (Ok ())
     (gate_at "0.22.0" ~volumes:None None);
@@ -649,9 +763,10 @@ let payload_directory_holding jobs =
        @ [ "BONDI_CRON_PAYLOAD_END" ]))
 
 let nightly_report_on ip =
-  Deploy.cron_jobs_for_server ip
-    (Some [ mk_cron_job "nightly-report" ip ])
-    [ ("nightly-report", "v1") ]
+  composed
+  @@ Deploy.cron_jobs_for_server ip
+       (Some [ mk_cron_job "nightly-report" ip ])
+       [ ("nightly-report", "v1") ]
 
 (* The direction a deploy is best placed to catch: the section still fires a job
    whose files the box no longer holds, so the job fails at its next fire, and
@@ -747,13 +862,14 @@ let test_deploy_with_an_empty_cron_list_reads_neither_source () =
    from the box. *)
 let test_a_partial_cron_deploy_sees_the_orphan_a_withdrawal_left () =
   let jobs =
-    Deploy.cron_jobs_for_server "1.2.3.4"
-      (Some
-         [
-           mk_cron_job "nightly-report" "1.2.3.4";
-           mk_cron_job "price-alert" "1.2.3.4";
-         ])
-      [ ("nightly-report", "v1") ]
+    composed
+    @@ Deploy.cron_jobs_for_server "1.2.3.4"
+         (Some
+            [
+              mk_cron_job "nightly-report" "1.2.3.4";
+              mk_cron_job "price-alert" "1.2.3.4";
+            ])
+         [ ("nightly-report", "v1") ]
   in
   match
     Deploy.cron_divergence_report ~server:"1.2.3.4"
@@ -853,8 +969,9 @@ let gated_server ip : Config_file.server =
    hand, so every field is the one the command would send. *)
 let with_payload server =
   ( server,
-    Deploy.payload_for (mk_config ()) ~deployments:[]
-      ~force_traefik_redeploy:false server None )
+    composed
+    @@ Deploy.payload_for (mk_config ()) ~deployments:[]
+         ~force_traefik_redeploy:false server None )
 
 (* None of the payloads the gate's first two cases send mounts anything, so a
    host-path check is a round trip nobody asked for. Its affirmative arm is the
@@ -955,9 +1072,10 @@ let volume_payloads host =
   List.map
     (fun server ->
       ( server,
-        Deploy.payload_for config
-          ~deployments:[ ("web", "v1") ]
-          ~force_traefik_redeploy:false server None ))
+        composed
+        @@ Deploy.payload_for config
+             ~deployments:[ ("web", "v1") ]
+             ~force_traefik_redeploy:false server None ))
     servers
 
 (* Runs [f] with a checker whose boxes answer as [root_sees] says, and returns
@@ -1061,9 +1179,10 @@ let test_a_cron_only_deploy_does_not_check_the_services_volumes () =
       ()
   in
   let payload =
-    Deploy.payload_for config
-      ~deployments:[ ("nightly", "v1") ]
-      ~force_traefik_redeploy:false server None
+    composed
+    @@ Deploy.payload_for config
+         ~deployments:[ ("nightly", "v1") ]
+         ~force_traefik_redeploy:false server None
   in
   check bool "the payload carries no volumes" true (payload.volumes = None);
   let outcome =
@@ -1099,9 +1218,10 @@ let test_a_server_outside_the_service_gets_no_volumes () =
       ()
   in
   let payload =
-    Deploy.payload_for config
-      ~deployments:[ ("web", "v1") ]
-      ~force_traefik_redeploy:false other None
+    composed
+    @@ Deploy.payload_for config
+         ~deployments:[ ("web", "v1") ]
+         ~force_traefik_redeploy:false other None
   in
   check bool "the payload carries no volumes" true (payload.volumes = None)
 
@@ -1184,6 +1304,10 @@ let () =
           test_case "non-matching server" `Quick
             test_cron_jobs_for_server_non_matching;
           test_case "no cron jobs" `Quick test_cron_jobs_for_server_none;
+          test_case "a tag that composes no reference is refused" `Quick
+            test_cron_jobs_for_server_refuses_a_tag_that_composes_no_reference;
+          test_case "the service's too" `Quick
+            test_payload_for_refuses_a_tag_that_composes_no_reference;
         ] );
       ( "cron_job_to_deploy",
         [
@@ -1254,6 +1378,10 @@ let () =
             test_payload_carries_volumes_when_declared;
           test_case "treats an empty volumes list as none" `Quick
             test_payload_treats_empty_volumes_as_none;
+          test_case "omits the certificate server when none is named" `Quick
+            test_payload_omits_absent_ca_server;
+          test_case "carries the certificate server when named" `Quick
+            test_payload_carries_ca_server;
         ] );
       ( "deprecation notices",
         [

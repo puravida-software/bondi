@@ -95,7 +95,7 @@ let run output_format () =
   | Ok config -> (
       let service_name =
         match config.user_service with
-        | Some service -> Some service.name
+        | Some service -> Some (Bondi_common.Router_name.to_string service.name)
         | None -> None
       in
       let reports =

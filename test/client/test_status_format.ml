@@ -77,8 +77,8 @@ let section_has ~needle lines =
 
 let mk_service name : Config_file.user_service =
   {
-    name;
-    image = "ghcr.io/org/myapp";
+    name = Test_helpers.router_name name;
+    image = Test_helpers.image_reference "ghcr.io/org/myapp";
     port = 8080;
     registry_user = None;
     registry_pass = None;
@@ -95,7 +95,7 @@ let mk_service name : Config_file.user_service =
 let mk_cron_job name image ip : Config_file.cron_job =
   {
     name;
-    image;
+    image = Test_helpers.image_reference image;
     schedule = "0 0 * * *";
     network = None;
     env_vars = None;
@@ -154,8 +154,8 @@ let test_format_table_full () =
     mk_config ~user_service:(mk_service "myapp")
       ~cron_jobs:
         [
-          mk_cron_job "backup" "ghcr.io/org/backup:v2.1.0" "1.2.3.4";
-          mk_cron_job "cleanup" "ghcr.io/org/cleanup:latest" "1.2.3.4";
+          mk_cron_job "backup" "ghcr.io/org/backup" "1.2.3.4";
+          mk_cron_job "cleanup" "ghcr.io/org/cleanup" "1.2.3.4";
         ]
       ()
   in
@@ -222,7 +222,7 @@ let test_format_table_not_found_service () =
 let test_format_table_not_found_cron () =
   let config =
     mk_config
-      ~cron_jobs:[ mk_cron_job "backup" "ghcr.io/org/backup:v2.1.0" "1.2.3.4" ]
+      ~cron_jobs:[ mk_cron_job "backup" "ghcr.io/org/backup" "1.2.3.4" ]
       ()
   in
   let status : Status.comprehensive_status =
@@ -248,7 +248,7 @@ let test_format_table_not_found_cron () =
 let test_format_table_cron_restart_na () =
   let config =
     mk_config
-      ~cron_jobs:[ mk_cron_job "backup" "ghcr.io/org/backup:v2.1.0" "1.2.3.4" ]
+      ~cron_jobs:[ mk_cron_job "backup" "ghcr.io/org/backup" "1.2.3.4" ]
       ()
   in
   let status : Status.comprehensive_status =

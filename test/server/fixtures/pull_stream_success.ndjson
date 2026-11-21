@@ -1,0 +1,6 @@
+{"status":"Pulling from bondi-observe-app","id":"fresh"}
+{"status":"Pulling fs layer","progressDetail":{},"id":"6560c3fc11de"}
+{"status":"Download complete","progressDetail":{"hidecounts":true},"id":"6560c3fc11de"}
+{"status":"Pull complete","progressDetail":{"hidecounts":true},"id":"6560c3fc11de"}
+{"status":"Digest: sha256:a09642e8c749eadce04a5baf69fabcf0985c639aa87b1bd0bbfd84fb5c4524de"}
+{"status":"Status: Downloaded newer image for localhost:5443/bondi-observe-app:fresh"}

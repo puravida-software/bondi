@@ -633,9 +633,62 @@ let test_list_images_filters_by_reference () =
     "no reference, no filter" []
     (Docker.list_images_query ~reference:None)
 
+(* The pull's query is the Engine API's [ImageCreate]: [fromImage] is the
+   repository, registry included, and [tag] is "Tag or digest. If empty when
+   pulling an image, this causes all tags for the given image to be pulled". So
+   an untagged reference is pulled as [latest], and a digest-pinned one by its
+   digest. *)
+let test_pull_image_query () =
+  let query reference =
+    Docker.pull_image_query (Test_helpers.image_reference reference)
+  in
+  let digest = "sha256:" ^ String.make 64 'a' in
+  Alcotest.check
+    Alcotest.(list (pair string (list string)))
+    "an untagged reference is pulled at latest"
+    [ ("fromImage", [ "traefik" ]); ("tag", [ "latest" ]) ]
+    (query "traefik");
+  Alcotest.check
+    Alcotest.(list (pair string (list string)))
+    "a registry behind a port stays in fromImage"
+    [ ("fromImage", [ "localhost:5443/app" ]); ("tag", [ "1.2.3" ]) ]
+    (query "localhost:5443/app:1.2.3");
+  Alcotest.check
+    Alcotest.(list (pair string (list string)))
+    "a digest-pinned reference is pulled by its digest"
+    [ ("fromImage", [ "old/worker" ]); ("tag", [ digest ]) ]
+    (query ("old/worker@" ^ digest))
+
+(* The engine's own line for a layer the registry cannot serve names the
+   layer's digest and not the image, so a deploy that pulls a workload, Traefik
+   and cron images could not say which one failed. The failure is named by the
+   reference pulled, as written; a pull that succeeded passes untouched. *)
+let test_pull_failure_names_the_reference () =
+  let reference = Test_helpers.image_reference "localhost:5443/app:v2" in
+  let engine_line =
+    "the pull failed: failed to copy: could not fetch content descriptor \
+     sha256:4197fd83 from remote: not found"
+  in
+  Alcotest.check
+    Alcotest.(result unit string)
+    "a failed pull names its image"
+    (Error ("could not pull localhost:5443/app:v2: " ^ engine_line))
+    (Docker.named_pull_failure reference (Error engine_line));
+  Alcotest.check
+    Alcotest.(result unit string)
+    "a pull that succeeded passes untouched" (Ok ())
+    (Docker.named_pull_failure reference (Ok ()))
+
 let () =
   Alcotest.run "Docker.Client"
     [
+      ( "image pull",
+        [
+          Alcotest.test_case "the query names the tag to pull" `Quick
+            test_pull_image_query;
+          Alcotest.test_case "a failed pull names its image" `Quick
+            test_pull_failure_names_the_reference;
+        ] );
       ( "image list",
         [
           Alcotest.test_case "decodes a recorded body" `Quick

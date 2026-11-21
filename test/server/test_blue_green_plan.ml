@@ -4,16 +4,39 @@ module Docker = Bondi_server__Docker__Client
 module Simple = Bondi_server__Strategy__Simple
 module Workload_host_config = Bondi_server__Strategy__Workload_host_config
 
+(* The labels production puts on a service, taken from the function that builds
+   them, so a change to the label shape reaches this suite instead of leaving a
+   hand-written copy describing keys nothing produces. *)
+let service_name = "my-service"
+
+let service_input : Simple.deploy_input =
+  {
+    Simple.service_name = Some (Test_helpers.router_name service_name);
+    image = Some (Test_helpers.image_reference "myapp:v1");
+    port = Some 8080;
+    registry_user = None;
+    registry_pass = None;
+    env_vars = None;
+    traefik_domain_name = Some "example.com";
+    traefik_image = None;
+    traefik_acme_email = None;
+    traefik_acme_ca_server = None;
+    force_traefik_redeploy = None;
+    cron_jobs = None;
+    drain_grace_period = None;
+    deployment_strategy = None;
+    health_timeout = None;
+    poll_interval = None;
+    logs = None;
+    volumes = None;
+  }
+
 let traefik_labels =
-  [
-    ("traefik.enable", "true");
-    ( "traefik.http.routers.bondi.rule",
-      "Host(`example.com`) || Host(`www.example.com`)" );
-    ("traefik.http.routers.bondi.entrypoints", "websecure");
-    ("traefik.http.routers.bondi.tls", "true");
-    ("traefik.http.routers.bondi.tls.certresolver", "bondi_resolver");
-    ("traefik.http.services.bondi.loadbalancer.server.port", "8080");
-  ]
+  match Simple.service_config service_input with
+  | Ok (_, { Docker.labels = Some labels; _ }) -> labels
+  | Ok (_, { Docker.labels = None; _ })
+  | Error _ ->
+      failwith "fixture: service_config produced no labels"
 
 let base_config =
   {
@@ -204,7 +227,17 @@ let test_plan_traefik_labels_on_new_container () =
               labels
         | None -> false
       in
-      check bool "has traefik labels" true has_traefik_enable
+      check bool "has traefik labels" true has_traefik_enable;
+      let router_rule =
+        match config.labels with
+        | Some labels ->
+            List.assoc_opt
+              ("traefik.http.routers." ^ service_name ^ ".rule")
+              labels
+        | None -> None
+      in
+      check bool "router is named after the service" true
+        (Option.is_some router_rule)
   | Some (Blue_green.CleanupOrphanedContainer _)
   | Some (Blue_green.WaitForHealthy _)
   | Some (Blue_green.DisconnectFromNetwork _)
@@ -262,8 +295,8 @@ let bind_mount = Test_helpers.bind_mount
 
 let input_with_volumes : Simple.deploy_input =
   {
-    service_name = Some "my-service";
-    image = Some "myapp:v1";
+    service_name = Some (Test_helpers.router_name "my-service");
+    image = Some (Test_helpers.image_reference "myapp:v1");
     port = Some 8080;
     registry_user = None;
     registry_pass = None;
@@ -271,6 +304,7 @@ let input_with_volumes : Simple.deploy_input =
     traefik_domain_name = Some "example.com";
     traefik_image = None;
     traefik_acme_email = None;
+    traefik_acme_ca_server = None;
     force_traefik_redeploy = None;
     cron_jobs = None;
     drain_grace_period = None;

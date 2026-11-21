@@ -410,7 +410,7 @@ let cron_config =
       [
         {
           name = "daily-close";
-          image = "ghcr.io/org/close:v1";
+          image = Test_helpers.image_reference "ghcr.io/org/close";
           schedule = "0 0 * * *";
           network = None;
           env_vars = None;
@@ -973,51 +973,58 @@ let test_report_an_unreadable_answer_is_not_an_unreachable_source () =
   check bool "carrying the answer it could not read" true
     (contains unreadable ~needle:"unexpected")
 
-(* 27. The two sources split an image reference with two different parsers, and
-       for a digest-pinned image they disagree on where the split falls. The
-       host is read here, by a parser that knows a digest names no tag:
-       [old/worker@sha256:abc] is the whole image. The orchestrator's side is
-       produced by the server's [parse_image_and_tag], which splits on a colon
-       and hands back [old/worker@sha256] with a tag of [abc].
+(* 27. A digest-pinned image is described identically by both sources, because
+       both split it with one parser: the host's listing is read here, through
+       the client's own reading of it, and the orchestrator's side is the shape
+       the server's status reports for the same reference, the whole reference
+       with no tag. The two agree, so the row is one container.
 
-       Nothing about the container differs — it is one container, described by
-       two parsers — so flagging it reports drift where there is none, on every
-       run, forever. A flag that is always lit is a flag nobody reads, which
-       costs the report the one finding it exists to make.
+       The second arm is what keeps the comparison meaningful: two different
+       digests are two different images, and still disagree.
 
-       The second arm is what stops the fix going too far: two genuinely
-       different images must still be a disagreement. *)
-let test_report_a_digest_split_two_ways_is_not_a_disagreement () =
-  let pinned = "old/worker@sha256:abc123" in
+       The third is what was given up. The comparison is of the two splits as
+       reported, with nothing put back together between them, so an
+       orchestrator that splits the digest at its colon instead, as one from
+       before the shared parser does, is reported as disagreeing until it is
+       upgraded. Reconciling two parsers here is what hid their drift. *)
+let test_report_a_digest_pinned_image_is_described_once () =
+  let pinned digit = "old/worker@sha256:" ^ String.make 64 digit in
   let host_side =
-    host_container ~name:"worker" ~image:pinned ~tag:"" ~state:"running"
-      ~health:Inventory.No_healthcheck
+    match
+      Inventory.of_reads
+        ~listing:(Ok (Printf.sprintf "worker\t%s\trunning\n" (pinned 'a')))
+        ~inspection:
+          (Ok (Printf.sprintf "/worker\tundeclared\t\t0\t%s\n" created))
+    with
+    | Inventory.Observed [ container ] -> container
+    | Inventory.Observed _
+    | Inventory.Unreadable_listing _ ->
+        fail "expected the host to list the one container"
   in
-  let orchestrator_side =
-    orchestrator_container ~name:"worker" ~image:"old/worker@sha256"
-      ~tag:"abc123" ~state:"running"
-  in
-  let rows =
+  let reported_by_orchestrator ~image ~tag =
     report
       ~docker:(Inventory.Observed [ orchestrator_on_the_box; host_side ])
-      ~orchestrator:(Ok [ orchestrator_over_http; orchestrator_side ])
+      ~orchestrator:
+        (Ok
+           [
+             orchestrator_over_http;
+             orchestrator_container ~name:"worker" ~image ~tag ~state:"running";
+           ])
       ()
   in
-  check bool "one container described by two parsers is not two containers"
-    false
-    (Report.disagrees (row_named "worker" rows));
-  let genuinely_different =
-    orchestrator_container ~name:"worker" ~image:"old/worker@sha256"
-      ~tag:"def456" ~state:"running"
-  in
-  let drifted =
-    report
-      ~docker:(Inventory.Observed [ orchestrator_on_the_box; host_side ])
-      ~orchestrator:(Ok [ orchestrator_over_http; genuinely_different ])
-      ()
-  in
-  check bool "two different images still are" true
-    (Report.disagrees (row_named "worker" drifted))
+  check bool "one container described identically is one container" false
+    (Report.disagrees
+       (row_named "worker"
+          (reported_by_orchestrator ~image:(pinned 'a') ~tag:"")));
+  check bool "two different digests are two images" true
+    (Report.disagrees
+       (row_named "worker"
+          (reported_by_orchestrator ~image:(pinned 'b') ~tag:"")));
+  check bool "a split at the digest's colon is a different description" true
+    (Report.disagrees
+       (row_named "worker"
+          (reported_by_orchestrator ~image:"old/worker@sha256"
+             ~tag:(String.make 64 'a'))))
 
 (* 28. A host that was never reached is a source the report could not consult.
        Its twin below is the same source having answered, and the pair is the
@@ -1158,8 +1165,8 @@ let () =
         ] );
       ( "agreement",
         [
-          test_case "a digest split two ways is not a disagreement" `Quick
-            test_report_a_digest_split_two_ways_is_not_a_disagreement;
+          test_case "a digest-pinned image is described once" `Quick
+            test_report_a_digest_pinned_image_is_described_once;
         ] );
       ( "unavailability",
         [

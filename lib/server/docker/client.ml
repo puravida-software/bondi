@@ -565,36 +565,75 @@ let create_network_if_not_exists :
     let* _ = call ~headers ~body t ~net `POST "/networks/create" [] in
     Ok ()
 
+(** The query of the Engine API's [ImageCreate] for pulling the reference: the
+    repository, registry included, as [fromImage], and the reference's
+    [Image_reference.pull_tag] as [tag]. An empty [tag] would pull every tag of
+    the repository, so one is never sent. *)
+let pull_image_query :
+    Bondi_common.Image_reference.t -> (string * string list) list =
+ fun reference ->
+  [
+    query_param "fromImage" (Bondi_common.Image_reference.name reference);
+    query_param "tag" (Bondi_common.Image_reference.pull_tag reference);
+  ]
+
+(** A pull's failure, named by the reference that was pulled. The engine's own
+    line for a layer the registry cannot serve names the layer's digest and not
+    the image, and names a missing tag only because its 404 body happens to, so
+    a deploy that pulls a workload, Traefik and cron images could not otherwise
+    say which pull failed. The reference has already decoded, and the reference
+    grammar carries no credential, so naming it is safe. A pull that succeeded
+    passes untouched. *)
+let named_pull_failure :
+    Bondi_common.Image_reference.t ->
+    (unit, string) result ->
+    (unit, string) result =
+ fun reference result ->
+  Result.map_error
+    (fun reason ->
+      Printf.sprintf "could not pull %s: %s"
+        (Bondi_common.Image_reference.to_string reference)
+        reason)
+    result
+
+(* The engine answers a pull with 200 before it has fetched anything, so the
+   status cannot say whether the pull worked: the body it streams is read whole
+   and judged by [Pull_stream.verdict]. [/images/create] takes no request bound
+   (see [engine_request_timeout_seconds]): it lasts as long as the image takes
+   to arrive. *)
 let pull_image :
     t ->
     net:_ Eio.Net.t ->
-    image:string ->
-    tag:string ->
+    reference:Bondi_common.Image_reference.t ->
     registry_auth:string option ->
     (unit, string) result =
- fun t ~net ~image ~tag ~registry_auth ->
-  let query = [ query_param "fromImage" image; query_param "tag" tag ] in
+ fun t ~net ~reference ~registry_auth ->
   let headers =
     match registry_auth with
     | None -> Cohttp.Header.init ()
     | Some auth -> Cohttp.Header.init_with "X-Registry-Auth" auth
   in
-  let* _ =
-    call_allow_status ~allowed:[ 304 ] ~headers t ~net `POST "/images/create"
-      query
-  in
-  Ok ()
+  named_pull_failure reference
+    (let* body =
+       call_allow_status ~allowed:[ 304 ] ~headers t ~net `POST "/images/create"
+         (pull_image_query reference)
+     in
+     Pull_stream.verdict body)
 
 let pull_image_with_auth :
-    t -> net:_ Eio.Net.t -> image:string -> tag:string -> (unit, string) result
-    =
- fun t ~net ~image ~tag ->
-  pull_image t ~net ~image ~tag ~registry_auth:t.registry_auth
+    t ->
+    net:_ Eio.Net.t ->
+    reference:Bondi_common.Image_reference.t ->
+    (unit, string) result =
+ fun t ~net ~reference ->
+  pull_image t ~net ~reference ~registry_auth:t.registry_auth
 
 let pull_image_no_auth :
-    t -> net:_ Eio.Net.t -> image:string -> tag:string -> (unit, string) result
-    =
- fun t ~net ~image ~tag -> pull_image t ~net ~image ~tag ~registry_auth:None
+    t ->
+    net:_ Eio.Net.t ->
+    reference:Bondi_common.Image_reference.t ->
+    (unit, string) result =
+ fun t ~net ~reference -> pull_image t ~net ~reference ~registry_auth:None
 
 let remove_container :
     t -> net:_ Eio.Net.t -> container_id:string -> (unit, string) result =

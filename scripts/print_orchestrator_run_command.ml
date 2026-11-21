@@ -28,10 +28,23 @@ let deployed_version = "0.12.0"
    A host holding a section it does not declare therefore gets the `cron` line
    below rather than a third shape -- the string is the same one -- so the two
    lines still cover every command this can emit. *)
+(* The run command reads nothing of the job's image; it is spelled out only
+   because the record has no field that may go unset. A literal that stopped
+   parsing would be a fixture bug, said on stderr rather than printed as a
+   command. *)
+let nightly_image =
+  match
+    Bondi_common.Image_reference.of_string "registry.example.com/org/nightly"
+  with
+  | Ok reference -> reference
+  | Error (Bondi_common.Image_reference.Empty | Malformed _) ->
+      prerr_endline "the nightly job's image fixture is not an image reference";
+      exit 1
+
 let a_cron_job : Config_file.cron_job =
   {
     Config_file.name = "nightly";
-    image = "registry.example.com/org/nightly";
+    image = nightly_image;
     schedule = "10 22 * * *";
     network = None;
     env_vars = None;

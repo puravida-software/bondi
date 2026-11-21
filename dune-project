@@ -30,6 +30,14 @@
    (and
     (>= 1.9.1)
     :with-test))
+  (qcheck-core
+   (and
+    (>= 0.91)
+    :with-test))
+  (qcheck-alcotest
+   (and
+    (>= 0.91)
+    :with-test))
   (cohttp
    (>= 6.2.1))
   (cohttp-eio

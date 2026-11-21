@@ -279,6 +279,45 @@ let test_prepare_accepts_a_tagged_image () =
       Alcotest.(check (list (list string)))
         "a run that is about to start dispatches nothing" [] !dispatched
 
+(* A cron job's image behind a registry port, or pinned by digest, is run as
+   written. Split at every colon, both fail to parse and the job never starts. *)
+let test_prepare_accepts_a_registry_port_and_a_digest () =
+  let full_image_of image =
+    match
+      Run.prepare
+        ~deliver:(fun ~targets:_ ~payload:_ -> ())
+        (run_body ~image ())
+    with
+    | Error err ->
+        Alcotest.fail
+          ("prepare rejected a valid body: " ^ Handler_error.message err)
+    | Ok (_payload, full_image) -> full_image
+  in
+  let behind_port = "registry:5000/app:1.2.3" in
+  let pinned = behind_port ^ "@sha256:" ^ String.make 64 'a' in
+  Alcotest.(check string)
+    "a registry port is kept" behind_port
+    (full_image_of behind_port);
+  Alcotest.(check string) "a digest is kept" pinned (full_image_of pinned)
+
+(* The refusal reaches standard error, cron mail and the diagnostics stream,
+   and an image that did not parse is unvalidated text that may hold a pasted
+   credential, so it names the field without carrying what the payload held. *)
+let test_prepare_refuses_a_malformed_image_without_echoing_it () =
+  let rejected = "Registry.Example/APP:token=s3cret" in
+  let message =
+    Handler_error.message
+      (prepare_must_fail
+         ~deliver:(fun ~targets:_ ~payload:_ -> ())
+         (run_body ~image:rejected ()))
+  in
+  Alcotest.(check bool)
+    "the refusal names the image field" true
+    (Bondi_common.String_utils.contains ~needle:"image" message);
+  Alcotest.(check bool)
+    "and does not carry the rejected text" false
+    (Bondi_common.String_utils.contains ~needle:"s3cret" message)
+
 let test_run_dispatches_alert_on_image_parse_failure () =
   let dispatched = ref [] in
   let body = run_body ~alert_sinks:alerting_sinks_json ~image:"myapp" () in
@@ -494,6 +533,11 @@ let () =
         [
           Alcotest.test_case "accepts a tagged image" `Quick
             test_prepare_accepts_a_tagged_image;
+          Alcotest.test_case "prepare accepts a registry port and a digest"
+            `Quick test_prepare_accepts_a_registry_port_and_a_digest;
+          Alcotest.test_case
+            "prepare refuses a malformed image without echoing it" `Quick
+            test_prepare_refuses_a_malformed_image_without_echoing_it;
           Alcotest.test_case "dispatches an alert on image parse failure" `Quick
             test_run_dispatches_alert_on_image_parse_failure;
           Alcotest.test_case "dispatches no alert when unconfigured" `Quick

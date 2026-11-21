@@ -10,10 +10,10 @@
 # because a subcommand that works under `dune exec` and not in the image is a
 # subcommand nobody can call.
 #
-# Ten assertions. The first seven are reached with `docker exec` into a
+# Fifteen assertions. The first seven are reached with `docker exec` into a
 # container started from the image passed in by the exact command the client
-# produces; the eighth and ninth are deploys sent through that same container
-# and judged from outside it, by container id; the tenth is asked from outside,
+# produces; the eighth to thirteenth, and 11a, are deploys sent through that same
+# container and judged from outside it, by container id; the fourteenth is asked from outside,
 # because stopping a container is not a thing the container can be asked to do
 # from within it:
 #
@@ -42,22 +42,58 @@
 #      for the service's host through that Traefik is answered by the new
 #      container -- each asked by container id, never inferred from an exit
 #      code. Then a deploy of a tag the registry does not have exits 1 naming
-#      the tag, and the new container still runs and still answers.
+#      the tag, and the new container still runs and still answers. The image
+#      the first deploy replaced is then gone from the engine and the new one is
+#      listed, both under a `localhost:<port>/` name, which is what image cleanup's
+#      repository filter has to match to remove anything there.
 #   9. a `blue-green` deploy, `arm_blue_green`, of an image that declares a
 #      health check: the same three outcomes, asked the same way.
+#  10. two `simple` deploys side by side, `arm_two_services`: two services with
+#      different names and hosts on the one Traefik, each host's request
+#      answered by its own service's container, asked by container id.
+#  11. a deploy whose pull fails inside the stream the engine answers 200 for,
+#      `arm_pull_stream_fails`: a service runs at one tag, then a deploy of an
+#      image whose layer the registry does not have exits 1 naming the image,
+#      and the first container, by id, still runs and still answers.
+# 11a. a deploy that carries registry credentials, `arm_registry_credentials`, to
+#      a second registry behind htpasswd: the base64url of the auth JSON, worked
+#      out again here, holds `-`, `_` and padding; a deploy with no credentials
+#      exits 1 naming the image and starts nothing; the same deploy with them
+#      exits 0, and its container runs, by id, and answers.
+#  12. a deploy asking for a Traefik image the registry does not have,
+#      `arm_traefik_pull_fails`: it exits 1 naming that image, and the running
+#      Traefik and the service's container, each by id, still run, and the
+#      service still answers through that Traefik.
+#  13. a deploy asking for another Traefik image, `arm_traefik_replaced`, run
+#      last: the gate's Traefik is gone, by id, and one the server created runs
+#      the asked-for image and answers for the service deployed with it. The
+#      deploy names Pebble as the certificate server, and the certificate that
+#      Traefik serves for the service's host was issued by this run's Pebble.
+#      That Traefik is the gate's copy, which logs at DEBUG, and its log names
+#      Pebble's directory and no Let's Encrypt host. The issuer check shows Pebble
+#      was used; only the log can show Let's Encrypt was not asked.
 #
-#      Before either runs, the script refuses -- fails, rather than skipping --
-#      on an engine that already holds the network a deploy attaches to, any
-#      container whose image contains `traefik`, or anything on host port 443,
-#      naming every holder and removing nothing. A deploy here would adopt the
-#      first two, so on a box running a real deployment this gate stops there.
+#      Every deploy names its image as `localhost:<port>/<name>:<tag>`, a
+#      reference with a registry port. Before any runs, the script refuses --
+#      fails, rather than skipping -- on an engine that already holds the
+#      network a deploy attaches to, any container whose image contains
+#      `traefik`, anything on host port 80, 443 or either registry's, or anything
+#      at the host path a Traefik the server creates binds its certificate
+#      store from, naming every holder and removing nothing. A deploy here would
+#      adopt the first two, so on a box running a real deployment this gate
+#      stops there. Otherwise the fixture makes that certificate store, empty
+#      and of mode 600, and teardown removes it, with only the directories this
+#      run made for it, and asserts the host's /etc is as it found it. The
+#      fixture also runs Pebble, an ACME test server, on its network, and
+#      pushes a copy of the pinned Traefik that trusts Pebble at two tags,
+#      which assertions 12 and 13 ask a deploy for.
 #
 # then a second container, started by the command the client produces for a
 # deployment that configures cron, which carries `--user root` and the spool
 # mount, and in which `check --cron-configured` must succeed -- and last of all,
 # on that same container, once nothing else needs it up:
 #
-#  10. `docker stop` is answered. The container leaves exit code 0, and leaves
+#  14. `docker stop` is answered. The container leaves exit code 0, and leaves
 #      it well inside the timeout the daemon was given rather than being killed
 #      at it. This is the one arm anywhere that runs the idling binary as a real
 #      PID 1 and then asks it to stop: `Cli.wait_forever` installs a SIGTERM
@@ -70,19 +106,23 @@
 # What this enumeration does not cover, named so its completeness is not read as
 # wider than it is:
 #
-#   - `deploy` given what a production deploy carries and assertions 8 and 9
-#     withhold. No registry credential: the gate's registry takes none, so the
-#     path that hands one to the engine is not reached. No certificate: the
-#     gate's Traefik defines no resolver, so the router is served with Traefik's
-#     default certificate and nothing is ordered. That is deliberate -- a gate
-#     run on every build must not drive a Let's Encrypt order -- and it means no
-#     certificate issuance is asserted here. No `traefik_image` and no
-#     `traefik_acme_email`, so the server adopts the gate's Traefik and the
-#     path on which it replaces one is not reached. And both arms deploy through
-#     the container the no-cron command starts, never the cron one.
+#   - `deploy` given what a production deploy carries and assertions 8 to 13
+#     withhold. Registry credentials reach the engine for one arm only, 11a, from a
+#     registry the gate starts on loopback: a pull from Docker Hub with them, and
+#     a header naming a registry other than `localhost:<port>`, are not reached. No Let's Encrypt order:
+#     through assertion 12 the gate's Traefik defines no resolver, so a router
+#     is served with Traefik's default certificate, and the Traefik assertion 13
+#     has a deploy create orders from Pebble. A gate run on every build must not
+#     drive a Let's Encrypt order, so a Traefik with no certificate server set,
+#     which orders from Let's Encrypt, is never created here. That Traefik also
+#     runs from the gate's copy of the image, which trusts Pebble and turns off
+#     Traefik's version check, so the image a production deploy names is not
+#     the one run. And every arm deploys through the container the no-cron
+#     command starts, never the cron one.
 #   - a deploy that fails after its pull: a health check that never passes, a
-#     container that will not start. The one failure the arms assert is the
-#     missing tag in assertion 8.
+#     container that will not start. The failures the arms assert are the
+#     missing tag in assertion 8, the missing layer in assertion 11 and the
+#     missing Traefik tag in assertion 12, all failed pulls.
 #   - that `status` reports the job assertion 6 ran. It does not and cannot:
 #     `status` lists cron jobs from the Bondi section of the crontab, and a job
 #     started by `run` writes no crontab entry. Manufacturing one would mean
@@ -97,17 +137,18 @@
 #     bundle. A run that skips it says so on stdout.
 #   - any signal other than SIGTERM reaching the idling PID 1. `wait_forever`
 #     resumes a sleep that some other signal's delivery merely cut short, so
-#     that a stray signal is not read as a stop; assertion 10 sends the one
+#     that a stray signal is not read as a stop; assertion 14 sends the one
 #     signal `docker stop` sends, and nothing here sends another.
 #   - the registry being reachable. Assertions 6 and 7 need a base image for the
 #     job container on the engine before either runs, and this script pulls it:
 #     `run` creates a container through the Engine API, which -- unlike the
 #     `docker run` CLI -- does not pull a missing image but answers 404 [observed
-#     against Docker Engine 29.8.0 on 2026-09-13]. Assertions 8 and 9 need three
+#     against Docker Engine 29.8.0 on 2026-09-13]. Assertions 8 to 13 need four
 #     more, each pinned by digest and pulled unless the engine already holds
 #     it: `registry:2` for the local registry, `traefik:v3.6.8` for the gate's
-#     Traefik, and `busybox:1.37.0`, which is both the workload's base and the
-#     probe that sends requests through that Traefik. A registry that
+#     Traefik, `busybox:1.37.0`, which is the workload's base, the probe that
+#     sends requests through that Traefik and the container that reads and
+#     writes the host's certificate store, and Pebble. A registry that
 #     rate-limits or refuses fails this gate, and nothing here can tell that
 #     apart from the image under test being broken.
 #
@@ -121,7 +162,7 @@
 # and a `skipped:` line naming the variable stands in their place; a run that
 # reaches the end having printed neither exited before it got here.
 #
-# Assertion 10 has been run both ways [observed -- 2026-09-13, Docker Engine
+# Assertion 14 has been run both ways [observed -- 2026-09-13, Docker Engine
 # 29.8.0]. Against this image it answered in 1s and exited 0. Against a
 # stand-in container whose PID 1 ignores SIGTERM it was refused twice over: the
 # stop took the full 30s and the container left 137, and each of the two arms
@@ -158,7 +199,7 @@ fixture="$here/orchestrator-run-command.txt"
 # same engine, and a box slow enough to fail one is slow enough to fail both.
 attempts=30
 # How long the daemon is told to wait between the SIGTERM `docker stop` sends
-# and the SIGKILL it falls back to, and how long assertion 10 allows the stop to
+# and the SIGKILL it falls back to, and how long assertion 14 allows the stop to
 # take. The two numbers are far apart on purpose. The defect that arm exists to
 # catch is a binary that never answers the signal, and such a binary does not
 # fail to stop -- it stops at the timeout, killed -- so a bound set at the
@@ -545,19 +586,15 @@ printf '{"volumes": [{"host": "relative/dir", "container": "/data", "read_only":
 # The affirmative arm for the malformed entry above: a well-formed volumes array
 # on an image that cannot be pulled. A build that refused every `volumes` entry
 # would exit 2 here as well, so the assertion is that it does not.
-printf '{"service_name": "image-gate-volumes", "image": "absent.invalid/absent:0.0.1", "port": 8080, "volumes": [{"host": "/srv/data", "container": "/data", "read_only": false}]}' \
+printf '{"service_name": "image-gate-volumes", "image": "127.0.0.1:1/absent:0.0.1", "port": 8080, "volumes": [{"host": "/srv/data", "container": "/data", "read_only": false}]}' \
     > "$work/wellformed-volumes.json"
-# Well formed, and Bondi cannot carry it out: `.invalid` is reserved by RFC 2606
-# and resolves nowhere, so the pull fails at once rather than being waited out.
-#
-# It does not name a registry port, though a port is the more direct way to make
-# a pull fail fast, because `Simple.parse_image_and_tag` splits on every colon
-# and rejects any reference carrying one, which is a known defect. A payload
-# written that way is refused as `Invalid_request` before a pull is attempted,
-# which exits 2 and answers 400: this assertion would then be pinning the
-# decode arm it has already pinned above, and the orchestrator-failure arm
-# would go unasserted while the check reported green.
-printf '{"job": "image-gate-probe", "image": "absent.invalid/absent:0.0.1"}' \
+# Well formed, and Bondi cannot carry it out: the reference names a registry on a
+# loopback port nothing listens on, so the pull fails at once rather than being
+# waited out. The engine answers a pull of this reference with HTTP 500 naming the
+# refused connection, in milliseconds [observed -- 2026-11-20, Docker Engine
+# 29.10.0]. The reference is a well-formed one, so a server that refused
+# it as written would exit 2, and the exit-1 assertion below would catch that.
+printf '{"job": "image-gate-probe", "image": "127.0.0.1:1/absent:0.0.1"}' \
     > "$work/unrunnable-run.json"
 
 echo "==> $image: the command a client with no cron jobs starts an orchestrator with"
@@ -802,7 +839,6 @@ deploy_fixture_up
 echo "==> $image: ${#deploy_arms[@]} deploy arms, on the command a client with no cron jobs starts"
 for arm in "${deploy_arms[@]}"; do
     "$arm"
-    remove_arm_workloads
 done
 echo "==> the deploy fixture: tearing it down"
 deploy_fixture_down

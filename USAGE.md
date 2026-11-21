@@ -92,12 +92,14 @@ Key fields:
 
 | Field | Description |
 |---|---|
-| `service.name` | Name for the Docker container on the server. Also used as the deploy target in `bondi deploy my-api:v1.0.0`. |
-| `service.image` | Base image **without a tag**. The tag is provided at deploy time. |
+| `service.name` | Name for the Docker container on the server. Also used as the deploy target in `bondi deploy my-api:v1.0.0`, and as the name of the service's Traefik router. It must be at least two characters: a lowercase letter or digit, then lowercase letters, digits, `_` or `-`. A `.` is refused, because Traefik reads it as a separator in its label keys and would not serve the service. Uppercase is refused, because Traefik label keys are case-insensitive and `Api` and `api` would collide. `acme-http` is refused too: Bondi's own Traefik container uses it for the ACME challenge. A name outside this rule is refused when `bondi.yaml` is read, before any server is contacted. |
+| `service.image` | Base image **without a tag**. The tag is provided at deploy time. A registry port works (`registry.example.com:5000/app`). A value that is not a valid image reference is refused when `bondi.yaml` is read. |
 | `service.port` | The port your application listens on inside the container. Traefik routes HTTPS traffic to this port. |
 | `service.volumes` | Optional. Host directories to mount into the service's container so that what it writes survives a deploy. Each entry has `host`, `container` and `read_only`. Omit it for no mounts. See [Persistent data (volumes)](#persistent-data-volumes). |
 | `traefik.domain_name` | Your domain. Traefik will request a TLS certificate from Let's Encrypt and route traffic for both `my-api.example.com` and `www.my-api.example.com`. |
+| `traefik.image` | The Traefik image. An image with no tag pulls `latest`, a moving target, unlike a workload image, which Bondi refuses without a tag or digest. Pin a tag, as in the example above. An empty value is refused, and an image in a private registry is not supported: Traefik is pulled without credentials. |
 | `traefik.acme_email` | Email for Let's Encrypt certificate notifications. |
+| `traefik.acme_ca_server` | Optional. The ACME directory URL Traefik orders its TLS certificates from. Omit it to use Let's Encrypt production. Set it to use another ACME server, for example Let's Encrypt staging on a test box: `https://acme-staging-v02.api.letsencrypt.org/directory`. It must be an absolute `https://` URL that names a host; any other value is refused when `bondi.yaml` is read. A change takes effect when Traefik is redeployed — see [Redeploying Traefik](#redeploying-traefik). Under blue-green, which Bondi also picks for a service with no `deployment_strategy` whose image has a `HEALTHCHECK`, Bondi does not replace Traefik, so a new `acme_ca_server` needs a deploy with `deployment_strategy: simple`, or Traefik removed by hand. |
 | `bondi_server.version` | Version of the bondi-orchestrator image to run on the server. |
 | `servers[].port` | Accepted and ignored — setting it changes nothing. Nothing dials the orchestrator any more; `bondi deploy` and `bondi status` run the server's subcommands inside its container over SSH, and `bondi setup` publishes no host port for any orchestrator it creates — a container an older Bondi created may still publish one until a version bump makes `bondi setup` replace it. The field is still accepted so that a `bondi.yaml` written before that change keeps parsing. Not to be confused with `service.port` above. |
 | `bondi_server.bind_address` | Accepted and ignored — setting it changes nothing, and `bondi setup` and `bondi deploy` each print a line saying so. The orchestrator serves no HTTP, so there is no socket to bind. The field is still accepted so that a `bondi.yaml` written before that change keeps parsing; removal is planned, so remove it from your `bondi.yaml`. |
@@ -882,7 +884,7 @@ managed_containers:
 | Field | Required | Description |
 |---|---|---|
 | `name` | yes | Identifies the container. Bondi runs it as `bondi-<name>` and keeps its state under `/etc/bondi/<name>` on the server. May contain only letters, digits, `_`, `.` and `-`, and must start with a letter or digit. |
-| `image` | yes | Base image **without a tag**. |
+| `image` | yes | Base image **without a tag**. A registry port works (`registry.example.com:5000/job`). A value that is not a valid image reference is refused when `bondi.yaml` is read. |
 | `tag` | yes | The exact tag to run. There is no default and no floating tag — you pin the version, and changing it is what triggers a recreate. |
 | `restart` | yes | Docker restart policy: `no`, `on-failure`, `always` or `unless-stopped`. There is no default. |
 | `network` | no | Docker network to join. `bondi-network` is the only value the field accepts — use it to be reachable from your service and cron jobs by container name. Bondi creates that network and no other, so any other name is rejected when `bondi.yaml` is read, before any server is contacted. Omit the field to leave the container on the default bridge. |
@@ -973,7 +975,7 @@ The table is read from two places and they are never blended into one answer:
 - **`orch`** — the orchestrator's own report, read over SSH by running its `status` subcommand inside its container. It holds what only the orchestrator knows, such as whether a cron job's last run `completed`.
 - **`both`** — the two agree on image, tag and status, so they share one line. The restart count is not compared: a count read a second later legitimately differs.
 
-Where the two disagree, the component gets one line per source and the row is flagged `[disagreement]`. That is the report's finding, not a defect in it — the two sources drifting apart is a state nothing else detects, so nothing is reconciled behind your back.
+Where the two disagree, the component gets one line per source and the row is flagged `[disagreement]`. That is the report's finding, not a defect in it — the two sources drifting apart is a state nothing else detects, so nothing is reconciled behind your back. Until `bondi setup` upgrades a server, a digest-pinned image on it can show a disagreement that is not real, because an older orchestrator splits a digest at its colon; the flag clears once the server is upgraded.
 
 A source that could not be consulted says so in its own words rather than reporting an absence:
 
@@ -1035,13 +1037,15 @@ Each row carries `declaration`, `disagreement`, `unverified`, and a separate `do
 
 ### Redeploying Traefik
 
-If you change the Traefik configuration (e.g. update `acme_email` or the domain), redeploy Traefik without redeploying your service:
+If you change the Traefik configuration (e.g. update `acme_email`, `acme_ca_server` or the domain), redeploy Traefik without redeploying your service:
 
 ```bash
 bondi deploy my-api:v2.0.0 --redeploy-traefik
 ```
 
 The `--redeploy-traefik` flag forces Traefik to be stopped and restarted, even if the image version has not changed. Note that you still need to specify a service deploy target.
+
+A changed `acme_email` or `acme_ca_server` takes effect only with this flag, and only when the deploy runs the simple strategy. Under blue-green, which Bondi also picks for a service with no `deployment_strategy` whose image has a `HEALTHCHECK`, Bondi does not replace Traefik, so the flag changes nothing: deploy once with `deployment_strategy: simple`, or remove Traefik by hand. A deploy without it keeps the running Traefik when the image version has not changed, and that Traefik goes on ordering certificates from the server it was started with.
 
 ### Full configuration example
 
@@ -1077,6 +1081,9 @@ traefik:
   domain_name: my-api.example.com
   image: traefik:v3.6.8
   acme_email: ops@example.com
+  # Optional: order certificates from another ACME server. Omitted, Traefik
+  # uses Let's Encrypt production. Let's Encrypt staging suits a test box:
+  # acme_ca_server: https://acme-staging-v02.api.letsencrypt.org/directory
 
 cron_jobs:
   - name: daily-backup

@@ -41,6 +41,7 @@ type deploy_payload = {
   traefik_domain_name : string option;
   traefik_image : string option;
   traefik_acme_email : string option;
+  traefik_acme_ca_server : Bondi_common.Acme_ca_server.t option;
   registry_user : string option;
   registry_pass : string option;
   force_traefik_redeploy : bool option;
@@ -64,7 +65,10 @@ type deploy_payload = {
     an empty list, and [None] is not written to the wire at all. A payload for a
     service without mounts is therefore the one an orchestrator that predates
     the field already reads, since that orchestrator refuses a field it does not
-    know. *)
+    know.
+
+    [traefik_acme_ca_server] is held to the same rule: it is [None] when the
+    manifest names no certificate server, and is then not written at all. *)
 
 val payload_for :
   Config_file.t ->
@@ -72,15 +76,17 @@ val payload_for :
   force_traefik_redeploy:bool ->
   Config_file.server ->
   deploy_cron_job list option ->
-  deploy_payload
+  (deploy_payload, string) result
 (** [payload_for config ~deployments ~force_traefik_redeploy server cron_jobs]
     is what [server] is sent by a run deploying [deployments] (each a name and
     its tag), with [cron_jobs] already filtered to that server.
 
     The service half is filled only when the service is among [deployments] and
     [server] is one of the service's own; otherwise it is absent and only the
-    cron jobs travel. Exposed so a test can pin what reaches the wire from a
-    configuration, through the builder the command itself uses. *)
+    cron jobs travel. The service's image is composed with its tag as
+    {!cron_jobs_for_server} composes a job's, and refused the same way. Exposed
+    so a test can pin what reaches the wire from a configuration, through the
+    builder the command itself uses. *)
 
 val deploy_cron_job_to_yojson : deploy_cron_job -> Yojson.Safe.t
 (** [deploy_cron_job_to_yojson job] is [job] as the orchestrator reads it.
@@ -104,10 +110,12 @@ val deploy_payload_of_yojson : Yojson.Safe.t -> (deploy_payload, string) result
 val parse_name_tag : string -> (string * string, string) result
 (** [parse_name_tag s] splits a command-line [name:tag] into its two halves.
 
-    A tag may itself contain colons, so the split is on the first one and the
-    rest is the tag. An empty tag is a refusal rather than a default: [latest]
-    is a moving target and deploying one by accident is how a box ends up
-    running something nobody chose. *)
+    The split is on the first colon and the rest is the tag. A rest that holds
+    another colon is no tag a reference can carry, and is refused when it is
+    composed with the target's image, by {!payload_for} or
+    {!cron_jobs_for_server}. An empty tag is a refusal rather than a default:
+    [latest] is a moving target and deploying one by accident is how a box ends
+    up running something nobody chose. *)
 
 val cron_job_to_deploy : Config_file.cron_job -> image:string -> deploy_cron_job
 (** [cron_job_to_deploy job ~image] is [job] as the server is told about it,
@@ -117,7 +125,7 @@ val cron_jobs_for_server :
   string ->
   Config_file.cron_job list option ->
   (string * string) list ->
-  deploy_cron_job list option
+  (deploy_cron_job list option, string) result
 (** [cron_jobs_for_server ip_address cron_jobs deployments] is the jobs this run
     sends to the server at [ip_address].
 
@@ -125,7 +133,12 @@ val cron_jobs_for_server :
     box's to run, and a job this run was given no tag for is not being deployed
     at all. [None] and an empty list are the same thing to a caller and are
     answered as [None], because "this server has no cron jobs in this run" is
-    what every later decision asks. *)
+    what every later decision asks.
+
+    Each job's image is composed with its tag through
+    {!Bondi_common.Image_reference.of_name_and_tag}. A tag that does not make a
+    reference is an [Error] naming the target and echoing the composed text,
+    which this client prints only to the operator's terminal. *)
 
 val validate_deployments :
   Config_file.t ->
