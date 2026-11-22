@@ -9,6 +9,7 @@ let network_name = "bondi-network"
    one the run touched. *)
 let alloy_config_dir = "/etc/bondi/alloy"
 let alloy_config_path = alloy_config_dir ^ "/config.alloy"
+let alloy_env_path = alloy_config_dir ^ "/env"
 let journal_path = "/var/log/journal"
 
 (* Under /var/lib rather than beside the config in /etc/bondi/alloy: it is state

@@ -53,6 +53,18 @@ val orchestrator_version_of_image : string -> string
     Total by construction: every string is either a published tag or something
     reported as it stands, and there is no arm that fails. *)
 
+val version_of_listed_image : string -> string option
+(** [version_of_listed_image column] is the version the image column of a
+    container listing reports, or [None] when the column is not a reference at
+    all.
+
+    The column names the reference the container was created from only while
+    that reference still names the container's image. After a pull has moved the
+    tag it is the image id cut to twelve hex digits, which says nothing about
+    which release is running, so there is no version to return and nothing a
+    caller may compare. Anything with a repository in it is read as
+    {!orchestrator_version_of_image} reads it. *)
+
 val writes_exec_lines : string -> (unit, string) result
 (** [writes_exec_lines version] decides whether an orchestrator reporting
     [version] is one whose own server writes exec lines and run files -- not

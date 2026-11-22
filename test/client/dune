@@ -28,8 +28,14 @@
   test_program
   test_deprecations
   test_volume_check
-  test_journal_storage)
+  test_journal_storage
+  test_container_listing
+  test_builtin_spec
+  test_builtin_image
+  test_image_identity)
  (deps
   (glob_files fixtures/*.json)
-  (glob_files fixtures/*.key))
+  (glob_files fixtures/*.key)
+  (glob_files fixtures/docker_cli/*.out)
+  (glob_files fixtures/docker_cli/*.err))
  (libraries alcotest bondi.client bondi.common test_helpers unix yojson))

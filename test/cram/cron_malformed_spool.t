@@ -53,6 +53,14 @@ redden if the orchestrator's wording changes.
   > shift
   > printf '%s\n' "$1" >> "$SSH_ARGV_LOG"
   > case "$1" in
+  >   # The pull setup takes ahead of any stop or run, answered as the docker
+  >   # CLI answers one for an image already on the box: four lines on stdout,
+  >   # exit 0.
+  >   'docker pull '*)
+  >     ref=$(printf '%s\n' "$1" | sed "s/^docker pull '\(.*\)'\$/\1/")
+  >     printf '%s: Pulling from %s\n' "${ref##*:}" "${ref%:*}"
+  >     printf 'Digest: sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4\n'
+  >     printf 'Status: Image is up to date for %s\n%s\n' "$ref" "$ref" ;;
   >   'docker --version') echo 'Docker version 27.0.0, build deadbeef' ;;
   >   *BONDI_CRON_DOCKER_PRESENT*) echo 'BONDI_CRON_DOCKER_PRESENT /usr/bin/docker' ;;
   >   'curl --version') echo 'curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0' ;;
@@ -84,7 +92,7 @@ redden if the orchestrator's wording changes.
   >   # copy out of, so nothing planned, and the divergence this file is about
   >   # would go untested while the run still exited zero.
   >   *'name=^/bondi-orchestrator$'*'{{.State}}'*)
-  >     printf 'running\tmlopez1506/bondi-server:0.20.0\n' ;;
+  >     printf 'running\tmlopez1506/bondi-server:0.20.0\t\n' ;;
   >   # The orchestrator's image on its own, which is the version both commands
   >   # hold this box to. The pattern ends the command rather than merely
   >   # containing it: setup's own probe asks for {{.State}} and {{.Image}}

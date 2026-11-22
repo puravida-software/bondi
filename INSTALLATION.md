@@ -131,12 +131,18 @@ needs, and update them.
 
 ## Before running `setup` on a host
 
-`setup` converges the whole box against whatever config it is run with, restarts
-the orchestrator on every run when the config has cron jobs, and is the only
-command that touches managed containers. Treat it as a manual operator step
-rather than something a pipeline runs unattended, and record that expectation
-wherever your own repo documents its deployment procedure. At minimum, finish
-every run with:
+`setup` converges the whole box against whatever config it is run with, and is
+the only command that touches managed containers. It pulls the orchestrator's
+image before it stops the orchestrator, and Alloy's before it stops Alloy, so a
+pull that fails leaves that container running as it was and fails the run with a
+message naming the image. An orchestrator or Alloy whose image and
+configuration are unchanged is left running, on a host with cron jobs too, so a
+job running inside the orchestrator is not killed. The first `setup` run by this version of Bondi recreates both
+once: containers an older `setup` created carry no record of the configuration
+they were created with, so they cannot be shown to match. Treat it as a manual
+operator step rather than something a pipeline runs unattended, and record that
+expectation wherever your own repo documents its deployment procedure. At
+minimum, finish every run with:
 
 ```bash
 ssh YOUR_USER@YOUR_SERVER -- 'docker exec -i bondi-orchestrator bondi-server check'   # exit 0

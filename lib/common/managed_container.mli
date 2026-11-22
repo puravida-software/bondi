@@ -165,6 +165,16 @@ val spec_hash : t -> string
     container still matches its declaration. The digest is safe to publish as a
     label — it does not reveal the secret values that fed it. *)
 
+val spec_hash_label : string
+(** The label key a container's {!spec_hash} travels in.
+
+    Exposed because it is the one spelling of that key for every container Bondi
+    stamps with a digest of what it was created from: the managed containers
+    here, and the orchestrator and the log-shipping sidecar, whose digest setup
+    computes on the client. A key spelled twice disagrees the moment either copy
+    is renamed, and the side reading the other spelling sees every container as
+    unstamped and recreates it. *)
+
 val type_label : string * string
 (** The label key and value that mark a container as a managed container, as
     opposed to Bondi's own infrastructure or a cron run.

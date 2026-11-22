@@ -270,6 +270,7 @@ let canonical_spec t =
   Buffer.contents buf
 
 let spec_hash t = Digest.to_hex (Digest.string (canonical_spec t))
+let spec_hash_label = "bondi.spec-hash"
 let type_label = ("bondi.type", "managed")
 
 let labels t =
@@ -277,7 +278,7 @@ let labels t =
     ("bondi.managed", "true");
     type_label;
     ("bondi.name", t.name);
-    ("bondi.spec-hash", spec_hash t);
+    (spec_hash_label, spec_hash t);
   ]
 
 (* The image goes last: Docker reads anything after it as the container's own

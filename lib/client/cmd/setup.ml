@@ -23,11 +23,15 @@ module Managed_container = Bondi_common.Managed_container
    the second as the first plans a [docker run] against a name the host may
    already be holding, and discards the transport error on the way.
 
-   Running and stopped are one fact here, unlike the orchestrator's: every state
-   a container can be in holds its name, and alloy carries no version the plan
-   compares against, so a present container is stopped, removed and re-run
-   whatever it was doing. *)
-type alloy_state = Alloy_absent | Alloy_present | Alloy_undetermined of string
+   Running and stopped are separate facts because only a running container can
+   be left alone: one whose recorded configuration digest matches what this
+   setup would create is kept if its image has not moved either. A stopped one
+   is replaced whatever it carries, since it holds the name and ships nothing. *)
+type alloy_state =
+  | Alloy_absent
+  | Alloy_not_running
+  | Alloy_running of { spec_hash : string option }
+  | Alloy_undetermined of string
 
 (* The orchestrator container is observed as three distinct facts rather than as
    a [string option] of the running version. A container that exists but is not
@@ -36,11 +40,18 @@ type alloy_state = Alloy_absent | Alloy_present | Alloy_undetermined of string
    second, setup skips the restart and leaves the host with nothing ready.
    Both were reachable while presence and version were separate fields. A
    fourth fact is that the listing never ran, which supports none of the three
-   and is kept apart from them for the same reason. *)
+   and is kept apart from them for the same reason.
+
+   A running container carries the configuration digest it was created with,
+   [None] for one created before setup recorded any. [None] never matches, so
+   such a container is replaced once and carries a digest from then on. *)
 type orchestrator_state =
   | Orchestrator_absent
   | Orchestrator_not_running
-  | Orchestrator_running of { version : string }
+  | Orchestrator_running of {
+      version : string option;
+      spec_hash : string option;
+    }
   | Orchestrator_undetermined of string
 
 (* Observed state of one managed container. Derived from the container's
@@ -98,11 +109,16 @@ type action =
   | RequireCronDocker
   | RequireCronCurl
   | PreserveCronPayloads of { crontab : Crontab_listing.t }
+  | PullOrchestrator
+  | CheckOrchestratorImage of image_check
   | StopOrchestrator
   | RemoveOrchestrator
   | RunServer
   | EnsureJournalStorage
   | EnsureAlloyState
+  | PullAlloy
+  | CheckAlloyImage of image_check
+  | CorrectAlloyConfigMode
   | EnsureAlloyConfig
   | WriteAlloyEnv
   | RunAlloy
@@ -114,6 +130,15 @@ type action =
   | StopManaged of string
   | RemoveManaged of string
   | CleanManagedConfig of string
+
+(* A container whose recorded configuration matches is kept only if its image
+   has not moved behind the tag either, and that is known only once the pull has
+   run. So the plan names both outcomes and the check picks one: [kept] runs
+   when the container runs the image its reference names now, [replacement]
+   when the reference names another. The replacement is the very list the plan
+   builds for a container whose configuration differs, so a moved image and a
+   changed configuration cannot be replaced two different ways. *)
+and image_check = { kept : action list; replacement : action list }
 
 (* Which phase of the plan an action belongs to. The phase type and the report
    built from it live in [Setup_phases], which knows nothing about actions; this
@@ -127,12 +152,17 @@ let phase_of_action : action -> Setup_phases.phase = function
   | RequireCronCurl -> Setup_phases.Cron_curl
   | EnsureAcmeFile -> Setup_phases.Acme
   | PreserveCronPayloads _
+  | PullOrchestrator
+  | CheckOrchestratorImage _
   | StopOrchestrator
   | RemoveOrchestrator
   | RunServer ->
       Setup_phases.Orchestrator
   | EnsureJournalStorage
   | EnsureAlloyState
+  | PullAlloy
+  | CheckAlloyImage _
+  | CorrectAlloyConfigMode
   | EnsureAlloyConfig
   | WriteAlloyEnv
   | RunAlloy
@@ -163,13 +193,6 @@ let action_failure_report ~server ~failed ~remaining ~reason =
 (* Phase 1: Gather context (read-only)                                       *)
 (* ------------------------------------------------------------------------- *)
 
-(* [-a] rather than plain [ps]: since the orchestrator stopped running with
-   --rm, a container that died on startup is still on the host, and a plain [ps]
-   cannot see it. *)
-let orchestrator_ps_command =
-  Printf.sprintf "ps -a --filter name=^/%s$ --format '{{.State}}\t{{.Image}}'"
-    Builtin_container.orchestrator
-
 (* ------------------------------------------------------------------------- *)
 (* Orchestrator run command (pure, testable)                                  *)
 (* ------------------------------------------------------------------------- *)
@@ -185,8 +208,20 @@ let orchestrator_ps_command =
    that a box declaring either can still be read, and neither reaches this
    command. Declaring one is reported to the operator where the configuration is
    acted on; see Deprecations. *)
-let orchestrator_run_command ~cron_payload_needed (config : Config_file.t) :
-    string =
+(* One rendering, read twice. [restart] and [spec_label] are the two flags the
+   spec hash does not cover: the label cannot carry a digest of itself, and the
+   restart policy is converged on the running container by [docker update]
+   rather than by recreating it. The hash is taken over this same rendering with
+   both left out, so a field added to the command is a field the hash covers,
+   with no second template to forget it in. *)
+(* The image the run command names, composed from the one spelling of the
+   repository; [Builtin_image.orchestrator] has already refused a version that
+   does not make a reference before any plan exists. *)
+let orchestrator_image (config : Config_file.t) =
+  Builtin_image.orchestrator_repository ^ ":" ^ config.bondi_server.version
+
+let render_orchestrator_run ~restart ~spec_label ~cron_payload_needed
+    (config : Config_file.t) : string =
   let volume_mounts, user_flag =
     (* The payload directory is mounted from the host because a job's
        definition has to outlive the container. A version bump stops, removes
@@ -207,17 +242,35 @@ let orchestrator_run_command ~cron_payload_needed (config : Config_file.t) :
         " --user root" )
     else ("", "")
   in
-  let image = "mlopez1506/bondi-server:" ^ config.bondi_server.version in
+  let image = orchestrator_image config in
   (* No --rm: a container that dies on startup erases itself under it, leaving
      no container, no logs and no error for either the operator or the readiness
      check. *)
   Printf.sprintf
-    "docker run -d --name %s --restart %s -v \
+    "docker run -d --name %s%s -v \
      /var/run/docker.sock:/var/run/docker.sock%s%s --group-add $(stat -c %%g \
      /var/run/docker.sock) --label bondi.managed=true --label \
-     bondi.type=infrastructure --label bondi.logs=true %s"
-    Builtin_container.orchestrator Bondi_common.Defaults.bondi_restart_policy
-    volume_mounts user_flag image
+     bondi.type=infrastructure --label bondi.logs=true%s %s"
+    Builtin_container.orchestrator restart volume_mounts user_flag spec_label
+    image
+
+let restart_flag = " --restart " ^ Bondi_common.Defaults.bondi_restart_policy
+
+(* What a running orchestrator's label is compared against: the digest of the
+   command this setup would create it with. *)
+let orchestrator_spec_hash ~cron_payload_needed config =
+  Builtin_spec.hash
+    ~run_command:
+      (render_orchestrator_run ~restart:"" ~spec_label:"" ~cron_payload_needed
+         config)
+    ~files:[]
+
+let orchestrator_run_command ~cron_payload_needed config =
+  render_orchestrator_run ~restart:restart_flag
+    ~spec_label:
+      (Builtin_spec.label_flag
+         (orchestrator_spec_hash ~cron_payload_needed config))
+    ~cron_payload_needed config
 
 (* What the host reports the orchestrator's applied restart policy as. Docker's
    default is `no`, so a container created before this flag existed, one whose
@@ -423,7 +476,7 @@ let alloy_config_path = Bondi_common.Defaults.alloy_config_path
    takes its credentials off the host whether or not a container was left to
    observe. Moving this to a sibling path would leave a withdrawn credential
    behind with nothing failing. *)
-let alloy_env_path = alloy_config_dir ^ "/env"
+let alloy_env_path = Bondi_common.Defaults.alloy_env_path
 
 (* Creates the River config file at the declared mode and takes its contents
    from standard input, so they never reach argv.
@@ -517,10 +570,11 @@ let alloy_env_write_command ~mode =
    comparison. *)
 let alloy_config_mode_unreadable_marker = "BONDI_ALLOY_MODE_UNREADABLE"
 
-let alloy_config_mode_command =
+let alloy_file_mode_command ~path =
   Printf.sprintf "sudo stat -c %%04a %s 2>/dev/null || echo %s"
-    (Filename.quote alloy_config_path)
-    alloy_config_mode_unreadable_marker
+    (Filename.quote path) alloy_config_mode_unreadable_marker
+
+let alloy_config_mode_command = alloy_file_mode_command ~path:alloy_config_path
 
 (* What the pre-write reading answers when there is no file there at all. *)
 let alloy_config_mode_absent_marker = "BONDI_ALLOY_MODE_ABSENT"
@@ -544,15 +598,23 @@ let alloy_config_mode_absent_marker = "BONDI_ALLOY_MODE_ABSENT"
 
    Always exits zero, on all three answers, for the reason
    [alloy_config_mode_command] gives. *)
-let alloy_config_pre_write_mode_command =
+let alloy_file_pre_write_mode_command ~path =
   Printf.sprintf "sudo sh -c %s"
     (Filename.quote
        (Printf.sprintf
           "if [ -e %s ]; then stat -c %%04a %s 2>/dev/null || echo %s; else \
            echo %s; fi"
-          (Filename.quote alloy_config_path)
-          (Filename.quote alloy_config_path)
+          (Filename.quote path) (Filename.quote path)
           alloy_config_mode_unreadable_marker alloy_config_mode_absent_marker))
+
+let alloy_config_pre_write_mode_command =
+  alloy_file_pre_write_mode_command ~path:alloy_config_path
+
+(* The same reading of the credentials file. The two files a kept alloy reads
+   are read the same way and by the same command, so the one that holds the key
+   is not the one nobody asked about. *)
+let alloy_env_pre_write_mode_command =
+  alloy_file_pre_write_mode_command ~path:alloy_env_path
 
 (* Why the mode could not be read, as data rather than as a sentence. The two
    cases are genuinely different -- a host that said nothing has no answer to
@@ -563,6 +625,10 @@ let alloy_config_pre_write_mode_command =
 type alloy_mode_unreadable =
   | Alloy_mode_not_reported
   | Alloy_mode_read_refused of { observed : Host_answer.t }
+  | Alloy_mode_command_failed of { message : Host_answer.t }
+      (** The command never ran to an answer: the runner's own failure, an ssh
+          call that did not complete. Not the host's refusal and not silence --
+          what the runner said is the only thing there is to quote. *)
 
 (* What a bare `stat` of the file established. Unreadable is not a difference and
    not a match: there is nothing to compare against, so reporting it as a wrong
@@ -626,6 +692,19 @@ let alloy_config_pre_write_mode_of_probe ~expected output =
   then Alloy_pre_write_absent
   else Alloy_pre_write_read (alloy_config_mode_of_probe ~expected output)
 
+(* The reading a command's outcome amounts to. An ssh call that failed is not a
+   host that answered nothing: the runner's own message is what there is to
+   quote, so it is carried as itself rather than turned into the empty string
+   and read as silence. Taken only to report, so it is still a reading and never
+   an [Error] that ends the run. *)
+let alloy_pre_write_reading_of_run ~expected = function
+  | Ok output -> alloy_config_pre_write_mode_of_probe ~expected output
+  | Error message ->
+      Alloy_pre_write_read
+        (Alloy_mode_unreadable
+           (Alloy_mode_command_failed
+              { message = Host_answer.of_host_output message }))
+
 (* Why a mode could not be read, worded once for both readings that can fail to
    get one. Two sites asking one host about one file must not describe the same
    refusal differently, and the difference between a host that said nothing and a
@@ -635,6 +714,9 @@ let alloy_mode_unreadable_detail = function
   | Alloy_mode_read_refused { observed } ->
       Printf.sprintf "the host could not read it and answered %s"
         (Host_answer.to_string observed)
+  | Alloy_mode_command_failed { message } ->
+      Printf.sprintf "the command could not be run: %s"
+        (Host_answer.to_string message)
 
 (* What the reading taken before the write means for the run's account, decided
    here rather than in the arm that carries it out -- the split
@@ -657,16 +739,68 @@ let alloy_mode_unreadable_detail = function
    Lines, never a verdict. Nothing here fails a run: the mode was read for the
    account's sake, and refusing on a reading taken only to report would block the
    command that repairs the host. *)
-let alloy_config_pre_write_account ~expected = function
+let alloy_pre_write_account ~site ~corrected ~expected = function
   | Alloy_pre_write_absent -> []
   | Alloy_pre_write_read Alloy_mode_applied -> []
   | Alloy_pre_write_read (Alloy_mode_differs { observed }) ->
-      [ Setup_phases.config_mode_corrected ~found:observed ~applied:expected ]
+      [ corrected ~found:observed ~applied:expected ]
   | Alloy_pre_write_read (Alloy_mode_unreadable reason) ->
       [
-        Setup_phases.unreadable_reading ~site:Setup_phases.Alloy_config_mode
+        Setup_phases.unreadable_reading ~site
           ~detail:(alloy_mode_unreadable_detail reason);
       ]
+
+let alloy_config_pre_write_account =
+  alloy_pre_write_account ~site:Setup_phases.Alloy_config_mode
+    ~corrected:Setup_phases.config_mode_corrected
+
+let alloy_env_pre_write_account =
+  alloy_pre_write_account ~site:Setup_phases.Alloy_env_mode
+    ~corrected:Setup_phases.env_mode_corrected
+
+(* Brings a file a kept alloy reads to its declared mode, in place. The file is
+   not rewritten: its contents are what the running container was created
+   against, which is what keeping it means. The directory is created by root at
+   0755 and the files are written by root, so a path only root could have
+   replaced is chmodded as it stands. *)
+let alloy_file_chmod_command ~mode ~path =
+  Printf.sprintf "sudo chmod %s %s" mode (Filename.quote path)
+
+(* What the two readings taken ahead of a kept alloy call for.
+
+   A file that is not there, either of them, is a replacement: both are bind
+   mount sources, so a container kept over a missing one runs until the daemon
+   next restarts it and fails then, while the run reports success -- which the
+   unconditional rewrite never allowed. The replacement writes both files again,
+   so it is the whole of [alloy_replacement] and not a write of the one that is
+   missing.
+
+   Otherwise a chmod for each file the host reported at another mode, and
+   nothing for a file at the declared mode. One the host would not stat is not a
+   mode to correct -- the account says it could not look, and a chmod would be
+   issued blind. *)
+type alloy_kept_files_course =
+  | Alloy_files_replace
+  | Alloy_files_chmod of (string * string) list
+      (** Each file to correct as its path and the mode to bring it to. *)
+
+let alloy_kept_files_course ~config ~env =
+  let chmod_if_differs ~mode ~path = function
+    | Alloy_mode_differs _ -> [ (path, mode) ]
+    | Alloy_mode_applied
+    | Alloy_mode_unreadable _ ->
+        []
+  in
+  match (config, env) with
+  | Alloy_pre_write_absent, (Alloy_pre_write_absent | Alloy_pre_write_read _)
+  | Alloy_pre_write_read _, Alloy_pre_write_absent ->
+      Alloy_files_replace
+  | Alloy_pre_write_read config, Alloy_pre_write_read env ->
+      Alloy_files_chmod
+        (chmod_if_differs ~mode:alloy_config_declared_mode
+           ~path:alloy_config_path config
+        @ chmod_if_differs ~mode:alloy_env_declared_mode ~path:alloy_env_path
+            env)
 
 (* Withdrawing alloy from the configuration takes its files off the host. It is
    a builder rather than a literal in the interpret arm for the reason the write
@@ -723,79 +857,77 @@ let alloy_state_dir_command =
    `run`, because each program refuses the other's. *)
 let quoted_join options = String.concat " " (List.map Filename.quote options)
 
-let alloy_run_command ~image =
+let render_alloy_run ~restart ~spec_label ~image =
   let journal =
     Alloy_run_args.journal ~host_state_dir:Alloy_run_args.state_dir
   in
   Printf.sprintf
-    "docker run -d --name %s --restart %s -v \
-     /var/run/docker.sock:/var/run/docker.sock:ro -v %s:%s:ro %s --label \
-     bondi.managed=true --label bondi.type=infrastructure --label \
-     bondi.logs=false --env-file %s %s run %s %s"
-    Builtin_container.alloy Bondi_common.Defaults.bondi_restart_policy
-    alloy_config_path alloy_config_path
+    "docker run -d --name %s%s -v /var/run/docker.sock:/var/run/docker.sock:ro \
+     -v %s:%s:ro %s --label bondi.managed=true --label \
+     bondi.type=infrastructure --label bondi.logs=false%s --env-file %s %s run \
+     %s %s"
+    Builtin_container.alloy restart alloy_config_path alloy_config_path
     (quoted_join journal.docker_options)
-    alloy_env_path (Filename.quote image)
+    spec_label alloy_env_path (Filename.quote image)
     (quoted_join journal.alloy_options)
     alloy_config_path
 
-let orchestrator_state_of_ps_output output =
-  let line =
-    output
-    |> String.split_on_char '\n'
-    |> List.find_opt (fun line -> String.trim line <> "")
-  in
-  match line with
-  | None -> Orchestrator_absent
-  | Some line -> (
-      match String.split_on_char '\t' (String.trim line) with
-      | [ state; image ] -> (
-          match String.trim state with
-          | "running" ->
-              Orchestrator_running
-                {
-                  version =
-                    Server_version.orchestrator_version_of_image
-                      (String.trim image);
-                }
-          (* "created", "restarting", "paused", "exited", "removing" and "dead".
-             None of them is ready, and every one of them holds the container
-             name, so all converge to the same plan: remove it, then run. *)
-          | _ -> Orchestrator_not_running)
-      (* A line that does not parse still means a container by that name exists.
-         Replacing it is the safe reading; treating it as absent would plan a
-         run that collides with it. *)
-      | []
-      | [ _ ]
-      | _ :: _ :: _ :: _ ->
-          Orchestrator_not_running)
+(* The same rule as the orchestrator's, plus the two files Alloy reads at start.
+   Neither is on its command line, so a rewritten River configuration or a
+   rotated credential is a change only they show. They are rendered from the
+   same River value the write arms render them from. *)
+let alloy_spec_hash ~image ~river =
+  Builtin_spec.hash
+    ~run_command:(render_alloy_run ~restart:"" ~spec_label:"" ~image)
+    ~files:
+      [
+        Bondi_common.Alloy_river.generate river;
+        Bondi_common.Alloy_river.env_file_contents river;
+      ]
 
-let orchestrator_state_of_probe = function
-  | Ok output -> orchestrator_state_of_ps_output output
-  | Error err -> Orchestrator_undetermined err
+let alloy_run_command ~image ~river =
+  render_alloy_run ~restart:restart_flag
+    ~spec_label:(Builtin_spec.label_flag (alloy_spec_hash ~image ~river))
+    ~image
 
-let alloy_ps_command =
-  Printf.sprintf "ps -a --filter name=^/%s$ --format '{{.State}}\t{{.Image}}'"
-    Builtin_container.alloy
+(* -a in the listing, rather than a plain ps: since the orchestrator stopped
+   running with --rm, a container that died on startup is still on the host, and
+   a plain ps cannot see it. Every state but running converges to the same
+   plan, remove it and then run: none of them is ready, and every one of them
+   holds the name. *)
+let orchestrator_state_of_probe probe =
+  match Container_listing.of_probe probe with
+  | Container_listing.Absent -> Orchestrator_absent
+  | Container_listing.Not_running -> Orchestrator_not_running
+  | Container_listing.Running { image; spec_hash } ->
+      Orchestrator_running
+        { version = Server_version.version_of_listed_image image; spec_hash }
+  | Container_listing.Undetermined err -> Orchestrator_undetermined err
 
-(* The listing is filtered to the one name, so any line at all is that
-   container — including one that does not parse, and one in "created",
-   "restarting", "paused", "exited", "removing" or "dead". The columns are read
-   by nothing here: what the plan needs to know is whether the name is taken.
-   The state column is kept in the command because it is what an operator reads
-   out of the SSH log when a run is being diagnosed. *)
-let alloy_state_of_ps_output output =
-  match
-    output
-    |> String.split_on_char '\n'
-    |> List.find_opt (fun line -> String.trim line <> "")
-  with
-  | None -> Alloy_absent
-  | Some _ -> Alloy_present
+(* Why a running orchestrator whose configuration does not match is stopped.
+   The listing's version is [None] when the image column was an image id -- the
+   tag has moved under the container -- and that is worded as such rather than
+   compared as a string against the configured version, which would report a hex
+   id as the version running. *)
+let orchestrator_restart_reason ~wanted ~running ~spec_hash =
+  match running with
+  | None -> "running an image its tag no longer names"
+  | Some running when running <> wanted ->
+      Printf.sprintf "version mismatch: running %s, want %s" running wanted
+  | Some _ -> (
+      match spec_hash with
+      | None -> "it records no configuration digest"
+      | Some _ -> "its configuration changed")
 
-let alloy_state_of_probe = function
-  | Ok output -> alloy_state_of_ps_output output
-  | Error err -> Alloy_undetermined err
+(* What the plan needs to know of alloy is whether the name is taken, and for a
+   running container the digest it was created with. *)
+let alloy_state_of_probe probe =
+  match Container_listing.of_probe probe with
+  | Container_listing.Absent -> Alloy_absent
+  | Container_listing.Not_running -> Alloy_not_running
+  | Container_listing.Running { image = _; spec_hash } ->
+      Alloy_running { spec_hash }
+  | Container_listing.Undetermined err -> Alloy_undetermined err
 
 (* Managed containers are discovered by label rather than by name: the declared
    set is not known to the server, and [-a] is what lets a self-restarting
@@ -804,8 +936,8 @@ let managed_ps_command =
   let label_key, label_value = Managed_container.type_label in
   Printf.sprintf
     "ps -a --filter label=%s=%s --format '{{.Label \"bondi.name\"}}\t{{.Label \
-     \"bondi.spec-hash\"}}'"
-    label_key label_value
+     \"%s\"}}'"
+    label_key label_value Managed_container.spec_hash_label
 
 let managed_of_ps_output output =
   output
@@ -1006,7 +1138,9 @@ let gather_context ?session (server : Config_file.server) :
         orchestrator_state_of_probe
           (Remote_exec.docker_command_output_text ?session
              ~timeout_seconds:host_command_seconds
-             ~command:orchestrator_ps_command server)
+             ~command:
+               (Container_listing.command ~name:Builtin_container.orchestrator)
+             server)
   in
   let alloy_state =
     match docker_status with
@@ -1015,7 +1149,8 @@ let gather_context ?session (server : Config_file.server) :
     | Docker_installed _ ->
         alloy_state_of_probe
           (Remote_exec.docker_command_output_text ?session
-             ~timeout_seconds:host_command_seconds ~command:alloy_ps_command
+             ~timeout_seconds:host_command_seconds
+             ~command:(Container_listing.command ~name:Builtin_container.alloy)
              server)
   in
   let managed =
@@ -1049,6 +1184,45 @@ let gather_context ?session (server : Config_file.server) :
          ~command:Crontab_listing.read_command server)
   in
   Ok { docker_status; orchestrator; alloy_state; managed; crontab }
+
+(* ------------------------------------------------------------------------- *)
+(* Alloy River config generation (delegates to Bondi_common.Alloy_river)     *)
+(* ------------------------------------------------------------------------- *)
+
+let excluded_containers_from_config (config : Config_file.t) =
+  match config.user_service with
+  | Some svc when svc.logs = Some false ->
+      [ Bondi_common.Router_name.to_string svc.name ]
+  | Some _
+  | None ->
+      []
+
+let alloy_river_config (config : Config_file.t) (alloy : Config_file.alloy) :
+    Bondi_common.Alloy_river.config =
+  let collect =
+    match alloy.collect with
+    | Some "services_only" -> Bondi_common.Alloy_river.Services_only
+    | Some "all"
+    | None ->
+        Bondi_common.Alloy_river.All
+    | Some _ ->
+        (* validate_alloy_collect rejects invalid values during config parsing,
+           so this branch is unreachable. Default to All defensively. *)
+        Bondi_common.Alloy_river.All
+  in
+  let labels =
+    match alloy.labels with
+    | Some l -> l
+    | None -> []
+  in
+  {
+    grafana_cloud_endpoint = alloy.grafana_cloud.endpoint;
+    grafana_cloud_instance_id = alloy.grafana_cloud.instance_id;
+    grafana_cloud_api_key = alloy.grafana_cloud.api_key;
+    collect;
+    labels;
+    excluded_containers = excluded_containers_from_config config;
+  }
 
 (* ------------------------------------------------------------------------- *)
 (* Phase 2: Plan (pure)                                                      *)
@@ -1111,17 +1285,53 @@ let cron_payload_preserve (config : Config_file.t) (ctx : setup_context) :
     [ PreserveCronPayloads { crontab = ctx.crontab } ]
   else []
 
-(* Converge on "the declared version is ready". Every state that is not that
+(* The orchestrator torn down and created again: the cron payloads copied out
+   first where the host keeps any, then the stop, the removal and the run. One
+   list, built here, for both routes to a replacement -- a configuration that
+   differs, known when planning, and an image that moved behind its tag, known
+   only once the pull has run. *)
+let orchestrator_replacement (config : Config_file.t) (ctx : setup_context) :
+    action list =
+  cron_payload_preserve config ctx
+  @ [ StopOrchestrator; RemoveOrchestrator; RunServer ]
+
+(* Whether the running orchestrator was created with the command this setup
+   would create it with: mounts, user and image included, since all of them are
+   in the command the digest is taken over. *)
+let orchestrator_spec_matches (config : Config_file.t) (ctx : setup_context)
+    ~spec_hash =
+  Builtin_spec.matches
+    ~expected:
+      (orchestrator_spec_hash
+         ~cron_payload_needed:(cron_payload_needed config ctx)
+         config)
+    spec_hash
+
+(* Converge on "the declared container is running". Every state that is not that
    ends in [RunServer], and every state that leaves a container behind removes
    it first: [docker run] refuses a name that is already taken, and without the
    removal an orchestrator that died on startup would make the next [bondi
-   setup] — the command an operator reaches for to recover — fail too. *)
+   setup] — the command an operator reaches for to recover — fail too.
+
+   Every state opens with the pull. Left to [docker run], the fetch happened
+   after the old container was stopped and removed, so a registry that was down
+   or a version never published left the box with no orchestrator and every
+   cron line failing. Pulled first, that failure leaves the old container
+   exactly as it was -- ahead of the cron payload copy too, which touches
+   nothing but is the phase's first step otherwise.
+
+   A running container whose configuration matches is not torn down on the
+   plan's word alone, and not left alone on it either: the pull may have moved
+   the tag to another image, which only a reading taken after it can show. So
+   it is pulled and then checked, and the check carries the replacement this
+   plan would otherwise have issued. A cron host is no exception: recreating it
+   on every run killed whatever job was running at that moment. *)
 let orchestrator_actions (config : Config_file.t) (ctx : setup_context) :
     action list =
   match ctx.orchestrator with
   (* Nothing to copy out of: there is no container here, so nothing this run
      does can take a job's files with it. *)
-  | Orchestrator_absent -> [ RunServer ]
+  | Orchestrator_absent -> [ PullOrchestrator; RunServer ]
   (* Nothing is planned against a listing that never ran; [plan_for_config] is
      where that becomes an error rather than a silent no-op. *)
   | Orchestrator_undetermined _ -> []
@@ -1129,13 +1339,13 @@ let orchestrator_actions (config : Config_file.t) (ctx : setup_context) :
      one whether or not it is running — so this is a recreate like any other,
      and the files go with it unless they are copied out first. *)
   | Orchestrator_not_running ->
-      cron_payload_preserve config ctx @ [ RemoveOrchestrator; RunServer ]
-  | Orchestrator_running { version } ->
-      if version = config.bondi_server.version && not (has_cron_jobs config)
-      then []
-      else
-        cron_payload_preserve config ctx
-        @ [ StopOrchestrator; RemoveOrchestrator; RunServer ]
+      (PullOrchestrator :: cron_payload_preserve config ctx)
+      @ [ RemoveOrchestrator; RunServer ]
+  | Orchestrator_running { version = _; spec_hash } ->
+      let replacement = orchestrator_replacement config ctx in
+      if orchestrator_spec_matches config ctx ~spec_hash then
+        [ PullOrchestrator; CheckOrchestratorImage { kept = []; replacement } ]
+      else PullOrchestrator :: replacement
 
 let managed_state_of observed name =
   match List.assoc_opt name observed with
@@ -1164,11 +1374,69 @@ let managed_removals ~(specs : Managed_container.t list) observed =
   |> List.concat_map (fun (name, _state) ->
       [ StopManaged name; RemoveManaged name; CleanManagedConfig name ])
 
+(* The image alloy runs, read the way the run arm reads it, so that the digest
+   the plan compares against is taken over the command that arm issues. *)
+let alloy_image (alloy : Config_file.alloy) =
+  Bondi_common.Image_reference.to_string
+    (Builtin_image.alloy ~declared:alloy.image)
+
+(* Alloy torn down and created again. [RemoveAlloy] deletes the config
+   directory, so the River configuration and the credentials file are written
+   after it and before the run that reads them. One list for both routes to a
+   replacement, for the reason [orchestrator_replacement] gives. *)
+let alloy_replacement =
+  [ StopAlloy; RemoveAlloy; EnsureAlloyConfig; WriteAlloyEnv; RunAlloy ]
+
+(* Whether the running alloy was created with the command, River configuration
+   and credentials this setup would write: all three are in its digest. *)
+let alloy_spec_matches (config : Config_file.t) (alloy : Config_file.alloy)
+    ~spec_hash =
+  Builtin_spec.matches
+    ~expected:
+      (alloy_spec_hash ~image:(alloy_image alloy)
+         ~river:(alloy_river_config config alloy))
+    spec_hash
+
+(* What an image check leads to once both ids are read: the line the run
+   prints, and which of the two lists the plan gave the check is run next. The
+   check itself holds no other decision; it reads, and carries this out.
+
+   A reading that could not be taken runs neither list. Keeping the container
+   would claim an image the host never reported, and replacing it would stop a
+   container for want of a reading. The failure is bare, like every arm's:
+   naming the server is the failure report's job.
+
+   [running] is what the kept line says the container is running: the
+   orchestrator's version, as the line has always said, or alloy's image. *)
+let after_image_check ~server ~container ~running
+    ~(reference : Bondi_common.Image_reference.t) { kept; replacement } verdict
+    =
+  let image = Bondi_common.Image_reference.to_string reference in
+  match verdict with
+  | Image_identity.Same ->
+      Ok
+        ( Printf.sprintf
+            "%s container is already running on server %s: %s, skipping..."
+            container server running,
+          kept )
+  | Image_identity.Moved ->
+      Ok
+        ( Printf.sprintf
+            "%s on server %s: %s names a new image, stopping to restart..."
+            container server image,
+          replacement )
+  | Image_identity.Unreadable answer ->
+      Error
+        (Printf.sprintf
+           "could not read whether %s runs the image %s names, so setup left \
+            it as it is: %s"
+           container image
+           (Host_answer.to_string answer))
+
 let plan (config : Config_file.t) ~(specs : Managed_container.t list)
     (ctx : setup_context) : action list =
   (* ACME only when we have user services (Traefik will be used) *)
   let acme = if has_user_services config then [ EnsureAcmeFile ] else [] in
-  (* Server setup - skip entirely if already up-to-date *)
   let server = orchestrator_actions config ctx in
   (* Every state that leaves a container behind removes it first, stopped ones
      included: [docker run] refuses a name that is already taken, so a stopped
@@ -1183,30 +1451,37 @@ let plan (config : Config_file.t) ~(specs : Managed_container.t list)
      fails the run there. Read first, that failure leaves the box with the Alloy
      it already had rather than with none. The state directory is ahead of the
      stop for the same reason: a [mkdir] that fails after the old Alloy was
-     removed leaves the box with none. *)
+     removed leaves the box with none.
+
+     The pull opens the phase on both paths that run a container, for the reason
+     the orchestrator's does: a fetch left to [docker run] happens after the old
+     container is gone. A withdrawn alloy runs nothing, so it pulls nothing.
+
+     A running alloy whose recorded configuration matches -- its command, its
+     River configuration and its credentials file -- is checked after the pull
+     rather than replaced, for the reason the orchestrator is. The journal and
+     the state directory are still ensured ahead of the check: neither touches
+     the running container, and a replacement the check calls for needs both. *)
   let alloy =
+    let prepare = [ PullAlloy; EnsureJournalStorage; EnsureAlloyState ] in
     match (config.alloy, ctx.alloy_state) with
-    | Some _, Alloy_present ->
-        [
-          EnsureJournalStorage;
-          EnsureAlloyState;
-          StopAlloy;
-          RemoveAlloy;
-          EnsureAlloyConfig;
-          WriteAlloyEnv;
-          RunAlloy;
-        ]
+    | Some alloy, Alloy_running { spec_hash } ->
+        if alloy_spec_matches config alloy ~spec_hash then
+          prepare
+          @ [
+              CheckAlloyImage
+                {
+                  kept = [ CorrectAlloyConfigMode ];
+                  replacement = alloy_replacement;
+                };
+            ]
+        else prepare @ alloy_replacement
+    | Some _, Alloy_not_running -> prepare @ alloy_replacement
     | Some _, Alloy_absent ->
-        [
-          EnsureJournalStorage;
-          EnsureAlloyState;
-          EnsureAlloyConfig;
-          WriteAlloyEnv;
-          RunAlloy;
-        ]
+        prepare @ [ EnsureAlloyConfig; WriteAlloyEnv; RunAlloy ]
     (* Withdrawn from configuration. A stopped container has to go too, or the
        name stays taken and the wedge outlives the withdrawal. *)
-    | None, Alloy_present -> [ StopAlloy; RemoveAlloy ]
+    | None, (Alloy_not_running | Alloy_running _) -> [ StopAlloy; RemoveAlloy ]
     (* Withdrawn with nothing left to observe. A container removed by any route
        other than bondi -- a hand-run [docker rm], a prune, a rebuilt daemon --
        takes the listing's only evidence with it and leaves the credentials file
@@ -1311,6 +1586,14 @@ let plan_for_config (config : Config_file.t) (ctx : setup_context) =
     | Some _ ->
         Server_version.captures_cron_to_journald config.bondi_server.version
   in
+  (* The references the pulls fetch, read before there is a plan, so one that
+     could never be fetched refuses the run on a box where nothing has been
+     stopped. Read here and again in the pull arms rather than carried in the
+     plan, the way [RunServer] and [RunAlloy] read their images from the
+     configuration: both readings are the same pure function of it. *)
+  let* (_ : Bondi_common.Image_reference.t) =
+    Builtin_image.orchestrator ~version:config.bondi_server.version
+  in
   let* () =
     match ctx.docker_status with
     (* Installing Docker restarts the daemon, and with it every container
@@ -1358,7 +1641,7 @@ let plan_for_config (config : Config_file.t) (ctx : setup_context) =
               act on whether it is running: %s"
              Builtin_container.alloy message)
     | Alloy_undetermined _, None
-    | (Alloy_absent | Alloy_present), _ ->
+    | (Alloy_absent | Alloy_not_running | Alloy_running _), _ ->
         Ok ()
   in
   match (ctx.managed, specs) with
@@ -1376,45 +1659,6 @@ let plan_for_config (config : Config_file.t) (ctx : setup_context) =
       Ok (plan config ~specs ctx)
 
 (* ------------------------------------------------------------------------- *)
-(* Alloy River config generation (delegates to Bondi_common.Alloy_river)     *)
-(* ------------------------------------------------------------------------- *)
-
-let excluded_containers_from_config (config : Config_file.t) =
-  match config.user_service with
-  | Some svc when svc.logs = Some false ->
-      [ Bondi_common.Router_name.to_string svc.name ]
-  | Some _
-  | None ->
-      []
-
-let alloy_river_config (config : Config_file.t) (alloy : Config_file.alloy) :
-    Bondi_common.Alloy_river.config =
-  let collect =
-    match alloy.collect with
-    | Some "services_only" -> Bondi_common.Alloy_river.Services_only
-    | Some "all"
-    | None ->
-        Bondi_common.Alloy_river.All
-    | Some _ ->
-        (* validate_alloy_collect rejects invalid values during config parsing,
-           so this branch is unreachable. Default to All defensively. *)
-        Bondi_common.Alloy_river.All
-  in
-  let labels =
-    match alloy.labels with
-    | Some l -> l
-    | None -> []
-  in
-  {
-    grafana_cloud_endpoint = alloy.grafana_cloud.endpoint;
-    grafana_cloud_instance_id = alloy.grafana_cloud.instance_id;
-    grafana_cloud_api_key = alloy.grafana_cloud.api_key;
-    collect;
-    labels;
-    excluded_containers = excluded_containers_from_config config;
-  }
-
-(* ------------------------------------------------------------------------- *)
 (* Phase 3: Interpreter                                                      *)
 (* ------------------------------------------------------------------------- *)
 
@@ -1427,6 +1671,74 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
      what that leaves undone is [run]'s job below. Most arms correct nothing and
      say so with the empty list -- a write with no read-back after it has nothing
      to report, which is a different fact from a read-back that agreed. *)
+  (* Bounded by the number [RunServer] and [RunAlloy] are: the fetch used to
+     happen inside their [docker run], under that same bound, so moving it out
+     needs no number of its own. *)
+  let pull reference =
+    let* _ =
+      Remote_exec.docker_command_output_text ?session
+        ~timeout_seconds:host_command_seconds
+        ~command:(Builtin_image.pull_command reference)
+        server
+      |> Result.map_error (fun reason ->
+          Builtin_image.pull_failure reference ~reason)
+    in
+    print_endline
+      (Printf.sprintf "Pulled %s on server %s"
+         (Bondi_common.Image_reference.to_string reference)
+         ip_address);
+    Ok []
+  in
+  (* The config file's mode read back after setup set it, for the write and for
+     the in-place change alike: asking for a mode is not applying one. What the
+     answer means is [alloy_config_mode_of_probe]'s; this words the two ways it
+     can fail, naming how the mode was set. *)
+  let confirm_file_mode ~path ~declared ~done_as ~doing_as =
+    let* probe_output =
+      Remote_exec.command_output_text ?session
+        ~timeout_seconds:host_command_seconds
+        ~command:(alloy_file_mode_command ~path)
+        server
+    in
+    match alloy_config_mode_of_probe ~expected:declared probe_output with
+    | Alloy_mode_applied -> Ok ()
+    | Alloy_mode_differs { observed } ->
+        Error
+          (Printf.sprintf
+             "%s on server %s is mode %s after %s %s -- refusing to report \
+              success on a posture that was not applied"
+             path ip_address
+             (Host_answer.to_string observed)
+             done_as declared)
+    | Alloy_mode_unreadable reason ->
+        let detail = alloy_mode_unreadable_detail reason in
+        Error
+          (Printf.sprintf
+             "could not read back the mode of %s on server %s after %s %s, so \
+              whether the mode was applied is unknown: %s"
+             path ip_address doing_as declared detail)
+  in
+  let confirm_config_mode =
+    confirm_file_mode ~path:alloy_config_path
+      ~declared:alloy_config_declared_mode
+  in
+  (* Both ids read after the pull, and the verdict carried out: the line it
+     says, then the list it names, which [run] below applies next. *)
+  let check_image ~container ~running ~reference check =
+    let verdict =
+      Image_identity.verdict
+        (Remote_exec.command_output_text ?session
+           ~timeout_seconds:host_command_seconds
+           ~command:(Image_identity.command ~image:reference ~container)
+           server)
+    in
+    let* line, next =
+      after_image_check ~server:ip_address ~container ~running ~reference check
+        verdict
+    in
+    print_endline line;
+    Ok next
+  in
   let step : action -> (Setup_phases.correction list, string) result = function
     | EnsureDocker -> (
         (* The version is read again here rather than taken from the gathered
@@ -1626,6 +1938,16 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
         List.iter print_endline
           (Cron_payload.report ~server:ip_address ~crontab listing);
         Ok []
+    | PullOrchestrator ->
+        let* reference =
+          Builtin_image.orchestrator ~version:config.bondi_server.version
+        in
+        pull reference
+    (* An image check corrects nothing. Its reading is taken in [then_run],
+       because what it yields is the actions that follow it. *)
+    | CheckOrchestratorImage _
+    | CheckAlloyImage _ ->
+        Ok []
     | StopOrchestrator ->
         let* _ =
           Remote_exec.docker_command_output_text ?session
@@ -1660,7 +1982,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
              Builtin_container.orchestrator ip_address);
         Ok []
     | RunServer ->
-        let image = "mlopez1506/bondi-server:" ^ config.bondi_server.version in
+        let image = orchestrator_image config in
         let run_cmd = orchestrator_run_command ~cron_payload_needed config in
         let* _ =
           Remote_exec.command_output_text ?session
@@ -1780,20 +2102,19 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
             let pre_write_output =
               (* Not bound with [let*]. This reading changes no exit code and
                  stops no run: a host that answers the unreadable marker produces
-                 a line of the account, and an ssh call that failed is the same
-                 fact about the same reading, so it takes the same route. Ending
-                 the run on it would fail a setup over a reading taken only to
-                 report -- and the empty string is exactly the answer the reading
-                 already reads as "nothing was reported". *)
-              Result.value ~default:""
-                (Remote_exec.command_output_text ?session
-                   ~timeout_seconds:host_command_seconds
-                   ~command:alloy_config_pre_write_mode_command server)
+                 a line of the account, and an ssh call that failed is a reading
+                 that could not be taken, so it takes the same route -- carrying
+                 the runner's message, which is not the same fact as a host that
+                 said nothing. Ending the run on it would fail a setup over a
+                 reading taken only to report. *)
+              Remote_exec.command_output_text ?session
+                ~timeout_seconds:host_command_seconds
+                ~command:alloy_config_pre_write_mode_command server
             in
             let pre_write_corrections =
               alloy_config_pre_write_account
                 ~expected:alloy_config_declared_mode
-                (alloy_config_pre_write_mode_of_probe
+                (alloy_pre_write_reading_of_run
                    ~expected:alloy_config_declared_mode pre_write_output)
             in
             (* The config travels on standard input rather than inside a
@@ -1822,35 +2143,9 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
                before the run says it wrote it. A write whose chmod was refused,
                or that landed somewhere a later phase does not look at, is
                otherwise a clean setup over a file at the host's umask. *)
-            let* probe_output =
-              Remote_exec.command_output_text ?session
-                ~timeout_seconds:host_command_seconds
-                ~command:alloy_config_mode_command server
-            in
             let* () =
-              match
-                alloy_config_mode_of_probe ~expected:alloy_config_declared_mode
-                  probe_output
-              with
-              | Alloy_mode_applied -> Ok ()
-              | Alloy_mode_differs { observed } ->
-                  Error
-                    (Printf.sprintf
-                       "%s on server %s is mode %s after being written at %s \
-                        -- refusing to report success on a posture that was \
-                        not applied"
-                       alloy_config_path ip_address
-                       (Host_answer.to_string observed)
-                       alloy_config_declared_mode)
-              | Alloy_mode_unreadable reason ->
-                  let detail = alloy_mode_unreadable_detail reason in
-                  Error
-                    (Printf.sprintf
-                       "could not read back the mode of %s on server %s after \
-                        writing it at %s, so whether the mode was applied is \
-                        unknown: %s"
-                       alloy_config_path ip_address alloy_config_declared_mode
-                       detail)
+              confirm_config_mode ~done_as:"being written at"
+                ~doing_as:"writing it at"
             in
             print_endline
               (Printf.sprintf "Alloy config written on server %s: %s" ip_address
@@ -1899,18 +2194,23 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
             ~command:alloy_state_dir_command server
         in
         Ok []
+    | PullAlloy -> (
+        match config.alloy with
+        | None -> Ok []
+        | Some alloy -> pull (Builtin_image.alloy ~declared:alloy.image))
+    | CorrectAlloyConfigMode -> Ok []
     | RunAlloy -> (
         match config.alloy with
         | None -> Ok []
         | Some alloy ->
-            let image =
-              Option.value alloy.image
-                ~default:Bondi_common.Defaults.alloy_image
-            in
+            let image = alloy_image alloy in
             let* output =
               Remote_exec.command_output_text ?session
                 ~timeout_seconds:host_command_seconds
-                ~command:(alloy_run_command ~image) server
+                ~command:
+                  (alloy_run_command ~image
+                     ~river:(alloy_river_config config alloy))
+                server
             in
             print_endline
               (Printf.sprintf "%s container started on server %s: %s"
@@ -2050,11 +2350,127 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
      Accumulated reversed and turned over once at the end: an accumulator
      appended to on every action copies itself on every action, and the plan is
      as long as the box's declared containers make it. *)
+  (* What a kept alloy's two mounted files call for. It lives with [then_run]
+     and not in [step] because its reading changes what follows it, which is
+     what [then_run] is for: a file that is not there is the replacement, and
+     the corrections account is returned beside it. The files are left as they
+     are, contents and all, so the mode each had is read, reported, and
+     corrected where it differs -- which the rewrite used to do as a side effect
+     of recreating them. A container kept over a missing bind-mount source fails
+     at the daemon's next restart, so a missing file is not left alone. The
+     readings are the pre-write kind and are read the way that arm reads them:
+     taken only to report, so an ssh call that failed is a line of the account
+     and not the end of the run. What they call for is decided in
+     [alloy_kept_files_course], and what they report in
+     [alloy_config_pre_write_account] and [alloy_env_pre_write_account]. *)
+  let correct_kept_alloy_files () =
+    let read ~expected ~command =
+      alloy_pre_write_reading_of_run ~expected
+        (Remote_exec.command_output_text ?session
+           ~timeout_seconds:host_command_seconds ~command server)
+    in
+    let config_reading =
+      read ~expected:alloy_config_declared_mode
+        ~command:alloy_config_pre_write_mode_command
+    in
+    let env_reading =
+      read ~expected:alloy_env_declared_mode
+        ~command:alloy_env_pre_write_mode_command
+    in
+    let corrections =
+      alloy_config_pre_write_account ~expected:alloy_config_declared_mode
+        config_reading
+      @ alloy_env_pre_write_account ~expected:alloy_env_declared_mode
+          env_reading
+    in
+    match alloy_kept_files_course ~config:config_reading ~env:env_reading with
+    | Alloy_files_replace ->
+        print_endline
+          (Printf.sprintf
+             "Alloy on server %s is missing a file it mounts, replacing it..."
+             ip_address);
+        Ok (corrections, alloy_replacement)
+    | Alloy_files_chmod files ->
+        let* () =
+          List.fold_left
+            (fun applied (path, declared) ->
+              let* () = applied in
+              let* _ =
+                Remote_exec.command_output_text ?session
+                  ~timeout_seconds:host_command_seconds
+                  ~command:(alloy_file_chmod_command ~mode:declared ~path)
+                  server
+              in
+              confirm_file_mode ~path ~declared ~done_as:"being changed to"
+                ~doing_as:"changing it to")
+            (Ok ()) files
+        in
+        Ok (corrections, [])
+  in
+  (* The actions one action calls for after it, which only an image check does:
+     the list its verdict names is applied next, by this same interpreter, ahead
+     of the rest of the plan. *)
+  let then_run :
+      action -> (Setup_phases.correction list * action list, string) result =
+    function
+    | CheckOrchestratorImage check ->
+        let* reference =
+          Builtin_image.orchestrator ~version:config.bondi_server.version
+        in
+        let* next =
+          check_image ~container:Builtin_container.orchestrator
+            ~running:config.bondi_server.version ~reference check
+        in
+        Ok ([], next)
+    | CheckAlloyImage check -> (
+        match config.alloy with
+        | None -> Ok ([], [])
+        | Some alloy ->
+            let reference = Builtin_image.alloy ~declared:alloy.image in
+            let* next =
+              check_image ~container:Builtin_container.alloy
+                ~running:(Bondi_common.Image_reference.to_string reference)
+                ~reference check
+            in
+            Ok ([], next))
+    | CorrectAlloyConfigMode -> correct_kept_alloy_files ()
+    | EnsureDocker
+    | EnsureAcmeFile
+    | EnsureNetwork _
+    | RequireCronDocker
+    | RequireCronCurl
+    | PreserveCronPayloads _
+    | PullOrchestrator
+    | StopOrchestrator
+    | RemoveOrchestrator
+    | RunServer
+    | EnsureJournalStorage
+    | EnsureAlloyState
+    | PullAlloy
+    | EnsureAlloyConfig
+    | WriteAlloyEnv
+    | RunAlloy
+    | StopAlloy
+    | RemoveAlloy
+    | CleanAlloyConfig
+    | WriteManagedEnv _
+    | RunManaged _
+    | StopManaged _
+    | RemoveManaged _
+    | CleanManagedConfig _ ->
+        Ok ([], [])
+  in
   let rec run corrected = function
     | [] -> (List.rev corrected, Ok ())
     | action :: rest -> (
-        match step action with
-        | Ok corrections -> run (List.rev_append corrections corrected) rest
+        let applied =
+          let* corrections = step action in
+          let* followed, next = then_run action in
+          Ok (corrections @ followed, next)
+        in
+        match applied with
+        | Ok (corrections, next) ->
+            run (List.rev_append corrections corrected) (next @ rest)
         | Error reason ->
             ( List.rev corrected,
               Error
@@ -2213,19 +2629,15 @@ let setup_server config server =
                      "%s on server %s exists but is not running, replacing \
                       it..."
                      Builtin_container.orchestrator ip_address)
-            | Orchestrator_running { version = running } ->
-                if not (List.mem RunServer actions) then
-                  print_endline
-                    (Printf.sprintf
-                       "%s container is already running on server %s: %s, \
-                        skipping..."
-                       Builtin_container.orchestrator ip_address running)
-                else
+            (* A container whose configuration matches is kept or replaced on
+               the image check's reading, and the check says which once it has
+               read the ids: what this line would claim is not known yet. *)
+            | Orchestrator_running { version = running; spec_hash } ->
+                if not (orchestrator_spec_matches config context ~spec_hash)
+                then
                   let reason =
-                    if running <> config.bondi_server.version then
-                      Printf.sprintf "version mismatch: running %s, want %s"
-                        running config.bondi_server.version
-                    else "adding cron job support"
+                    orchestrator_restart_reason
+                      ~wanted:config.bondi_server.version ~running ~spec_hash
                   in
                   print_endline
                     (Printf.sprintf
