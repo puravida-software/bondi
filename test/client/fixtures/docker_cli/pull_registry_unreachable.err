@@ -1,0 +1,1 @@
+Error response from daemon: failed to resolve reference "localhost:45124/obsimg:t": failed to do request: Head "https://localhost:45124/v2/obsimg/manifests/t": dial tcp 127.0.0.1:45124: connect: connection refused

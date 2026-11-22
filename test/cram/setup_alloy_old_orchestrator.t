@@ -13,6 +13,14 @@ version to pin, and touches nothing on the box.
   > printf '%s\n' "$1" >> "$SSH_ARGV_LOG"
   > cat > /dev/null
   > case "$1" in
+  >   # The pull setup takes ahead of any stop or run, answered as the docker
+  >   # CLI answers one for an image already on the box: four lines on stdout,
+  >   # exit 0.
+  >   'docker pull '*)
+  >     ref=$(printf '%s\n' "$1" | sed "s/^docker pull '\(.*\)'\$/\1/")
+  >     printf '%s: Pulling from %s\n' "${ref##*:}" "${ref%:*}"
+  >     printf 'Digest: sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4\n'
+  >     printf 'Status: Image is up to date for %s\n%s\n' "$ref" "$ref" ;;
   >   *BONDI_JOURNAL_PRESENT*) echo BONDI_JOURNAL_ABSENT ;;
   >   # The three provisioning commands, each succeeding: the box accepts them
   >   # and its journald still writes nowhere persistent. Named rather than left
@@ -24,9 +32,9 @@ version to pin, and touches nothing on the box.
   >   *BONDI_ACME_PRESENT*) echo BONDI_ACME_PRESENT ;;
   >   'docker --version') echo 'Docker version 27.0.0, build deadbeef' ;;
   >   *'name=^/bondi-orchestrator$'*'{{.State}}'*)
-  >     printf 'running\tmlopez1506/bondi-server:0.24.2\n' ;;
+  >     printf 'running\tmlopez1506/bondi-server:0.24.2\t\n' ;;
   >   *'ps -a --filter name=^/bondi-alloy$'*'{{.State}}'*)
-  >     printf 'running\tgrafana/alloy:v1.8.0\n' ;;
+  >     printf 'running\tgrafana/alloy:v1.8.0\t\n' ;;
   >   *BONDI_ALLOY_MODE_ABSENT*) echo 0640 ;;
   >   *'sudo stat -c %04a'*) echo 0640 ;;
   >   *'cat > '*'/etc/bondi/alloy/env'*) : ;;

@@ -6,6 +6,20 @@ module Host_answer = Bondi_client.Host_answer
 let contains ~needle s = Bondi_common.String_utils.contains ~needle s
 let index_of ~needle s = Bondi_common.String_utils.index_of ~needle s
 
+(* The River inputs the run commands below are built for. Every field is set.
+   The run command now takes the credentials in, to digest them into its spec
+   label, so they are given a value the absence check below can look for. *)
+let river =
+  {
+    Bondi_common.Alloy_river.grafana_cloud_endpoint =
+      "https://logs-prod.grafana.net/loki/api/v1/push";
+    grafana_cloud_instance_id = "123456";
+    grafana_cloud_api_key = "glc_secret";
+    collect = Bondi_common.Alloy_river.All;
+    labels = [];
+    excluded_containers = [];
+  }
+
 (* The River config file's mode used to be whatever umask the remote login shell
    happened to carry. That is not a decision anyone made, and it is why one box
    sat at 0644 while another sat narrowed by hand out of band. These tests pin
@@ -159,7 +173,9 @@ let test_unreadable_probe_is_not_a_difference_and_not_a_match () =
         "BONDI_ALLOY_MODE_UNREADABLE"
         (Host_answer.to_string observed)
   | Setup.Alloy_mode_not_reported ->
-      fail "a host that answered the marker did answer");
+      fail "a host that answered the marker did answer"
+  | Setup.Alloy_mode_command_failed _ ->
+      fail "a probe's output is never a command that failed to run");
   (* Nothing read is a different thing from a read the host refused: there is no
      answer to quote, so the verdict says so by its shape rather than by handing
      the caller a stand-in string the caller might print as the host's words. *)
@@ -169,6 +185,8 @@ let test_unreadable_probe_is_not_a_difference_and_not_a_match () =
     | Setup.Alloy_mode_read_refused { observed } ->
         failf "%s is not an answer the host gave, got %s" label
           (Host_answer.to_string observed)
+    | Setup.Alloy_mode_command_failed _ ->
+        failf "%s is not a command that failed to run" label
   in
   not_reported "empty output" "";
   not_reported "whitespace-only output" "  \n";
@@ -240,6 +258,10 @@ let test_alloy_config_mode_before_the_write () =
         (Setup.Alloy_mode_unreadable
            (Setup.Alloy_mode_read_refused { observed })) ->
         "unreadable: " ^ Host_answer.to_string observed
+    | Setup.Alloy_pre_write_read
+        (Setup.Alloy_mode_unreadable
+           (Setup.Alloy_mode_command_failed { message })) ->
+        "failed: " ^ Host_answer.to_string message
   in
   (* The affirmative arm the three rejections below need: the same function on
      the same expectation still recognises a host that already agrees, so a
@@ -460,13 +482,15 @@ let test_remove_config_command_deletes_the_directory_the_writes_use () =
    across two mechanisms for no gain -- and would leave a reader of the run
    command believing the credentials are still supplied there. *)
 let test_run_command_carries_no_credential () =
-  let cmd = Setup.alloy_run_command ~image:"grafana/alloy:v1.8.0" in
+  let cmd = Setup.alloy_run_command ~image:"grafana/alloy:v1.8.0" ~river in
   check bool "does not carry the api key variable" false
     (contains ~needle:"GRAFANA_CLOUD_API_KEY" cmd);
   check bool "does not carry the instance id variable" false
     (contains ~needle:"GRAFANA_CLOUD_INSTANCE_ID" cmd);
   check bool "passes no environment variable at all" false
     (contains ~needle:" -e " cmd);
+  check bool "does not carry the api key it was handed" false
+    (contains ~needle:river.grafana_cloud_api_key cmd);
   (* The affirmative arms, on the same command. Without them the three absences
      above pass against a builder that returned the empty string, or one that
      stopped producing a run command. *)
@@ -480,7 +504,7 @@ let test_run_command_carries_no_credential () =
     (contains ~needle:"grafana/alloy:v1.8.0" cmd);
   (* The image must reach the command. One image alone passes against a body
      that ignores its argument and spells a default inline. *)
-  let other = Setup.alloy_run_command ~image:"grafana/alloy:v1.9.2" in
+  let other = Setup.alloy_run_command ~image:"grafana/alloy:v1.9.2" ~river in
   check bool "runs the image it was handed and no other" true
     (contains ~needle:"grafana/alloy:v1.9.2" other);
   check bool "and no other" false (contains ~needle:"v1.8.0" other)
@@ -495,7 +519,7 @@ let test_run_command_carries_no_credential () =
    that no longer matches the file the write command creates. The check against
    the constant below is the separate claim that the two agree today. *)
 let test_run_command_references_the_env_file () =
-  let cmd = Setup.alloy_run_command ~image:"grafana/alloy:v1.8.0" in
+  let cmd = Setup.alloy_run_command ~image:"grafana/alloy:v1.8.0" ~river in
   check bool "reads the credentials out of a file" true
     (contains ~needle:"--env-file /etc/bondi/alloy/env" cmd);
   (* The file it names must be the file the credentials were written to. A run
@@ -509,13 +533,13 @@ let test_run_command_references_the_env_file () =
    orchestrator_run_command quotes its own token for this reason; this command
    was carried over from an inline Printf that quoted nothing. *)
 let test_run_command_quotes_the_image () =
-  let cmd = Setup.alloy_run_command ~image:"grafana/alloy:v1.8.0" in
+  let cmd = Setup.alloy_run_command ~image:"grafana/alloy:v1.8.0" ~river in
   check bool "quotes the image it was handed" true
     (contains ~needle:"'grafana/alloy:v1.8.0'" cmd);
   (* Why it matters, spelled out rather than built from Filename.quote so the
      arm pins a shape instead of restating the implementation: a quote inside
      the image is escaped rather than closing the argument early. *)
-  let awkward = Setup.alloy_run_command ~image:"alloy'v1" in
+  let awkward = Setup.alloy_run_command ~image:"alloy'v1" ~river in
   check bool "and escapes a quote inside one" true
     (contains ~needle:"'alloy'\\''v1'" awkward)
 

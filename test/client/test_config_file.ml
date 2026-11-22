@@ -499,7 +499,7 @@ alloy:
           | None -> fail "expected alloy config"
           | Some alloy -> (
               check (option string) "alloy image" (Some "grafana/alloy:v1.9.0")
-                alloy.image;
+                (Option.map Bondi_common.Image_reference.to_string alloy.image);
               check string "grafana cloud instance_id" "123456"
                 alloy.grafana_cloud.instance_id;
               check string "grafana cloud api_key" "glc_secret"
@@ -1337,6 +1337,25 @@ let test_config_refuses_bad_image () =
     ~expected:
       "invalid bondi.yaml: traefik.image \"traefik:\" is not an image reference"
     (images_yaml ~traefik:"traefik:" ());
+  let alloy_yaml image =
+    Printf.sprintf
+      {|bondi_server:
+  version: 0.1.0
+
+alloy:
+  image: "%s"
+  grafana_cloud:
+    instance_id: "1"
+    api_key: "k"
+    endpoint: https://logs-prod.grafana.net/loki/api/v1/push
+|}
+      image
+  in
+  check_read_refused ~label:"an alloy image that is no reference"
+    ~expected:
+      "invalid bondi.yaml: alloy.image \"Grafana Alloy:latest\" is not an \
+       image reference"
+    (alloy_yaml "Grafana Alloy:latest");
   check_read_refused ~label:"a cron job image that is no reference"
     ~expected:
       "invalid bondi.yaml: cron_jobs image \"backup job\" is not an image \

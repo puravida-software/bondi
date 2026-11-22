@@ -98,7 +98,11 @@ val failure_message :
     nothing about it reaches this type, and no list here would catch it either.
     The guarantee is that a site which reports has said what it reports and
     about what; it is not a guarantee over the writes a run makes. *)
-type site = Alloy_config_mode | Orchestrator_restart_policy | Journal_storage
+type site =
+  | Alloy_config_mode
+  | Alloy_env_mode
+  | Orchestrator_restart_policy
+  | Journal_storage
 
 type correction
 (** One thing a run's read-back had to say: a divergence it found and corrected,
@@ -148,6 +152,11 @@ val config_mode_corrected : found:Host_answer.t -> applied:string -> correction
     The path is not a parameter either, for the reason above: it is the path
     Bondi declares, which is the only kind of path any site reads. It is named
     in the line because a mode with no file is not a reading. *)
+
+val env_mode_corrected : found:Host_answer.t -> applied:string -> correction
+(** The Alloy credentials file, whose mode the host reported as [found] and
+    which this run left at [applied]. Its path is derived from the site, as the
+    config file's is. *)
 
 val journal_storage_provisioned : correction
 (** The host journal under {!Alloy_run_args.journal_path}, which the host held

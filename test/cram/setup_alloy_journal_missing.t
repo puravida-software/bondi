@@ -17,6 +17,14 @@ answers absent every time it is asked, restart or not.
   > printf '%s\n' "$1" >> "$SSH_ARGV_LOG"
   > cat > /dev/null
   > case "$1" in
+  >   # The pull setup takes ahead of any stop or run, answered as the docker
+  >   # CLI answers one for an image already on the box: four lines on stdout,
+  >   # exit 0.
+  >   'docker pull '*)
+  >     ref=$(printf '%s\n' "$1" | sed "s/^docker pull '\(.*\)'\$/\1/")
+  >     printf '%s: Pulling from %s\n' "${ref##*:}" "${ref%:*}"
+  >     printf 'Digest: sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4\n'
+  >     printf 'Status: Image is up to date for %s\n%s\n' "$ref" "$ref" ;;
   >   *BONDI_JOURNAL_PRESENT*) echo BONDI_JOURNAL_ABSENT ;;
   >   # The three provisioning commands, each succeeding: the box accepts them
   >   # and its journald still writes nowhere persistent. Named rather than left
@@ -27,10 +35,20 @@ answers absent every time it is asked, restart or not.
   >   'sudo systemctl restart systemd-journald') : ;;
   >   *BONDI_ACME_PRESENT*) echo BONDI_ACME_PRESENT ;;
   >   'docker --version') echo 'Docker version 27.0.0, build deadbeef' ;;
+  >   # The orchestrator this file's box already runs, carrying the digest setup
+  >   # stamps on a 0.25.0 orchestrator created without the cron payload mounts:
+  >   # what this setup would create, so it is pulled and checked rather than
+  >   # replaced. Without the digest it reads as a container no setup recorded,
+  >   # which is replaced once.
   >   *'name=^/bondi-orchestrator$'*'{{.State}}'*)
-  >     printf 'running\tmlopez1506/bondi-server:0.25.0\n' ;;
+  >     printf 'running\tmlopez1506/bondi-server:0.25.0\t92eba0ed2e6c82a23cd21b6c85e10e71\n' ;;
+  >   # The image check that follows the pull on that orchestrator: the pulled
+  >   # image's id, then the container's, one per line in the docker CLI's full
+  >   # sha256 form, and equal because nothing moved the tag.
+  >   'docker image inspect '*)
+  >     printf 'sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4\nsha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4\n' ;;
   >   *'ps -a --filter name=^/bondi-alloy$'*'{{.State}}'*)
-  >     printf 'running\tgrafana/alloy:v1.8.0\n' ;;
+  >     printf 'running\tgrafana/alloy:v1.8.0\t\n' ;;
   >   *BONDI_ALLOY_MODE_ABSENT*) echo 0640 ;;
   >   *'sudo stat -c %04a'*) echo 0640 ;;
   >   *'cat > '*'/etc/bondi/alloy/env'*) : ;;

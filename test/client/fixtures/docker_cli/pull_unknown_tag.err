@@ -1,0 +1,1 @@
+Error response from daemon: failed to resolve reference "localhost:45123/obsimg:nope": localhost:45123/obsimg:nope: not found

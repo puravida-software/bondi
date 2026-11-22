@@ -23,3 +23,11 @@
 (cram
  (applies_to ssh_agent_lifecycle)
  (deps %{exe:ssh_agent_probe.exe}))
+
+; Two files stub `docker pull` with the recorded captures, so they read them.
+
+(cram
+ (applies_to setup_pull_fails setup_unchanged_cron_host)
+ (deps
+  (glob_files ../client/fixtures/docker_cli/*.out)
+  (glob_files ../client/fixtures/docker_cli/*.err)))

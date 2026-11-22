@@ -105,6 +105,11 @@ type traefik_image = Image_reference.t
 let traefik_image_of_yojson = reference_of_yojson ~field:"traefik.image"
 let traefik_image_to_yojson = Image_reference.to_yojson
 
+type alloy_image = Image_reference.t
+
+let alloy_image_of_yojson = reference_of_yojson ~field:"alloy.image"
+let alloy_image_to_yojson = Image_reference.to_yojson
+
 type cron_image = Image_reference.t
 
 let cron_image_of_yojson = untagged_name_of_yojson ~field:"cron_jobs image"
@@ -233,7 +238,7 @@ type alloy_grafana_cloud = {
 [@@deriving yojson]
 
 type alloy = {
-  image : string option; [@default None]
+  image : alloy_image option; [@default None]
   grafana_cloud : alloy_grafana_cloud;
   collect : string option; [@default None]
   labels : string_map option; [@default None]

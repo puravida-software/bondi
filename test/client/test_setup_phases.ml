@@ -1,5 +1,6 @@
 open Alcotest
 module Setup = Bondi_client.Cmd.Setup
+module Crontab_listing = Bondi_client.Crontab_listing
 module Setup_phases = Bondi_client.Setup_phases
 module Host_answer = Bondi_client.Host_answer
 module Managed_container = Bondi_common.Managed_container
@@ -42,11 +43,19 @@ let test_phase_of_each_action_is_named () =
       (Setup.RequireCronDocker, "Cron_docker");
       (Setup.RequireCronCurl, "Cron_curl");
       (Setup.EnsureAcmeFile, "Acme");
+      ( Setup.PreserveCronPayloads { crontab = Crontab_listing.No_section },
+        "Orchestrator" );
+      (Setup.PullOrchestrator, "Orchestrator");
+      ( Setup.CheckOrchestratorImage { kept = []; replacement = [] },
+        "Orchestrator" );
       (Setup.StopOrchestrator, "Orchestrator");
       (Setup.RemoveOrchestrator, "Orchestrator");
       (Setup.RunServer, "Orchestrator");
       (Setup.EnsureJournalStorage, "Alloy");
       (Setup.EnsureAlloyState, "Alloy");
+      (Setup.PullAlloy, "Alloy");
+      (Setup.CheckAlloyImage { kept = []; replacement = [] }, "Alloy");
+      (Setup.CorrectAlloyConfigMode, "Alloy");
       (Setup.EnsureAlloyConfig, "Alloy");
       (Setup.WriteAlloyEnv, "Alloy");
       (Setup.RunAlloy, "Alloy");
@@ -179,6 +188,10 @@ let correction_of_site = function
       Setup_phases.config_mode_corrected
         ~found:(Host_answer.of_host_output "0644")
         ~applied:"0640"
+  | Setup_phases.Alloy_env_mode ->
+      Setup_phases.env_mode_corrected
+        ~found:(Host_answer.of_host_output "0644")
+        ~applied:"0600"
   | Setup_phases.Orchestrator_restart_policy ->
       Setup_phases.restart_policy_corrected
         ~found:(Host_answer.of_host_output "no")
@@ -196,17 +209,21 @@ let test_corrections_report_names_what_was_found_and_applied () =
   let corrections =
     [
       correction_of_site Setup_phases.Alloy_config_mode;
+      correction_of_site Setup_phases.Alloy_env_mode;
       correction_of_site Setup_phases.Orchestrator_restart_policy;
       correction_of_site Setup_phases.Journal_storage;
     ]
   in
   let lines = Setup_phases.corrections_report ~server:"10.0.0.1" corrections in
-  check int "one line per correction" 3 (List.length lines);
+  check int "one line per correction" 4 (List.length lines);
   let report = String.concat "\n" lines in
   check bool "names the file it corrected" true
     (contains ~needle:alloy_config_path report);
   check bool "names the mode the host had and the mode applied" true
     (contains ~needle:"was mode 0644, applied 0640" report);
+  check bool "names the credentials file it corrected" true
+    (contains ~needle:"/etc/bondi/alloy/env on server 10.0.0.1 was mode 0644"
+       report);
   check bool "names the container it corrected" true
     (contains ~needle:"bondi-orchestrator" report);
   check bool "names the policy the host had and the policy applied" true

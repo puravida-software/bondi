@@ -23,9 +23,23 @@ leaves a running one.
   > printf '%s\n' "$1" >> "$SSH_ARGV_LOG"
   > cat > /dev/null
   > case "$1" in
+  >   # The pull setup takes ahead of any stop or run, answered as the docker
+  >   # CLI answers one for an image already on the box: four lines on stdout,
+  >   # exit 0.
+  >   'docker pull '*)
+  >     ref=$(printf '%s\n' "$1" | sed "s/^docker pull '\(.*\)'\$/\1/")
+  >     printf '%s: Pulling from %s\n' "${ref##*:}" "${ref%:*}"
+  >     printf 'Digest: sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4\n'
+  >     printf 'Status: Image is up to date for %s\n%s\n' "$ref" "$ref" ;;
   >   *BONDI_ACME_PRESENT*) echo BONDI_ACME_PRESENT ;;
   >   'docker --version') echo 'Docker version 27.0.0, build deadbeef' ;;
   >   *'name=^/bondi-orchestrator$'*'{{.State}}'*) cat "$ORCHESTRATOR_PS" ;;
+  >   # The image check that follows the pull on an orchestrator whose recorded
+  >   # digest matches: the pulled image's id, then the container's, one per line
+  >   # in the docker CLI's full sha256 form, and equal because nothing moved the
+  >   # tag.
+  >   'docker image inspect '*)
+  >     printf 'sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4\nsha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4\n' ;;
   >   # The wait for the container to reach a running state. Matched on the
   >   # loop's own opening rather than on `docker inspect`, because the
   >   # diagnostics read further down is also a `docker inspect --format`
@@ -174,6 +188,7 @@ host holds.
   Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 127.0.0.1
   ACME file permissions updated on server 127.0.0.1: /etc/traefik/acme/acme.json
+  Pulled mlopez1506/bondi-server:0.15.0 on server 127.0.0.1
   bondi-orchestrator is ready on server 127.0.0.1: mlopez1506/bondi-server:0.15.0
   No alloy is configured for server 127.0.0.1: /etc/bondi/alloy is not on the host
   setup corrected nothing on server 127.0.0.1
@@ -258,6 +273,7 @@ phases did not run; this one says what is on the box now, and both are printed.
   Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 127.0.0.1
   ACME file permissions updated on server 127.0.0.1: /etc/traefik/acme/acme.json
+  Pulled mlopez1506/bondi-server:0.15.0 on server 127.0.0.1
   Error: bondi-orchestrator did not come up on server 127.0.0.1.
   Image: mlopez1506/bondi-server:0.15.0
   the wait for the orchestrator container to reach a running state ran on the host and failed: command failed (1): container bondi-orchestrator did not reach a running state after 30 attempts; its last state was exited
@@ -402,16 +418,17 @@ A container left behind by a failed start is removed before the next attempt,
 rather than colliding with the name and making `bondi setup` — the command an
 operator reaches for to recover — fail too.
 
-  $ printf 'exited\tmlopez1506/bondi-server:0.15.0\n' > "$ORCHESTRATOR_PS"
+  $ printf 'exited\tmlopez1506/bondi-server:0.15.0\t\n' > "$ORCHESTRATOR_PS"
   $ : > ssh-argv.log
   $ bondi-client setup > out.log 2>&1
-  $ sed 's/not reachable: .*/not reachable: <detail>/' out.log | head -8
+  $ sed 's/not reachable: .*/not reachable: <detail>/' out.log | head -9
   Setting up the servers...
   Processing server: 127.0.0.1
   bondi-orchestrator on server 127.0.0.1 exists but is not running, replacing it...
   Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 127.0.0.1
   ACME file permissions updated on server 127.0.0.1: /etc/traefik/acme/acme.json
+  Pulled mlopez1506/bondi-server:0.15.0 on server 127.0.0.1
   Removed bondi-orchestrator container on server 127.0.0.1
   bondi-orchestrator is ready on server 127.0.0.1: mlopez1506/bondi-server:0.15.0
 
@@ -461,7 +478,12 @@ update` reaches the host at all. The inspect is counted too, so that the absent
 update is known to be a decision this run took rather than a phase it never
 reached.
 
-  $ printf 'running\tmlopez1506/bondi-server:0.15.0\n' > "$ORCHESTRATOR_PS"
+The listing carries the digest setup stamps on a 0.15.0 orchestrator created
+without the cron payload mounts, which is what this bondi.yaml would create: the
+container is kept, so the policy is the only thing about it this run can
+correct. The three fixtures below share it.
+
+  $ printf 'running\tmlopez1506/bondi-server:0.15.0\tff6ddc811d842ca37ab2874c6189c404\n' > "$ORCHESTRATOR_PS"
   $ printf 'unless-stopped\n' > "$RESTART_POLICY"
   $ : > ssh-argv.log
   $ bondi-client setup > out.log 2>&1
@@ -481,7 +503,7 @@ re-run, because recreating it would drop TLS for every site on the box to change
 a flag. The policy is read a second time afterwards, since `docker update`
 accepting the command is not the same fact as the daemon having applied it.
 
-  $ printf 'running\tmlopez1506/bondi-server:0.15.0\n' > "$ORCHESTRATOR_PS"
+  $ printf 'running\tmlopez1506/bondi-server:0.15.0\tff6ddc811d842ca37ab2874c6189c404\n' > "$ORCHESTRATOR_PS"
   $ printf 'no\n' > "$RESTART_POLICY"
   $ : > ssh-argv.log
   $ RESTART_UPDATE_STICKS=1 bondi-client setup > out.log 2>&1
@@ -515,7 +537,7 @@ A host that still reports the old policy after the update fails the run and
 names both what it reported and what was asked for. Accepting the update as
 proof of itself is the same assumption the run command's flag already made.
 
-  $ printf 'running\tmlopez1506/bondi-server:0.15.0\n' > "$ORCHESTRATOR_PS"
+  $ printf 'running\tmlopez1506/bondi-server:0.15.0\tff6ddc811d842ca37ab2874c6189c404\n' > "$ORCHESTRATOR_PS"
   $ printf 'no\n' > "$RESTART_POLICY"
   $ : > ssh-argv.log
   $ bondi-client setup > out.log 2>&1
@@ -538,7 +560,7 @@ would make the assertions below pass while proving nothing reached the host.
 
   $ printf 'BONDI_CRONTAB_CONTENTS\n# BEGIN BONDI CRON\n0 3 * * * docker exec bondi-orchestrator sh -c '"'"'bondi-server run < /etc/bondi/cron/nightly-report/run.json'"'"'\n# END BONDI CRON\nBONDI_CRONTAB_END\n' > crontab-spool.txt
   $ export CRONTAB_SPOOL="$PWD/crontab-spool.txt"
-  $ printf 'running\tmlopez1506/bondi-server:0.9.0\n' > "$ORCHESTRATOR_PS"
+  $ printf 'running\tmlopez1506/bondi-server:0.9.0\t\n' > "$ORCHESTRATOR_PS"
   $ printf 'unless-stopped\n' > "$RESTART_POLICY"
   $ : > ssh-argv.log
   $ bondi-client setup > out.log 2>&1

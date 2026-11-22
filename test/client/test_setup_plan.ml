@@ -22,11 +22,16 @@ let action_string = function
       match Crontab_listing.jobs_read crontab with
       | None -> "PreserveCronPayloads (no section read)"
       | Some jobs -> "PreserveCronPayloads " ^ String.concat "," jobs)
+  | Setup.PullOrchestrator -> "PullOrchestrator"
+  | Setup.CheckOrchestratorImage _ -> "CheckOrchestratorImage"
   | Setup.StopOrchestrator -> "StopOrchestrator"
   | Setup.RemoveOrchestrator -> "RemoveOrchestrator"
   | Setup.RunServer -> "RunServer"
   | Setup.EnsureJournalStorage -> "EnsureJournalStorage"
   | Setup.EnsureAlloyState -> "EnsureAlloyState"
+  | Setup.PullAlloy -> "PullAlloy"
+  | Setup.CheckAlloyImage _ -> "CheckAlloyImage"
+  | Setup.CorrectAlloyConfigMode -> "CorrectAlloyConfigMode"
   | Setup.EnsureAlloyConfig -> "EnsureAlloyConfig"
   | Setup.WriteAlloyEnv -> "WriteAlloyEnv"
   | Setup.RunAlloy -> "RunAlloy"
@@ -50,11 +55,16 @@ let is_ensure_network = function
   | Setup.RequireCronDocker
   | Setup.RequireCronCurl
   | Setup.PreserveCronPayloads _
+  | Setup.PullOrchestrator
+  | Setup.CheckOrchestratorImage _
   | Setup.StopOrchestrator
   | Setup.RemoveOrchestrator
   | Setup.RunServer
   | Setup.EnsureJournalStorage
   | Setup.EnsureAlloyState
+  | Setup.PullAlloy
+  | Setup.CheckAlloyImage _
+  | Setup.CorrectAlloyConfigMode
   | Setup.EnsureAlloyConfig
   | Setup.WriteAlloyEnv
   | Setup.RunAlloy
@@ -69,11 +79,14 @@ let is_ensure_network = function
       false
 
 (* An action that starts a container on the shared network. EnsureNetwork must
-   precede every one of these. *)
+   precede every one of these. An image check is one: what it may run next is a
+   replacement that starts the container again. *)
 let joins_network = function
   | Setup.RunServer
   | Setup.RunAlloy
-  | Setup.RunManaged _ ->
+  | Setup.RunManaged _
+  | Setup.CheckOrchestratorImage _
+  | Setup.CheckAlloyImage _ ->
       true
   | Setup.EnsureDocker
   | Setup.EnsureAcmeFile
@@ -81,10 +94,13 @@ let joins_network = function
   | Setup.RequireCronDocker
   | Setup.RequireCronCurl
   | Setup.PreserveCronPayloads _
+  | Setup.PullOrchestrator
   | Setup.StopOrchestrator
   | Setup.RemoveOrchestrator
   | Setup.EnsureJournalStorage
   | Setup.EnsureAlloyState
+  | Setup.PullAlloy
+  | Setup.CorrectAlloyConfigMode
   | Setup.EnsureAlloyConfig
   | Setup.WriteAlloyEnv
   | Setup.StopAlloy
@@ -111,11 +127,16 @@ let is_managed = function
   | Setup.RequireCronDocker
   | Setup.RequireCronCurl
   | Setup.PreserveCronPayloads _
+  | Setup.PullOrchestrator
+  | Setup.CheckOrchestratorImage _
   | Setup.StopOrchestrator
   | Setup.RemoveOrchestrator
   | Setup.RunServer
   | Setup.EnsureJournalStorage
   | Setup.EnsureAlloyState
+  | Setup.PullAlloy
+  | Setup.CheckAlloyImage _
+  | Setup.CorrectAlloyConfigMode
   | Setup.EnsureAlloyConfig
   | Setup.WriteAlloyEnv
   | Setup.RunAlloy
@@ -260,7 +281,7 @@ let specs_of_entries entries =
   in
   match Config_file.managed_containers config with
   | Ok specs -> specs
-  | Error message -> failwith message
+  | Error message -> fail message
 
 let spec_named name specs =
   match List.find_opt (fun s -> Managed_container.name s = name) specs with
@@ -282,8 +303,45 @@ let observed pairs =
 
 (* The two orchestrator listings the plan tests are built from: one that
    answered, and one that never ran. *)
-let orchestrator_probe_running = Ok "running\tmlopez1506/bondi-server:0.9.0\n"
+let orchestrator_probe_running = Ok "running\tmlopez1506/bondi-server:0.9.0\t\n"
 let orchestrator_unreachable = Error transport_error
+
+(* The listing of a running orchestrator that a setup created, carrying the
+   digest that setup stamped on it. The digest is taken over a configuration
+   built here, apart from the one each test plans from, so the running side and
+   the desired side are equal values rather than one value read twice. *)
+let orchestrator_created_by_setup ?(label = true) ~cron_payload_needed ~version
+    () =
+  let created_from =
+    make_config ~user_service:None ~cron_jobs:None ~version ()
+  in
+  Setup.orchestrator_state_of_probe
+    (Ok
+       (Printf.sprintf "running\tmlopez1506/bondi-server:%s\t%s\n" version
+          (if label then
+             Setup.orchestrator_spec_hash ~cron_payload_needed created_from
+           else "")))
+
+let backup_cron_job =
+  {
+    Config_file.name = "backup";
+    Config_file.image = Test_helpers.image_reference "backup";
+    Config_file.schedule = "0 0 * * *";
+    Config_file.network = None;
+    Config_file.env_vars = None;
+    Config_file.secret_env_vars = None;
+    Config_file.registry_user = None;
+    Config_file.registry_pass = None;
+    Config_file.alert_sinks = None;
+    Config_file.exit_code_severities = None;
+    Config_file.server = minimal_server;
+  }
+
+(* An orchestrator this setup created and nothing has changed since, for the
+   tests whose subject is some other phase: it is pulled and checked, and
+   nothing else. *)
+let unchanged_orchestrator () =
+  orchestrator_created_by_setup ~cron_payload_needed:false ~version:"1.0.0" ()
 
 (* `docker ps -a` reports containers in every state, which is what lets a dead
    orchestrator be seen at all. Reading "exited" as running is the shape of the
@@ -291,28 +349,70 @@ let orchestrator_unreachable = Error transport_error
    the host with nothing ready. *)
 let test_exited_orchestrator_is_not_read_as_running () =
   check bool "an exited container is not running" true
-    (Setup.orchestrator_state_of_ps_output
-       "exited\tmlopez1506/bondi-server:0.10.1\n"
+    (Setup.orchestrator_state_of_probe
+       (Ok "exited\tmlopez1506/bondi-server:0.10.1\t\n")
     = Setup.Orchestrator_not_running)
 
 let test_running_orchestrator_reports_its_version () =
   check bool "version read from the image tag" true
-    (Setup.orchestrator_state_of_ps_output
-       "running\tmlopez1506/bondi-server:0.10.1\n"
-    = Setup.Orchestrator_running { version = "0.10.1" })
+    (Setup.orchestrator_state_of_probe
+       (Ok "running\tmlopez1506/bondi-server:0.10.1\t\n")
+    = Setup.Orchestrator_running { version = Some "0.10.1"; spec_hash = None });
+  check bool "the digest is read from the label column" true
+    (Setup.orchestrator_state_of_probe
+       (Ok "running\tmlopez1506/bondi-server:0.10.1\tabc123\n")
+    = Setup.Orchestrator_running
+        { version = Some "0.10.1"; spec_hash = Some "abc123" })
 
 (* A container built from some other image is still the orchestrator by name.
    Reporting the whole image is what makes the version-mismatch message
    readable when someone has pinned a fork or a local build. *)
 let test_running_orchestrator_from_another_image_reports_the_image () =
   check bool "whole image reported" true
-    (Setup.orchestrator_state_of_ps_output "running\tlocal/bondi:dev\n"
-    = Setup.Orchestrator_running { version = "local/bondi:dev" })
+    (Setup.orchestrator_state_of_probe (Ok "running\tlocal/bondi:dev\t\n")
+    = Setup.Orchestrator_running
+        { version = Some "local/bondi:dev"; spec_hash = None })
+
+(* A listing taken after a pull moved the tag reports the container's image id
+   in the image column, which is no release. It is read as no version rather than
+   as a version that happens to be twelve hex digits, so the reason a restart
+   prints is not a string comparison of an id against the configured version. *)
+let test_a_moved_tag_reads_as_no_version_and_is_worded_so () =
+  let captured =
+    let channel =
+      open_in_bin "fixtures/docker_cli/ps_labelled_after_tag_moved.out"
+    in
+    Fun.protect
+      ~finally:(fun () -> close_in_noerr channel)
+      (fun () -> really_input_string channel (in_channel_length channel))
+  in
+  match Setup.orchestrator_state_of_probe (Ok captured) with
+  | Setup.Orchestrator_running { version; spec_hash } ->
+      check (option string) "no version is read from an image id" None version;
+      let reason =
+        Setup.orchestrator_restart_reason ~wanted:"0.25.0" ~running:version
+          ~spec_hash
+      in
+      check string "worded from the moved tag"
+        "running an image its tag no longer names" reason;
+      check string "a real mismatch still names both"
+        "version mismatch: running 0.24.0, want 0.25.0"
+        (Setup.orchestrator_restart_reason ~wanted:"0.25.0"
+           ~running:(Some "0.24.0") ~spec_hash);
+      check string "a matching version with another digest"
+        "its configuration changed"
+        (Setup.orchestrator_restart_reason ~wanted:"0.25.0"
+           ~running:(Some "0.25.0") ~spec_hash:(Some "x"))
+  | Setup.Orchestrator_absent
+  | Setup.Orchestrator_not_running
+  | Setup.Orchestrator_undetermined _ ->
+      fail "the listing is a running container"
 
 let orchestrator_state_string = function
   | Setup.Orchestrator_absent -> "Orchestrator_absent"
   | Setup.Orchestrator_not_running -> "Orchestrator_not_running"
-  | Setup.Orchestrator_running { version } -> "Orchestrator_running " ^ version
+  | Setup.Orchestrator_running { version; spec_hash = _ } ->
+      "Orchestrator_running " ^ Option.value version ~default:"<no tag>"
   | Setup.Orchestrator_undetermined message ->
       "Orchestrator_undetermined " ^ message
 
@@ -332,13 +432,13 @@ let test_orchestrator_probe_error_is_undetermined () =
        (Setup.orchestrator_state_of_probe orchestrator_unreachable));
   check string "a successful listing is read"
     (orchestrator_state_string
-       (Setup.Orchestrator_running { version = "0.9.0" }))
+       (Setup.Orchestrator_running { version = Some "0.9.0"; spec_hash = None }))
     (orchestrator_state_string
        (Setup.orchestrator_state_of_probe orchestrator_probe_running))
 
 let test_no_orchestrator_container_is_absent () =
   check bool "no container is absent" true
-    (Setup.orchestrator_state_of_ps_output "\n" = Setup.Orchestrator_absent)
+    (Setup.orchestrator_state_of_probe (Ok "\n") = Setup.Orchestrator_absent)
 
 (* Docker reports "created" for a container that was never started and
    "restarting" for one in a crash loop. Neither is ready, and both must be
@@ -349,8 +449,8 @@ let test_non_running_states_are_not_ready () =
       check bool
         (state ^ " is not running")
         true
-        (Setup.orchestrator_state_of_ps_output
-           (state ^ "\tmlopez1506/bondi-server:0.10.1\n")
+        (Setup.orchestrator_state_of_probe
+           (Ok (state ^ "\tmlopez1506/bondi-server:0.10.1\t\n"))
         = Setup.Orchestrator_not_running))
     [ "created"; "restarting"; "paused"; "dead" ]
 
@@ -362,7 +462,7 @@ let test_non_running_states_are_not_ready () =
    managed fixtures are: a fixture that bypasses the derivation can pin a state
    [gather_context] is unable to produce. *)
 let alloy_ps ~state ~image =
-  Setup.alloy_state_of_ps_output (Printf.sprintf "%s\t%s\n" state image)
+  Setup.alloy_state_of_probe (Ok (Printf.sprintf "%s\t%s\t\n" state image))
 
 (* A container that exists but is not running still holds its name, so it is not
    the same fact as no container at all. Reading the first as the second makes
@@ -371,27 +471,32 @@ let alloy_ps ~state ~image =
 let test_alloy_stopped_container_is_present_not_absent () =
   check bool "an exited container is present" true
     (alloy_ps ~state:"exited" ~image:"grafana/alloy:v1.8.0"
-    = Setup.Alloy_present)
+    = Setup.Alloy_not_running)
 
-(* Running and stopped are the same fact to the plan: both hold the name, and
-   alloy is replaced either way. The state column is still read because it is
-   what tells a container apart from no container at all. *)
+(* Running is read apart from stopped, with the digest the container was
+   created with, because only a running container can be kept. One that carries
+   no digest reads as [None], which never matches. *)
 let test_alloy_running_container_is_present () =
   check bool "a running container is present" true
     (alloy_ps ~state:"running" ~image:"grafana/alloy:v1.8.0"
-    = Setup.Alloy_present)
+    = Setup.Alloy_running { spec_hash = None });
+  check bool "its digest is read" true
+    (Setup.alloy_state_of_probe (Ok "running\tgrafana/alloy:v1.8.0\tabc123\n")
+    = Setup.Alloy_running { spec_hash = Some "abc123" })
 
 let test_alloy_no_container_is_absent () =
   check bool "no container is absent" true
-    (Setup.alloy_state_of_ps_output "\n" = Setup.Alloy_absent)
+    (Setup.alloy_state_of_probe (Ok "\n") = Setup.Alloy_absent)
 
 let alloy_state_string = function
   | Setup.Alloy_absent -> "Alloy_absent"
-  | Setup.Alloy_present -> "Alloy_present"
+  | Setup.Alloy_not_running -> "Alloy_not_running"
+  | Setup.Alloy_running { spec_hash } ->
+      "Alloy_running " ^ Option.value spec_hash ~default:"(no digest)"
   | Setup.Alloy_undetermined message -> "Alloy_undetermined " ^ message
 
 (* The two alloy listings the plan tests are built from. *)
-let alloy_probe_stopped = Ok "exited\tgrafana/alloy:v1.8.0\n"
+let alloy_probe_stopped = Ok "exited\tgrafana/alloy:v1.8.0\t\n"
 let alloy_unreachable = Error transport_error
 
 (* The same reading as the orchestrator's: a listing that never ran is not a
@@ -403,7 +508,7 @@ let test_alloy_probe_error_is_undetermined () =
     (alloy_state_string (Setup.Alloy_undetermined transport_error))
     (alloy_state_string (Setup.alloy_state_of_probe alloy_unreachable));
   check string "a successful listing is read"
-    (alloy_state_string Setup.Alloy_present)
+    (alloy_state_string Setup.Alloy_not_running)
     (alloy_state_string (Setup.alloy_state_of_probe alloy_probe_stopped))
 
 (* ------------------------------------------------------------------------- *)
@@ -815,7 +920,7 @@ let test_plan_skip_server_when_up_to_date () =
   in
   let context =
     ctx
-      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+      ~orchestrator:(unchanged_orchestrator ())
       ~docker_probe:docker_present ()
   in
   let actions = plan config context in
@@ -1165,11 +1270,13 @@ let test_plan_preserve_precedes_the_orchestrator_recreate () =
   in
   let context =
     ctx
-      ~orchestrator:(Setup.Orchestrator_running { version = "0.9.0" })
+      ~orchestrator:
+        (Setup.Orchestrator_running { version = Some "0.9.0"; spec_hash = None })
       ~crontab:section_with_one_named_job ~docker_probe:docker_present ()
   in
   check (list string) "orchestrator phase"
     [
+      "PullOrchestrator";
       "PreserveCronPayloads nightly-report";
       "StopOrchestrator";
       "RemoveOrchestrator";
@@ -1188,11 +1295,14 @@ let test_plan_no_preserve_without_a_section () =
   in
   let context =
     ctx
-      ~orchestrator:(Setup.Orchestrator_running { version = "0.9.0" })
+      ~orchestrator:
+        (Setup.Orchestrator_running { version = Some "0.9.0"; spec_hash = None })
       ~crontab:Crontab_listing.No_section ~docker_probe:docker_present ()
   in
   check (list string) "orchestrator phase"
-    [ "StopOrchestrator"; "RemoveOrchestrator"; "RunServer" ]
+    [
+      "PullOrchestrator"; "StopOrchestrator"; "RemoveOrchestrator"; "RunServer";
+    ]
     (orchestrator_phase (plan config context))
 
 (* A stopped container is a recreate like any other, and its files are still
@@ -1210,7 +1320,12 @@ let test_plan_preserve_precedes_a_stopped_orchestrator_recreate () =
       ~crontab:section_with_one_named_job ~docker_probe:docker_present ()
   in
   check (list string) "orchestrator phase"
-    [ "PreserveCronPayloads nightly-report"; "RemoveOrchestrator"; "RunServer" ]
+    [
+      "PullOrchestrator";
+      "PreserveCronPayloads nightly-report";
+      "RemoveOrchestrator";
+      "RunServer";
+    ]
     (orchestrator_phase (plan config context))
 
 (* A section whose markers do not balance, and a spool file that was never read,
@@ -1235,14 +1350,17 @@ let test_plan_preserve_for_a_crontab_that_could_not_be_understood () =
     orchestrator_phase
       (plan config
          (ctx
-            ~orchestrator:(Setup.Orchestrator_running { version = "0.9.0" })
+            ~orchestrator:
+              (Setup.Orchestrator_running
+                 { version = Some "0.9.0"; spec_hash = None })
             ~crontab ~docker_probe:docker_present ()))
   in
   let recreate = [ "StopOrchestrator"; "RemoveOrchestrator"; "RunServer" ] in
   List.iter
     (fun (label, crontab) ->
       check (list string) label
-        ("PreserveCronPayloads (no section read)" :: recreate)
+        ("PullOrchestrator" :: "PreserveCronPayloads (no section read)"
+       :: recreate)
         (phase_for crontab))
     [
       ( "markers that do not balance",
@@ -1250,7 +1368,8 @@ let test_plan_preserve_for_a_crontab_that_could_not_be_understood () =
       ( "a spool file that was never read",
         Crontab_listing.Unreadable "the host refused sudo -n" );
     ];
-  check (list string) "a host that answered it holds no section" recreate
+  check (list string) "a host that answered it holds no section"
+    ("PullOrchestrator" :: recreate)
     (phase_for Crontab_listing.No_section)
 
 (* The mount and the copy have to agree, and until they were derived from one
@@ -1268,7 +1387,8 @@ let test_run_command_mounts_the_payload_directory_for_a_held_section () =
   in
   let context =
     ctx
-      ~orchestrator:(Setup.Orchestrator_running { version = "0.9.0" })
+      ~orchestrator:
+        (Setup.Orchestrator_running { version = Some "0.9.0"; spec_hash = None })
       ~crontab:section_with_one_named_job ~docker_probe:docker_present ()
   in
   let needed = Setup.cron_payload_needed config context in
@@ -1292,7 +1412,8 @@ let test_run_command_omits_the_payload_mount_without_cron () =
   in
   let context =
     ctx
-      ~orchestrator:(Setup.Orchestrator_running { version = "0.9.0" })
+      ~orchestrator:
+        (Setup.Orchestrator_running { version = Some "0.9.0"; spec_hash = None })
       ~crontab:Crontab_listing.No_section ~docker_probe:docker_present ()
   in
   let needed = Setup.cron_payload_needed config context in
@@ -1323,7 +1444,8 @@ let test_the_reading_asks_about_cron_wherever_the_run_converges_it () =
   in
   let context crontab =
     ctx
-      ~orchestrator:(Setup.Orchestrator_running { version = "0.9.0" })
+      ~orchestrator:
+        (Setup.Orchestrator_running { version = Some "0.9.0"; spec_hash = None })
       ~crontab ~docker_probe:docker_present ()
   in
   let asks_about_cron crontab =
@@ -1345,7 +1467,8 @@ let test_plan_version_mismatch_stops_and_runs () =
   in
   let context =
     ctx
-      ~orchestrator:(Setup.Orchestrator_running { version = "0.9.0" })
+      ~orchestrator:
+        (Setup.Orchestrator_running { version = Some "0.9.0"; spec_hash = None })
       ~docker_probe:docker_present ()
   in
   let actions = plan config context in
@@ -1374,6 +1497,7 @@ let test_plan_exited_orchestrator_is_removed_before_running () =
       [
         "EnsureDocker";
         "EnsureNetwork bondi-network";
+        "PullOrchestrator";
         "RemoveOrchestrator";
         "RunServer";
         "CleanAlloyConfig";
@@ -1388,7 +1512,8 @@ let test_plan_running_orchestrator_is_removed_after_stopping () =
   in
   let context =
     ctx
-      ~orchestrator:(Setup.Orchestrator_running { version = "0.9.0" })
+      ~orchestrator:
+        (Setup.Orchestrator_running { version = Some "0.9.0"; spec_hash = None })
       ~docker_probe:docker_present ()
   in
   let actions = plan config context in
@@ -1397,6 +1522,7 @@ let test_plan_running_orchestrator_is_removed_after_stopping () =
       [
         "EnsureDocker";
         "EnsureNetwork bondi-network";
+        "PullOrchestrator";
         "StopOrchestrator";
         "RemoveOrchestrator";
         "RunServer";
@@ -1404,29 +1530,18 @@ let test_plan_running_orchestrator_is_removed_after_stopping () =
       ]
     actions
 
-let test_plan_cron_jobs_force_restart () =
-  let cron_job =
-    {
-      Config_file.name = "backup";
-      Config_file.image = Test_helpers.image_reference "backup";
-      Config_file.schedule = "0 0 * * *";
-      Config_file.network = None;
-      Config_file.env_vars = None;
-      Config_file.secret_env_vars = None;
-      Config_file.registry_user = None;
-      Config_file.registry_pass = None;
-      Config_file.alert_sinks = None;
-      Config_file.exit_code_severities = None;
-      Config_file.server = minimal_server;
-    }
-  in
+(* Adding the first cron job changes what the orchestrator is created with: it
+   gains the payload mounts and runs as root. A container created without them
+   reads as changed and is replaced, which is the one way cron jobs still
+   recreate it -- declaring them no longer does so on every run. *)
+let test_plan_cron_jobs_added_replace_a_container_without_their_mounts () =
   let config =
-    make_config ~user_service:None ~cron_jobs:(Some [ cron_job ])
+    make_config ~user_service:None ~cron_jobs:(Some [ backup_cron_job ])
       ~version:"1.0.0" ()
   in
   let context =
     ctx
-      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+      ~orchestrator:(unchanged_orchestrator ())
       ~docker_probe:docker_present ()
   in
   let actions = plan config context in
@@ -1444,7 +1559,8 @@ let test_plan_action_order () =
   in
   let context =
     ctx
-      ~orchestrator:(Setup.Orchestrator_running { version = "0.9.0" })
+      ~orchestrator:
+        (Setup.Orchestrator_running { version = Some "0.9.0"; spec_hash = None })
       ~docker_probe:docker_present ()
   in
   let actions = plan config context in
@@ -1454,6 +1570,7 @@ let test_plan_action_order () =
         "EnsureDocker";
         "EnsureNetwork bondi-network";
         "EnsureAcmeFile";
+        "PullOrchestrator";
         "StopOrchestrator";
         "RemoveOrchestrator";
         "RunServer";
@@ -1495,6 +1612,7 @@ let test_plan_cron_only_no_acme () =
         "EnsureNetwork bondi-network";
         "RequireCronDocker";
         "RequireCronCurl";
+        "PullOrchestrator";
         "RunServer";
         "CleanAlloyConfig";
       ]
@@ -1657,7 +1775,8 @@ let test_setup_plan_ensure_network_precedes_joining_actions () =
   in
   let context =
     ctx
-      ~orchestrator:(Setup.Orchestrator_running { version = "0.9.0" })
+      ~orchestrator:
+        (Setup.Orchestrator_running { version = Some "0.9.0"; spec_hash = None })
       ~docker_probe:docker_present ()
   in
   let actions = plan config ~specs:(specs_of_entries entries) context in
@@ -1686,7 +1805,7 @@ let converge ?(observed_managed = Setup.Managed_observed []) entries =
   in
   let context =
     ctx ~managed:observed_managed
-      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+      ~orchestrator:(unchanged_orchestrator ())
       ~docker_probe:docker_present ()
   in
   (specs, plan config ~specs context)
@@ -1806,7 +1925,7 @@ let test_managed_ignores_malformed_ps_lines () =
         in
         plan config
           (ctx ~managed
-             ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+             ~orchestrator:(unchanged_orchestrator ())
              ~docker_probe:docker_present ())
   in
   check_managed_actions
@@ -1850,7 +1969,7 @@ let test_plan_for_config_reads_declared_containers () =
   in
   let context =
     ctx
-      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+      ~orchestrator:(unchanged_orchestrator ())
       ~docker_probe:docker_present ()
   in
   match Setup.plan_for_config config context with
@@ -1873,7 +1992,7 @@ let test_plan_for_config_surfaces_invalid_declaration () =
   in
   let context =
     ctx
-      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+      ~orchestrator:(unchanged_orchestrator ())
       ~docker_probe:docker_present ()
   in
   match Setup.plan_for_config config context with
@@ -1894,7 +2013,7 @@ let test_plan_for_config_rejects_unobserved_with_declarations () =
   in
   let context =
     ctx ~managed:(Setup.Managed_unobserved "connection refused")
-      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+      ~orchestrator:(unchanged_orchestrator ())
       ~docker_probe:docker_present ()
   in
   match Setup.plan_for_config config context with
@@ -1911,7 +2030,7 @@ let test_plan_for_config_allows_unobserved_without_declarations () =
   in
   let context =
     ctx ~managed:(Setup.Managed_unobserved "connection refused")
-      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+      ~orchestrator:(unchanged_orchestrator ())
       ~docker_probe:docker_present ()
   in
   match Setup.plan_for_config config context with
@@ -1954,8 +2073,9 @@ let test_plan_alloy_removed () =
     make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
   in
   let context =
-    ctx ~alloy_state:Setup.Alloy_present
-      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+    ctx
+      ~alloy_state:(Setup.Alloy_running { spec_hash = None })
+      ~orchestrator:(unchanged_orchestrator ())
       ~docker_probe:docker_present ()
   in
   let actions = plan config context in
@@ -1972,15 +2092,20 @@ let test_plan_alloy_removed () =
    default one does. *)
 let test_plan_alloy_declared_image_converges_like_the_default () =
   let alloy_with_custom_image =
-    { minimal_alloy with Config_file.image = Some "grafana/alloy:v2.0.0" }
+    {
+      minimal_alloy with
+      Config_file.image =
+        Some (Test_helpers.image_reference "grafana/alloy:v2.0.0");
+    }
   in
   let config =
     make_config ~alloy:(Some alloy_with_custom_image) ~user_service:None
       ~cron_jobs:None ~version:"1.0.0" ()
   in
   let context =
-    ctx ~alloy_state:Setup.Alloy_present
-      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+    ctx
+      ~alloy_state:(Setup.Alloy_running { spec_hash = None })
+      ~orchestrator:(unchanged_orchestrator ())
       ~docker_probe:docker_present ()
   in
   let actions = plan config context in
@@ -1989,6 +2114,9 @@ let test_plan_alloy_declared_image_converges_like_the_default () =
       [
         "EnsureDocker";
         "EnsureNetwork " ^ Bondi_common.Defaults.network_name;
+        "PullOrchestrator";
+        "CheckOrchestratorImage";
+        "PullAlloy";
         "EnsureJournalStorage";
         "EnsureAlloyState";
         "StopAlloy";
@@ -2015,7 +2143,7 @@ let test_plan_alloy_stopped_is_removed_before_running () =
     ctx
       ~alloy_state:
         (alloy_ps ~state:"exited" ~image:Bondi_common.Defaults.alloy_image)
-      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+      ~orchestrator:(unchanged_orchestrator ())
       ~docker_probe:docker_present ()
   in
   check_actions
@@ -2023,6 +2151,9 @@ let test_plan_alloy_stopped_is_removed_before_running () =
       [
         "EnsureDocker";
         ensure_network_action;
+        "PullOrchestrator";
+        "CheckOrchestratorImage";
+        "PullAlloy";
         "EnsureJournalStorage";
         "EnsureAlloyState";
         "StopAlloy";
@@ -2043,8 +2174,8 @@ let test_plan_alloy_absent_runs_without_removing () =
   in
   let context =
     ctx
-      ~alloy_state:(Setup.alloy_state_of_ps_output "\n")
-      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+      ~alloy_state:(Setup.alloy_state_of_probe (Ok "\n"))
+      ~orchestrator:(unchanged_orchestrator ())
       ~docker_probe:docker_present ()
   in
   check_actions
@@ -2052,6 +2183,9 @@ let test_plan_alloy_absent_runs_without_removing () =
       [
         "EnsureDocker";
         ensure_network_action;
+        "PullOrchestrator";
+        "CheckOrchestratorImage";
+        "PullAlloy";
         "EnsureJournalStorage";
         "EnsureAlloyState";
         "EnsureAlloyConfig";
@@ -2071,12 +2205,19 @@ let test_plan_alloy_withdrawn_stopped_is_removed () =
     ctx
       ~alloy_state:
         (alloy_ps ~state:"exited" ~image:Bondi_common.Defaults.alloy_image)
-      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+      ~orchestrator:(unchanged_orchestrator ())
       ~docker_probe:docker_present ()
   in
   check_actions
     ~expected:
-      [ "EnsureDocker"; ensure_network_action; "StopAlloy"; "RemoveAlloy" ]
+      [
+        "EnsureDocker";
+        ensure_network_action;
+        "PullOrchestrator";
+        "CheckOrchestratorImage";
+        "StopAlloy";
+        "RemoveAlloy";
+      ]
     (plan config context)
 
 (* The two branches that run alloy, as one fixture per host state so that a
@@ -2089,7 +2230,7 @@ let alloy_run_branch_actions ~alloy_state =
   in
   let context =
     ctx ~alloy_state
-      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+      ~orchestrator:(unchanged_orchestrator ())
       ~docker_probe:docker_present ()
   in
   plan config context
@@ -2128,7 +2269,7 @@ let test_alloy_env_is_planned_before_the_run () =
     [
       ( "a stopped container",
         alloy_ps ~state:"exited" ~image:Bondi_common.Defaults.alloy_image );
-      ("no container", Setup.alloy_state_of_ps_output "\n");
+      ("no container", Setup.alloy_state_of_probe (Ok "\n"));
     ]
 
 (* Withdrawing alloy from the configuration takes the credentials off the host
@@ -2145,7 +2286,7 @@ let test_withdrawn_alloy_still_removes_the_config_directory () =
     ctx
       ~alloy_state:
         (alloy_ps ~state:"exited" ~image:Bondi_common.Defaults.alloy_image)
-      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+      ~orchestrator:(unchanged_orchestrator ())
       ~docker_probe:docker_present ()
   in
   let actions = plan config context in
@@ -2174,12 +2315,19 @@ let test_withdrawn_alloy_removes_the_directory_with_no_container_observed () =
   in
   let context =
     ctx
-      ~alloy_state:(Setup.alloy_state_of_ps_output "\n")
-      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+      ~alloy_state:(Setup.alloy_state_of_probe (Ok "\n"))
+      ~orchestrator:(unchanged_orchestrator ())
       ~docker_probe:docker_present ()
   in
   check_actions
-    ~expected:[ "EnsureDocker"; ensure_network_action; "CleanAlloyConfig" ]
+    ~expected:
+      [
+        "EnsureDocker";
+        ensure_network_action;
+        "PullOrchestrator";
+        "CheckOrchestratorImage";
+        "CleanAlloyConfig";
+      ]
     (plan config context)
 
 (* A listing that never ran is not a host that has no alloy container: the probe
@@ -2197,11 +2345,17 @@ let test_withdrawn_alloy_plans_nothing_against_a_listing_that_never_ran () =
   let context =
     ctx
       ~alloy_state:(Setup.alloy_state_of_probe alloy_unreachable)
-      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+      ~orchestrator:(unchanged_orchestrator ())
       ~docker_probe:docker_present ()
   in
   check_actions
-    ~expected:[ "EnsureDocker"; ensure_network_action ]
+    ~expected:
+      [
+        "EnsureDocker";
+        ensure_network_action;
+        "PullOrchestrator";
+        "CheckOrchestratorImage";
+      ]
     (plan config context)
 
 (* ------------------------------------------------------------------------- *)
@@ -2279,6 +2433,7 @@ let test_plan_for_config_allows_undetermined_alloy_without_declaration () =
           [
             "EnsureDocker";
             ensure_network_action;
+            "PullOrchestrator";
             "StopOrchestrator";
             "RemoveOrchestrator";
             "RunServer";
@@ -2301,9 +2456,11 @@ let test_plan_for_config_proceeds_when_probes_succeed () =
           [
             "EnsureDocker";
             ensure_network_action;
+            "PullOrchestrator";
             "StopOrchestrator";
             "RemoveOrchestrator";
             "RunServer";
+            "PullAlloy";
             "EnsureJournalStorage";
             "EnsureAlloyState";
             "StopAlloy";
@@ -2313,6 +2470,696 @@ let test_plan_for_config_proceeds_when_probes_succeed () =
             "RunAlloy";
           ]
         actions
+
+(* ------------------------------------------------------------------------- *)
+(* Pull before stop                                                          *)
+(* ------------------------------------------------------------------------- *)
+
+(* The alloy phase, in the order the plan emits it, filtered by the production
+   mapping for the reason [orchestrator_phase] is. *)
+let alloy_phase actions =
+  actions
+  |> List.filter (fun action ->
+      Setup.phase_of_action action = Setup_phases.Alloy)
+  |> List.map action_string
+
+(* A registry that is down, or a version that was never published, used to be
+   found out by the [docker run] that came after the old container was already
+   stopped and removed, leaving the box with no orchestrator and every cron line
+   failing until a later setup succeeded. So the pull opens the phase on every
+   path that replaces the container: nothing in the phase -- not the stop, not
+   the removal, not the copy of the cron payloads out of the old container --
+   comes ahead of it. Each case is one listing state the plan tears down, and
+   each asserts the teardown is there, so a case that stopped reaching it could
+   not pass by having nothing to order. *)
+let test_orchestrator_pull_precedes_stop_and_remove () =
+  let cases =
+    [
+      ( "an exited container",
+        Setup.Orchestrator_not_running,
+        None,
+        Crontab_listing.No_section );
+      ( "an exited container holding cron payloads",
+        Setup.Orchestrator_not_running,
+        None,
+        section_with_one_named_job );
+      ( "a running container at another version",
+        Setup.Orchestrator_running { version = Some "0.9.0"; spec_hash = None },
+        None,
+        Crontab_listing.No_section );
+      ( "a running container at another version holding cron payloads",
+        Setup.Orchestrator_running { version = Some "0.9.0"; spec_hash = None },
+        None,
+        section_with_one_named_job );
+      ( "a running container at the declared version without a digest",
+        Setup.Orchestrator_running { version = Some "1.0.0"; spec_hash = None },
+        Some [ backup_cron_job ],
+        Crontab_listing.No_section );
+    ]
+  in
+  List.iter
+    (fun (label, orchestrator, cron_jobs, crontab) ->
+      let config =
+        make_config ~user_service:None ~cron_jobs ~version:"1.0.0" ()
+      in
+      let context =
+        ctx ~orchestrator ~crontab ~docker_probe:docker_present ()
+      in
+      let phase = orchestrator_phase (plan config context) in
+      check bool
+        (label ^ ": the container is torn down")
+        true
+        (List.mem "StopOrchestrator" phase
+        || List.mem "RemoveOrchestrator" phase);
+      check (option string)
+        (label ^ ": the pull opens the phase")
+        (Some "PullOrchestrator") (List.nth_opt phase 0))
+    cases;
+  (* No container to tear down, and still a pull ahead of the run: an image
+     that cannot be fetched fails here, before anything else in the phase. *)
+  check (list string) "an absent container"
+    [ "PullOrchestrator"; "RunServer" ]
+    (orchestrator_phase
+       (plan
+          (make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ())
+          (ctx ~orchestrator:Setup.Orchestrator_absent
+             ~docker_probe:docker_present ())))
+
+(* The same rule for alloy, on every listing state a declared alloy replaces or
+   creates from. A withdrawn alloy is torn down with nothing to replace it, so
+   there is no image to fetch first, and pulling one would fail a withdrawal
+   over an image nothing is going to run. *)
+let test_alloy_pull_precedes_stop_and_remove () =
+  let declared =
+    make_config ~alloy:(Some minimal_alloy) ~user_service:None ~cron_jobs:None
+      ~version:"1.0.0" ()
+  in
+  let alloy_phase_for alloy_state config =
+    alloy_phase
+      (plan config
+         (ctx ~alloy_state
+            ~orchestrator:(unchanged_orchestrator ())
+            ~docker_probe:docker_present ()))
+  in
+  List.iter
+    (fun state ->
+      let phase =
+        alloy_phase_for
+          (alloy_ps ~state ~image:Bondi_common.Defaults.alloy_image)
+          declared
+      in
+      check bool
+        (state ^ ": the container is torn down")
+        true
+        (List.mem "StopAlloy" phase && List.mem "RemoveAlloy" phase);
+      check (option string)
+        (state ^ ": the pull opens the phase")
+        (Some "PullAlloy") (List.nth_opt phase 0))
+    [ "running"; "exited"; "created"; "paused" ];
+  let absent =
+    alloy_phase_for (Setup.alloy_state_of_probe (Ok "\n")) declared
+  in
+  check (option string) "an absent container: the pull opens the phase"
+    (Some "PullAlloy") (List.nth_opt absent 0);
+  check bool "an absent container is run" true (List.mem "RunAlloy" absent);
+  check (list string) "a withdrawn alloy pulls nothing"
+    [ "StopAlloy"; "RemoveAlloy" ]
+    (alloy_phase_for
+       (alloy_ps ~state:"running" ~image:Bondi_common.Defaults.alloy_image)
+       (make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()))
+
+(* ------------------------------------------------------------------------- *)
+(* An unchanged box                                                          *)
+(* ------------------------------------------------------------------------- *)
+
+(* A host running cron jobs, which used to recreate the orchestrator on every
+   setup: a job declared, and a Bondi section in the crontab holding it. *)
+let cron_host_config () =
+  make_config ~user_service:None ~cron_jobs:(Some [ backup_cron_job ])
+    ~version:"1.0.0" ()
+
+let cron_host_plan ~orchestrator =
+  plan (cron_host_config ())
+    (ctx ~orchestrator ~crontab:section_with_one_named_job
+       ~docker_probe:docker_present ())
+
+let orchestrator_check actions =
+  List.filter_map
+    (function
+      | Setup.CheckOrchestratorImage check -> Some check
+      | Setup.EnsureDocker
+      | Setup.EnsureAcmeFile
+      | Setup.EnsureNetwork _
+      | Setup.RequireCronDocker
+      | Setup.RequireCronCurl
+      | Setup.PreserveCronPayloads _
+      | Setup.PullOrchestrator
+      | Setup.StopOrchestrator
+      | Setup.RemoveOrchestrator
+      | Setup.RunServer
+      | Setup.EnsureJournalStorage
+      | Setup.EnsureAlloyState
+      | Setup.PullAlloy
+      | Setup.CheckAlloyImage _
+      | Setup.CorrectAlloyConfigMode
+      | Setup.EnsureAlloyConfig
+      | Setup.WriteAlloyEnv
+      | Setup.RunAlloy
+      | Setup.StopAlloy
+      | Setup.RemoveAlloy
+      | Setup.CleanAlloyConfig
+      | Setup.WriteManagedEnv _
+      | Setup.RunManaged _
+      | Setup.StopManaged _
+      | Setup.RemoveManaged _
+      | Setup.CleanManagedConfig _ ->
+          None)
+    actions
+
+let alloy_check actions =
+  List.filter_map
+    (function
+      | Setup.CheckAlloyImage check -> Some check
+      | Setup.EnsureDocker
+      | Setup.EnsureAcmeFile
+      | Setup.EnsureNetwork _
+      | Setup.RequireCronDocker
+      | Setup.RequireCronCurl
+      | Setup.PreserveCronPayloads _
+      | Setup.PullOrchestrator
+      | Setup.CheckOrchestratorImage _
+      | Setup.StopOrchestrator
+      | Setup.RemoveOrchestrator
+      | Setup.RunServer
+      | Setup.EnsureJournalStorage
+      | Setup.EnsureAlloyState
+      | Setup.PullAlloy
+      | Setup.CorrectAlloyConfigMode
+      | Setup.EnsureAlloyConfig
+      | Setup.WriteAlloyEnv
+      | Setup.RunAlloy
+      | Setup.StopAlloy
+      | Setup.RemoveAlloy
+      | Setup.CleanAlloyConfig
+      | Setup.WriteManagedEnv _
+      | Setup.RunManaged _
+      | Setup.StopManaged _
+      | Setup.RemoveManaged _
+      | Setup.CleanManagedConfig _ ->
+          None)
+    actions
+
+let check_absent ~label ~absent actions =
+  let planned = List.map action_string actions in
+  List.iter
+    (fun name ->
+      check bool
+        (label ^ ": " ^ name ^ " is not planned")
+        false (List.mem name planned))
+    absent
+
+let orchestrator_teardown =
+  [
+    "PreserveCronPayloads nightly-report";
+    "StopOrchestrator";
+    "RemoveOrchestrator";
+    "RunServer";
+  ]
+
+(* A second setup on a cron host where nothing changed. Recreating the
+   orchestrator there killed whatever job was running at that moment, so neither
+   the teardown nor the copy of the payloads ahead of it is planned. The
+   affirmative arm is the same host whose container carries no digest: the
+   fixture reaches the teardown, so its absence above is the digest's doing. *)
+let test_unchanged_cron_host_plans_no_orchestrator_replacement () =
+  check_absent ~label:"an unchanged cron host" ~absent:orchestrator_teardown
+    (cron_host_plan
+       ~orchestrator:
+         (orchestrator_created_by_setup ~cron_payload_needed:true
+            ~version:"1.0.0" ()));
+  check (list string) "the same host without a digest is torn down"
+    ("PullOrchestrator" :: orchestrator_teardown)
+    (orchestrator_phase
+       (cron_host_plan
+          ~orchestrator:
+            (orchestrator_created_by_setup ~label:false
+               ~cron_payload_needed:true ~version:"1.0.0" ())))
+
+(* Unchanged in configuration is not yet unchanged: the pull may have moved the
+   tag to another image, which only a reading taken after it can show. So the
+   phase is the pull, then the check, on a host without cron jobs and on one
+   with them, and a kept orchestrator runs nothing more. *)
+let test_unchanged_orchestrator_plans_pull_then_image_check () =
+  let without_cron =
+    plan
+      (make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ())
+      (ctx
+         ~orchestrator:
+           (orchestrator_created_by_setup ~cron_payload_needed:false
+              ~version:"1.0.0" ())
+         ~docker_probe:docker_present ())
+  in
+  let with_cron =
+    cron_host_plan
+      ~orchestrator:
+        (orchestrator_created_by_setup ~cron_payload_needed:true
+           ~version:"1.0.0" ())
+  in
+  List.iter
+    (fun (label, actions) ->
+      check (list string)
+        (label ^ ": the pull, then the check")
+        [ "PullOrchestrator"; "CheckOrchestratorImage" ]
+        (orchestrator_phase actions);
+      check
+        (list (list string))
+        (label ^ ": a kept container runs nothing more")
+        [ [] ]
+        (List.map
+           (fun (check : Setup.image_check) ->
+             List.map action_string check.kept)
+           (orchestrator_check actions)))
+    [ ("no cron jobs", without_cron); ("a cron host", with_cron) ]
+
+(* A container created before setup stamped any digest cannot be shown to
+   match, so it is replaced once -- the orchestrator and alloy alike. *)
+let test_missing_spec_label_plans_replacement () =
+  check (list string) "an orchestrator without the label"
+    ("PullOrchestrator" :: orchestrator_teardown)
+    (orchestrator_phase
+       (cron_host_plan
+          ~orchestrator:
+            (Setup.orchestrator_state_of_probe
+               (Ok "running\tmlopez1506/bondi-server:1.0.0\t\n"))));
+  check (list string) "an alloy without the label"
+    [
+      "PullAlloy";
+      "EnsureJournalStorage";
+      "EnsureAlloyState";
+      "StopAlloy";
+      "RemoveAlloy";
+      "EnsureAlloyConfig";
+      "WriteAlloyEnv";
+      "RunAlloy";
+    ]
+    (alloy_phase
+       (plan
+          (make_config ~alloy:(Some minimal_alloy) ~user_service:None
+             ~cron_jobs:None ~version:"1.0.0" ())
+          (ctx
+             ~alloy_state:
+               (alloy_ps ~state:"running" ~image:"grafana/alloy:v1.8.0")
+             ~orchestrator:Setup.Orchestrator_absent
+             ~docker_probe:docker_present ())))
+
+(* The version is in the command the digest covers, so a bump reads as a
+   change without a comparison of its own, and the replacement opens with the
+   pull of the new version. *)
+let test_version_bump_plans_replacement_after_pull () =
+  check (list string) "a container created at 0.9.0, 1.0.0 declared"
+    ("PullOrchestrator" :: orchestrator_teardown)
+    (orchestrator_phase
+       (cron_host_plan
+          ~orchestrator:
+            (orchestrator_created_by_setup ~cron_payload_needed:true
+               ~version:"0.9.0" ())))
+
+(* An alloy declaration built afresh on every call, so the running side and the
+   desired side of a comparison are never one shared value. *)
+let alloy_declaration ?(labels = None) ?(api_key = "glc_secret") () =
+  {
+    Config_file.image = None;
+    Config_file.grafana_cloud =
+      {
+        Config_file.instance_id = "123456";
+        Config_file.api_key;
+        Config_file.endpoint = "https://logs-prod.grafana.net/loki/api/v1/push";
+      };
+    Config_file.collect = None;
+    Config_file.labels;
+  }
+
+let alloy_config alloy =
+  make_config ~alloy:(Some alloy) ~user_service:None ~cron_jobs:None
+    ~version:"1.0.0" ()
+
+(* The listing of a running alloy a setup created from [alloy], carrying the
+   digest of its command, River configuration and credentials file. *)
+let alloy_created_by_setup alloy =
+  Setup.alloy_state_of_probe
+    (Ok
+       (Printf.sprintf "running\tgrafana/alloy:v1.8.0\t%s\n"
+          (Setup.alloy_spec_hash ~image:(Setup.alloy_image alloy)
+             ~river:(Setup.alloy_river_config (alloy_config alloy) alloy))))
+
+let alloy_plan ~running ~declared =
+  plan (alloy_config declared)
+    (ctx
+       ~alloy_state:(alloy_created_by_setup running)
+       ~orchestrator:Setup.Orchestrator_absent ~docker_probe:docker_present ())
+
+let alloy_teardown =
+  [
+    "StopAlloy"; "RemoveAlloy"; "EnsureAlloyConfig"; "WriteAlloyEnv"; "RunAlloy";
+  ]
+
+let alloy_preparation =
+  [ "PullAlloy"; "EnsureJournalStorage"; "EnsureAlloyState" ]
+
+(* An alloy whose command, River configuration and credentials all match is
+   left running: nothing in its config directory is rewritten and it is neither
+   stopped nor run again. The journal and state directory are still ensured, and
+   the check that follows the pull keeps it with its config file's mode
+   corrected in place. *)
+let test_unchanged_alloy_plans_no_rewrite_or_restart () =
+  let actions =
+    alloy_plan
+      ~running:(alloy_declaration ~labels:(Some [ ("env", "prod") ]) ())
+      ~declared:(alloy_declaration ~labels:(Some [ ("env", "prod") ]) ())
+  in
+  check_absent ~label:"an unchanged alloy" ~absent:alloy_teardown actions;
+  check (list string) "the preparation, then the check"
+    (alloy_preparation @ [ "CheckAlloyImage" ])
+    (alloy_phase actions);
+  check
+    (list (list string))
+    "a kept alloy has its config mode corrected"
+    [ [ "CorrectAlloyConfigMode" ] ]
+    (List.map
+       (fun (check : Setup.image_check) -> List.map action_string check.kept)
+       (alloy_check actions))
+
+(* A River configuration other than the one the running alloy was created
+   against is a change only the digest's files show: it is on no command line. *)
+let test_changed_river_config_plans_alloy_replacement () =
+  check (list string) "labels changed from prod to staging"
+    (alloy_preparation @ alloy_teardown)
+    (alloy_phase
+       (alloy_plan
+          ~running:(alloy_declaration ~labels:(Some [ ("env", "prod") ]) ())
+          ~declared:(alloy_declaration ~labels:(Some [ ("env", "staging") ]) ())))
+
+(* The same for the credentials file, which holds the key the River
+   configuration only names: a rotated key changes nothing else Alloy reads. *)
+let test_changed_alloy_env_plans_alloy_replacement () =
+  check (list string) "a rotated api key"
+    (alloy_preparation @ alloy_teardown)
+    (alloy_phase
+       (alloy_plan
+          ~running:(alloy_declaration ~api_key:"glc_old" ())
+          ~declared:(alloy_declaration ~api_key:"glc_new" ())))
+
+(* The payloads are copied out of a container only ahead of tearing it down.
+   On a kept one the copy is in the replacement the check carries and nowhere
+   else; on a container whose configuration differs it is planned directly,
+   ahead of the stop. *)
+let test_preserve_only_in_replacement () =
+  let unchanged =
+    cron_host_plan
+      ~orchestrator:
+        (orchestrator_created_by_setup ~cron_payload_needed:true
+           ~version:"1.0.0" ())
+  in
+  check_absent ~label:"an unchanged cron host"
+    ~absent:[ "PreserveCronPayloads nightly-report" ]
+    unchanged;
+  check
+    (list (list string))
+    "the copy rides in the check's replacement" [ orchestrator_teardown ]
+    (List.map
+       (fun (check : Setup.image_check) ->
+         List.map action_string check.replacement)
+       (orchestrator_check unchanged));
+  check bool "a changed container plans the copy directly" true
+    (List.mem "PreserveCronPayloads nightly-report"
+       (List.map action_string
+          (cron_host_plan
+             ~orchestrator:
+               (orchestrator_created_by_setup ~cron_payload_needed:true
+                  ~version:"0.9.0" ()))))
+
+let reference_or_fail = function
+  | Ok reference -> reference
+  | Error message -> fail message
+
+(* What a plan comes to once its image checks have read [verdict]: each check
+   replaced by the list its verdict names, which is what the interpreter runs
+   after it. A check whose reading fails stops the run, so it ends the list. *)
+let as_run ~verdict actions =
+  let follow ~container ~running ~reference check =
+    match
+      Setup.after_image_check ~server:"1.2.3.4" ~container ~running ~reference
+        check verdict
+    with
+    | Ok (_line, next) -> next
+    | Error message -> fail message
+  in
+  List.concat_map
+    (fun action ->
+      match action with
+      | Setup.CheckOrchestratorImage check ->
+          follow ~container:"bondi-orchestrator" ~running:"1.0.0"
+            ~reference:
+              (reference_or_fail
+                 (Bondi_client.Builtin_image.orchestrator ~version:"1.0.0"))
+            check
+      | Setup.CheckAlloyImage check ->
+          follow ~container:"bondi-alloy" ~running:"grafana/alloy:v1.8.0"
+            ~reference:(Bondi_client.Builtin_image.alloy ~declared:None)
+            check
+      | Setup.EnsureDocker
+      | Setup.EnsureAcmeFile
+      | Setup.EnsureNetwork _
+      | Setup.RequireCronDocker
+      | Setup.RequireCronCurl
+      | Setup.PreserveCronPayloads _
+      | Setup.PullOrchestrator
+      | Setup.StopOrchestrator
+      | Setup.RemoveOrchestrator
+      | Setup.RunServer
+      | Setup.EnsureJournalStorage
+      | Setup.EnsureAlloyState
+      | Setup.PullAlloy
+      | Setup.CorrectAlloyConfigMode
+      | Setup.EnsureAlloyConfig
+      | Setup.WriteAlloyEnv
+      | Setup.RunAlloy
+      | Setup.StopAlloy
+      | Setup.RemoveAlloy
+      | Setup.CleanAlloyConfig
+      | Setup.WriteManagedEnv _
+      | Setup.RunManaged _
+      | Setup.StopManaged _
+      | Setup.RemoveManaged _
+      | Setup.CleanManagedConfig _ ->
+          [ action ])
+    actions
+
+(* A new image behind the same tag is a change. Composed end to end: a box
+   whose configuration matches, read [Moved] after the pull, runs exactly what
+   the plan issues for a box whose configuration differs -- the orchestrator on
+   a cron host and alloy together, so the payload copy is in it. Read [Same],
+   the same box runs neither teardown. *)
+let test_moved_image_runs_planned_replacement () =
+  let box ~stamped =
+    let alloy = alloy_declaration () in
+    let config =
+      make_config ~alloy:(Some alloy) ~user_service:None
+        ~cron_jobs:(Some [ backup_cron_job ]) ~version:"1.0.0" ()
+    in
+    plan config
+      (ctx ~crontab:section_with_one_named_job
+         ~orchestrator:
+           (orchestrator_created_by_setup ~label:stamped
+              ~cron_payload_needed:true ~version:"1.0.0" ())
+         ~alloy_state:
+           (if stamped then alloy_created_by_setup (alloy_declaration ())
+            else alloy_ps ~state:"running" ~image:"grafana/alloy:v1.8.0")
+         ~docker_probe:docker_present ())
+  in
+  check (list string) "moved runs the replacement the plan builds"
+    (List.map action_string (box ~stamped:false))
+    (List.map action_string
+       (as_run ~verdict:Bondi_client.Image_identity.Moved (box ~stamped:true)));
+  check_absent ~label:"same"
+    ~absent:(orchestrator_teardown @ alloy_teardown)
+    (as_run ~verdict:Bondi_client.Image_identity.Same (box ~stamped:true))
+
+(* An identity that could not be read runs neither list: the check fails the
+   run, quoting what the host said, and nothing after it -- the stop included --
+   is reached. *)
+let test_unreadable_identity_refuses_without_touching () =
+  let host_words = "Error: No such image: mlopez1506/bondi-server:1.0.0" in
+  let check_planned =
+    match
+      orchestrator_check
+        (cron_host_plan
+           ~orchestrator:
+             (orchestrator_created_by_setup ~cron_payload_needed:true
+                ~version:"1.0.0" ()))
+    with
+    | [ planned ] -> planned
+    | []
+    | _ :: _ :: _ ->
+        fail "expected one orchestrator image check"
+  in
+  match
+    Setup.after_image_check ~server:"1.2.3.4" ~container:"bondi-orchestrator"
+      ~running:"1.0.0"
+      ~reference:
+        (reference_or_fail
+           (Bondi_client.Builtin_image.orchestrator ~version:"1.0.0"))
+      check_planned
+      (Bondi_client.Image_identity.Unreadable
+         (Bondi_client.Host_answer.of_host_output host_words))
+  with
+  | Ok (_line, next) ->
+      fail
+        ("an unreadable identity ran: "
+        ^ String.concat ", " (List.map action_string next))
+  | Error message ->
+      check bool "the refusal quotes the host" true
+        (contains ~needle:host_words message);
+      check bool "the refusal names the container" true
+        (contains ~needle:"bondi-orchestrator" message)
+
+(* A kept alloy's files are left as they are, so a mode the host reports other
+   than the declared one is corrected in place with a chmod, one per file, and
+   nothing else is: a matching mode and a reading the host refused leave a file
+   alone. *)
+let test_kept_alloy_file_modes_are_changed_in_place () =
+  let course ~config ~env =
+    Setup.alloy_kept_files_course
+      ~config:
+        (Setup.alloy_config_pre_write_mode_of_probe ~expected:"0640" config)
+      ~env:(Setup.alloy_config_pre_write_mode_of_probe ~expected:"0600" env)
+  in
+  let chmods = function
+    | Setup.Alloy_files_chmod commands -> commands
+    | Setup.Alloy_files_replace -> fail "a file that is there was replaced"
+  in
+  check
+    (list (pair string string))
+    "a config at 0644 is changed"
+    [ ("/etc/bondi/alloy/config.alloy", "0640") ]
+    (chmods (course ~config:"0644\n" ~env:"0600\n"));
+  check
+    (list (pair string string))
+    "an env file at 0644 is changed"
+    [ ("/etc/bondi/alloy/env", "0600") ]
+    (chmods (course ~config:"0640\n" ~env:"0644\n"));
+  check
+    (list (pair string string))
+    "both are changed, config first"
+    [
+      ("/etc/bondi/alloy/config.alloy", "0640"); ("/etc/bondi/alloy/env", "0600");
+    ]
+    (chmods (course ~config:"0644\n" ~env:"0644\n"));
+  check
+    (list (pair string string))
+    "files at the declared modes are left" []
+    (chmods (course ~config:"0640\n" ~env:"0600\n"));
+  check
+    (list (pair string string))
+    "refused stats are left" []
+    (chmods
+       (course
+          ~config:(Setup.alloy_config_mode_unreadable_marker ^ "\n")
+          ~env:(Setup.alloy_config_mode_unreadable_marker ^ "\n")))
+
+(* A missing file under a kept alloy is a replacement, whichever of the two it
+   is: both are bind-mount sources, and a container kept over a missing one
+   fails at the daemon's next restart while the run says it succeeded. *)
+let test_kept_alloy_with_a_missing_file_is_replaced () =
+  let absent = Setup.alloy_config_mode_absent_marker ^ "\n" in
+  let course ~config ~env =
+    Setup.alloy_kept_files_course
+      ~config:
+        (Setup.alloy_config_pre_write_mode_of_probe ~expected:"0640" config)
+      ~env:(Setup.alloy_config_pre_write_mode_of_probe ~expected:"0600" env)
+  in
+  let is_replace = function
+    | Setup.Alloy_files_replace -> true
+    | Setup.Alloy_files_chmod _ -> false
+  in
+  check bool "config absent" true
+    (is_replace (course ~config:absent ~env:"0600\n"));
+  check bool "env absent" true
+    (is_replace (course ~config:"0640\n" ~env:absent));
+  check bool "both absent" true (is_replace (course ~config:absent ~env:absent));
+  check bool "a missing file wins over a mode to correct" true
+    (is_replace (course ~config:"0644\n" ~env:absent));
+  check bool "neither absent is not a replacement" false
+    (is_replace (course ~config:"0640\n" ~env:"0600\n"))
+
+(* The orchestrator's reference is composed from the declared version, which
+   the release floor reads only up to its minor number. A version that clears
+   the floor and still is not a tag is refused the same way, before anything
+   is stopped. *)
+let test_unparseable_orchestrator_version_refused_before_any_action () =
+  let plan_for_version version =
+    Setup.plan_for_config
+      (make_config ~user_service:None ~cron_jobs:None ~version ())
+      (ctx
+         ~orchestrator:
+           (Setup.Orchestrator_running
+              { version = Some "0.9.0"; spec_hash = None })
+         ~docker_probe:docker_present ())
+  in
+  (match plan_for_version "1.0.0 rc" with
+  | Ok actions ->
+      fail
+        ("expected a version that is not a tag to be refused, planned: "
+        ^ String.concat ", " (List.map action_string actions))
+  | Error message ->
+      check bool "names the field" true
+        (Bondi_common.String_utils.contains ~needle:"bondi_server.version"
+           message));
+  match plan_for_version "1.0.0" with
+  | Error message -> fail message
+  | Ok actions ->
+      check bool "a version that is a tag is pulled" true
+        (List.mem Setup.PullOrchestrator actions)
+
+(* The image the pull fetches is the one the run starts. Composed twice, the two
+   could drift apart, and the run would then fetch its own image again inside
+   [docker run] -- after the old container was already gone. *)
+let test_the_pulled_image_is_the_image_that_runs () =
+  (match Bondi_client.Builtin_image.orchestrator ~version:"1.0.0" with
+  | Error message -> fail message
+  | Ok reference ->
+      let run =
+        Setup.orchestrator_run_command ~cron_payload_needed:false
+          (make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ())
+      in
+      check bool "the orchestrator run ends with the pulled image" true
+        (String.ends_with
+           ~suffix:(" " ^ Bondi_common.Image_reference.to_string reference)
+           run));
+  let check_alloy_run ~label declared =
+    let reference = Bondi_client.Builtin_image.alloy ~declared in
+    let alloy = { minimal_alloy with Config_file.image = declared } in
+    let run =
+      Setup.alloy_run_command ~image:(Setup.alloy_image alloy)
+        ~river:
+          (Setup.alloy_river_config
+             (make_config ~alloy:(Some alloy) ~user_service:None ~cron_jobs:None
+                ~version:"1.0.0" ())
+             alloy)
+    in
+    check bool label true
+      (Bondi_common.String_utils.contains
+         ~needle:
+           (" "
+           ^ Filename.quote (Bondi_common.Image_reference.to_string reference)
+           ^ " run ")
+         run)
+  in
+  check_alloy_run ~label:"the alloy run names the pulled declared image"
+    (Some
+       (Test_helpers.image_reference
+          "registry.example.com:5000/grafana/alloy:v2.0.0"));
+  check_alloy_run ~label:"the alloy run names the pulled default image" None
 
 let test_excluded_containers_no_service () =
   let config =
@@ -2402,8 +3249,9 @@ let test_plan_alloy_already_running () =
       ~version:"1.0.0" ()
   in
   let context =
-    ctx ~alloy_state:Setup.Alloy_present
-      ~orchestrator:(Setup.Orchestrator_running { version = "1.0.0" })
+    ctx
+      ~alloy_state:(Setup.Alloy_running { spec_hash = None })
+      ~orchestrator:(unchanged_orchestrator ())
       ~docker_probe:docker_present ()
   in
   let actions = plan config context in
@@ -2665,6 +3513,101 @@ let test_a_declared_bind_address_reaches_setups_output () =
   check (list string) "a configuration declaring neither says nothing" []
     (Setup.deprecation_notices (Client_fixtures.mk_config ()))
 
+(* The flag is spelled out rather than built from [Builtin_spec.label], so the
+   label key the running boxes carry is pinned here as a literal: a renamed
+   constant reads every container on every box as unstamped. *)
+let spec_label_flag = " --label bondi.spec-hash="
+
+let spec_label_value command =
+  match Bondi_common.String_utils.index_of ~needle:spec_label_flag command with
+  | None -> fail ("the run command carries no spec-hash label: " ^ command)
+  | Some at -> (
+      let start = at + String.length spec_label_flag in
+      let rest = String.sub command start (String.length command - start) in
+      match String.index_opt rest ' ' with
+      | None -> rest
+      | Some stop -> String.sub rest 0 stop)
+
+let without ~fragment command =
+  match Bondi_common.String_utils.index_of ~needle:fragment command with
+  | None -> fail (Printf.sprintf "%S does not hold %S" command fragment)
+  | Some at ->
+      let after = at + String.length fragment in
+      String.sub command 0 at
+      ^ String.sub command after (String.length command - after)
+
+let offset ~needle command =
+  match Bondi_common.String_utils.index_of ~needle command with
+  | None -> fail (Printf.sprintf "%S does not hold %S" command needle)
+  | Some at -> at
+
+(* What the label carries is the digest of the command it is on, less the label
+   itself and less the restart policy. The expected command is the one this
+   test was handed, edited by hand, rather than one rendered a second time by
+   setup's own code: a digest taken over a rendering that left out a mount
+   would agree with that rendering and not with the command the host runs.
+
+   Both mount arms, because the payload mounts are the field a cron host has
+   and every other box lacks. The label goes before the image: Docker reads
+   whatever follows the image as the container's own command. *)
+let test_orchestrator_run_command_carries_spec_label () =
+  let config =
+    make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
+  in
+  List.iter
+    (fun needed ->
+      let command =
+        Setup.orchestrator_run_command ~cron_payload_needed:needed config
+      in
+      let stamped = spec_label_value command in
+      let issued =
+        command
+        |> without ~fragment:(spec_label_flag ^ stamped)
+        |> without ~fragment:" --restart unless-stopped"
+      in
+      check string
+        (Printf.sprintf
+           "payload mounts %b: the label is the digest of the rest of the \
+            command"
+           needed)
+        (Bondi_client.Builtin_spec.hash ~run_command:issued ~files:[])
+        stamped;
+      check bool
+        (Printf.sprintf "payload mounts %b: the label precedes the image" needed)
+        true
+        (offset ~needle:spec_label_flag command
+        < offset ~needle:" mlopez1506/bondi-server:1.0.0" command))
+    [ false; true ]
+
+(* The same rule, plus the two files Alloy reads at start. Neither is on its
+   command line, so a rewritten River configuration or a rotated credential is
+   a change only they show. The files are the ones the write arms write, from
+   the same River value. *)
+let test_alloy_run_command_carries_spec_label () =
+  let config =
+    make_config ~alloy:(Some minimal_alloy) ~user_service:None ~cron_jobs:None
+      ~version:"1.0.0" ()
+  in
+  let river = Setup.alloy_river_config config minimal_alloy in
+  let command = Setup.alloy_run_command ~image:"grafana/alloy:v1.8.0" ~river in
+  let stamped = spec_label_value command in
+  let issued =
+    command
+    |> without ~fragment:(spec_label_flag ^ stamped)
+    |> without ~fragment:" --restart unless-stopped"
+  in
+  check string "the label is the digest of the command and both files"
+    (Bondi_client.Builtin_spec.hash ~run_command:issued
+       ~files:
+         [
+           Bondi_common.Alloy_river.generate river;
+           Bondi_common.Alloy_river.env_file_contents river;
+         ])
+    stamped;
+  check bool "the label precedes the image" true
+    (offset ~needle:spec_label_flag command
+    < offset ~needle:" 'grafana/alloy:v1.8.0'" command)
+
 let () =
   run "Setup.plan"
     [
@@ -2712,14 +3655,14 @@ let () =
         ] );
       ( "server",
         [
-          test_case "skips when up-to-date and no cron" `Quick
+          test_case "skips when unchanged and no cron" `Quick
             test_plan_skip_server_when_up_to_date;
           test_case "runs on fresh install" `Quick
             test_plan_fresh_install_runs_server;
           test_case "stops and runs on version mismatch" `Quick
             test_plan_version_mismatch_stops_and_runs;
-          test_case "restarts when adding cron jobs" `Quick
-            test_plan_cron_jobs_force_restart;
+          test_case "restarts when cron jobs add the payload mounts" `Quick
+            test_plan_cron_jobs_added_replace_a_container_without_their_mounts;
           test_case "removes an exited orchestrator before running" `Quick
             test_plan_exited_orchestrator_is_removed_before_running;
           test_case "removes a running orchestrator after stopping it" `Quick
@@ -2766,6 +3709,47 @@ let () =
             test_plan_for_config_allows_undetermined_alloy_without_declaration;
           test_case "listings that answered are planned from" `Quick
             test_plan_for_config_proceeds_when_probes_succeed;
+        ] );
+      ( "pull before stop",
+        [
+          test_case "the orchestrator pull precedes its stop and removal" `Quick
+            test_orchestrator_pull_precedes_stop_and_remove;
+          test_case "the alloy pull precedes its stop and removal" `Quick
+            test_alloy_pull_precedes_stop_and_remove;
+          test_case "a version that is not a tag is refused before any action"
+            `Quick
+            test_unparseable_orchestrator_version_refused_before_any_action;
+          test_case "the pulled image is the image that runs" `Quick
+            test_the_pulled_image_is_the_image_that_runs;
+        ] );
+      ( "an unchanged box",
+        [
+          test_case "an unchanged cron host keeps its orchestrator" `Quick
+            test_unchanged_cron_host_plans_no_orchestrator_replacement;
+          test_case "an unchanged orchestrator is pulled, then checked" `Quick
+            test_unchanged_orchestrator_plans_pull_then_image_check;
+          test_case "a container without the label is replaced" `Quick
+            test_missing_spec_label_plans_replacement;
+          test_case "a version bump is replaced after the pull" `Quick
+            test_version_bump_plans_replacement_after_pull;
+          test_case "an unchanged alloy is not rewritten or restarted" `Quick
+            test_unchanged_alloy_plans_no_rewrite_or_restart;
+          test_case "a changed River config replaces alloy" `Quick
+            test_changed_river_config_plans_alloy_replacement;
+          test_case "a changed credentials file replaces alloy" `Quick
+            test_changed_alloy_env_plans_alloy_replacement;
+          test_case "the payload copy rides only in a replacement" `Quick
+            test_preserve_only_in_replacement;
+          test_case "a moved image runs the planned replacement" `Quick
+            test_moved_image_runs_planned_replacement;
+          test_case "an unreadable identity refuses and touches nothing" `Quick
+            test_unreadable_identity_refuses_without_touching;
+          test_case "a moved tag is no version and is worded so" `Quick
+            test_a_moved_tag_reads_as_no_version_and_is_worded_so;
+          test_case "a kept alloy's file modes are changed in place" `Quick
+            test_kept_alloy_file_modes_are_changed_in_place;
+          test_case "a kept alloy with a missing file is replaced" `Quick
+            test_kept_alloy_with_a_missing_file_is_replaced;
         ] );
       ("order", [ test_case "action order" `Quick test_plan_action_order ]);
       ( "deprecation notices",
@@ -2934,5 +3918,12 @@ let () =
           test_case "with labels" `Quick test_alloy_river_config_with_labels;
           test_case "excludes service with logs=false" `Quick
             test_alloy_river_config_excludes_service;
+        ] );
+      ( "spec label",
+        [
+          test_case "the orchestrator's run command carries its spec hash"
+            `Quick test_orchestrator_run_command_carries_spec_label;
+          test_case "alloy's run command carries its spec hash" `Quick
+            test_alloy_run_command_carries_spec_label;
         ] );
     ]

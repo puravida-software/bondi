@@ -46,6 +46,14 @@ only have stopped on the probe that arm broke.
   >   exit 1
   > }
   > case "$1" in
+  >   # The pull setup takes ahead of any stop or run, answered as the docker
+  >   # CLI answers one for an image already on the box: four lines on stdout,
+  >   # exit 0.
+  >   'docker pull '*)
+  >     ref=$(printf '%s\n' "$1" | sed "s/^docker pull '\(.*\)'\$/\1/")
+  >     printf '%s: Pulling from %s\n' "${ref##*:}" "${ref%:*}"
+  >     printf 'Digest: sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4\n'
+  >     printf 'Status: Image is up to date for %s\n%s\n' "$ref" "$ref" ;;
   >   *BONDI_ACME_PRESENT*)
   >     [ -n "$ACME_DROPS" ] && drop
   >     [ -n "$ACME_HALF_ANSWERS" ] && half_answered
@@ -61,10 +69,20 @@ only have stopped on the probe that arm broke.
   >     echo "$probes" > "$DOCKER_PROBES"
   >     if [ -n "$DOCKER_DROPS_SECOND" ] && [ "$probes" -ge 2 ]; then drop; fi
   >     echo 'Docker version 29.2.1, build deadbeef' ;;
+  >   # The orchestrator this file's box already runs, carrying the digest setup
+  >   # stamps on a 0.15.0 orchestrator created without the cron payload mounts:
+  >   # what this setup would create, so it is pulled and checked rather than
+  >   # replaced. Without the digest it reads as a container no setup recorded,
+  >   # which is replaced once.
   >   *'name=^/bondi-orchestrator$'*'{{.State}}'*)
   >     if [ -n "$NOISY_SUCCESS" ]; then
-  >       printf 'running\tmlopez1506/bondi-server:0.15.0\n'
+  >       printf 'running\tmlopez1506/bondi-server:0.15.0\tff6ddc811d842ca37ab2874c6189c404\n'
   >     fi ;;
+  >   # The image check that follows the pull on that orchestrator: the pulled
+  >   # image's id, then the container's, one per line in the docker CLI's full
+  >   # sha256 form, and equal because nothing moved the tag.
+  >   'docker image inspect '*)
+  >     printf 'sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4\nsha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4\n' ;;
   >   *'RestartPolicy'*) echo unless-stopped ;;
   >   *'/var/spool/cron/crontabs/root'*) echo BONDI_CRONTAB_ABSENT ;;
   >   # The payload directory the crontab section is compared against. Without
@@ -373,10 +391,11 @@ container terminates TLS for every site on the box.
   $ sed 's/not reachable: .*/not reachable: <detail>/' out.log
   Setting up the servers...
   Processing server: 127.0.0.1
-  bondi-orchestrator container is already running on server 127.0.0.1: 0.15.0, skipping...
   Docker is already installed on server 127.0.0.1: Docker version 29.2.1, build deadbeef
   Network bondi-network is present on server 127.0.0.1
   ACME file permissions updated on server 127.0.0.1: /etc/traefik/acme/acme.json
+  Pulled mlopez1506/bondi-server:0.15.0 on server 127.0.0.1
+  bondi-orchestrator container is already running on server 127.0.0.1: 0.15.0, skipping...
   No alloy is configured for server 127.0.0.1: /etc/bondi/alloy is not on the host
   setup corrected nothing on server 127.0.0.1
   

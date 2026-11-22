@@ -31,7 +31,7 @@ let minimum_for_exec_lines = "0.16.0"
 (* The repository the orchestrator is published under. Anything else is a fork,
    a mirror, or a locally built image; see the .mli for why those are answered
    whole rather than guessed at. *)
-let published_image_prefix = "mlopez1506/bondi-server:"
+let published_image_prefix = Builtin_image.orchestrator_repository ^ ":"
 
 let orchestrator_version_of_image image =
   if Bondi_common.String_utils.starts_with ~prefix:published_image_prefix image
@@ -40,6 +40,17 @@ let orchestrator_version_of_image image =
       (String.length published_image_prefix)
       (String.length image - String.length published_image_prefix)
   else image
+
+(* A listing's image column is the reference the container was created from only
+   while that reference still names the container's image; once a pull has moved
+   the tag it is the image id cut to twelve hex digits. That is a name for no
+   release, and reading it as a version would put a hex id in a sentence that
+   compares versions. A reference always carries a repository, which is where
+   its separators are, so a column with none is the id. *)
+let version_of_listed_image image =
+  if String.contains image ':' || String.contains image '/' then
+    Some (orchestrator_version_of_image image)
+  else None
 
 (* Only the first two components are read, for the reason the constants above
    give. A component that is not a number leaves the version with no ordering in

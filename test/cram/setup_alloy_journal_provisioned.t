@@ -23,6 +23,14 @@ probe on its own would pass against a run that never restarted anything.
   > printf '%s\n' "$1" >> "$SSH_ARGV_LOG"
   > cat > /dev/null
   > case "$1" in
+  >   # The pull setup takes ahead of any stop or run, answered as the docker
+  >   # CLI answers one for an image already on the box: four lines on stdout,
+  >   # exit 0.
+  >   'docker pull '*)
+  >     ref=$(printf '%s\n' "$1" | sed "s/^docker pull '\(.*\)'\$/\1/")
+  >     printf '%s: Pulling from %s\n' "${ref##*:}" "${ref%:*}"
+  >     printf 'Digest: sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4\n'
+  >     printf 'Status: Image is up to date for %s\n%s\n' "$ref" "$ref" ;;
   >   *BONDI_JOURNAL_PRESENT*) cat "$JOURNAL_FILE" ;;
   >   # The three provisioning commands. They answer nothing, as the host does
   >   # when each succeeds, and they are named rather than left to *) so that a
@@ -33,10 +41,20 @@ probe on its own would pass against a run that never restarted anything.
   >     printf '%s\n' "$JOURNAL_AFTER_RESTART" > "$JOURNAL_FILE" ;;
   >   *BONDI_ACME_PRESENT*) echo BONDI_ACME_PRESENT ;;
   >   'docker --version') echo 'Docker version 27.0.0, build deadbeef' ;;
+  >   # The orchestrator this file's box already runs, carrying the digest setup
+  >   # stamps on a 0.25.0 orchestrator created without the cron payload mounts:
+  >   # what this setup would create, so it is pulled and checked rather than
+  >   # replaced. Without the digest it reads as a container no setup recorded,
+  >   # which is replaced once.
   >   *'name=^/bondi-orchestrator$'*'{{.State}}'*)
-  >     printf 'running\tmlopez1506/bondi-server:0.25.0\n' ;;
+  >     printf 'running\tmlopez1506/bondi-server:0.25.0\t92eba0ed2e6c82a23cd21b6c85e10e71\n' ;;
+  >   # The image check that follows the pull on that orchestrator: the pulled
+  >   # image's id, then the container's, one per line in the docker CLI's full
+  >   # sha256 form, and equal because nothing moved the tag.
+  >   'docker image inspect '*)
+  >     printf 'sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4\nsha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4\n' ;;
   >   *'ps -a --filter name=^/bondi-alloy$'*'{{.State}}'*)
-  >     printf 'running\tgrafana/alloy:v1.8.0\n' ;;
+  >     printf 'running\tgrafana/alloy:v1.8.0\t\n' ;;
   >   # Both mode readings agree with the declared mode, so the journal is the
   >   # only thing on this box that diverges and the only correction the run
   >   # has to report.
@@ -86,13 +104,15 @@ journal, says so as it goes, and goes on to replace Alloy.
 
   $ printf 'BONDI_JOURNAL_ABSENT\n' > "$JOURNAL_FILE"
   $ JOURNAL_AFTER_RESTART=BONDI_JOURNAL_PRESENT bondi-client setup > out.log 2>&1
-  $ head -12 out.log
+  $ head -14 out.log
   Setting up the servers...
   Processing server: 127.0.0.1
-  bondi-orchestrator container is already running on server 127.0.0.1: 0.25.0, skipping...
   Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 127.0.0.1
   ACME file permissions updated on server 127.0.0.1: /etc/traefik/acme/acme.json
+  Pulled mlopez1506/bondi-server:0.25.0 on server 127.0.0.1
+  bondi-orchestrator container is already running on server 127.0.0.1: 0.25.0, skipping...
+  Pulled grafana/alloy:v1.8.0 on server 127.0.0.1
   Provisioned persistent journal storage on server 127.0.0.1: /var/log/journal
   Stopped bondi-alloy container on server 127.0.0.1
   Removed bondi-alloy container and config on server 127.0.0.1

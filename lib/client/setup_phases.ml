@@ -47,7 +47,11 @@ let failure_message ~server ~failed ~remaining ~reason =
         reason (name failed) server
         (String.concat ", " (List.map name phases))
 
-type site = Alloy_config_mode | Orchestrator_restart_policy | Journal_storage
+type site =
+  | Alloy_config_mode
+  | Alloy_env_mode
+  | Orchestrator_restart_policy
+  | Journal_storage
 
 (* What the run had to say about one site's reading. Two shapes rather than two
    lists: both are lines of one account, they are accumulated together in the
@@ -73,6 +77,12 @@ let config_mode_corrected ~found ~applied =
     finding = Corrected { found = Host_said found; applied };
   }
 
+let env_mode_corrected ~found ~applied =
+  {
+    site = Alloy_env_mode;
+    finding = Corrected { found = Host_said found; applied };
+  }
+
 let journal_storage_provisioned =
   {
     site = Journal_storage;
@@ -86,7 +96,9 @@ let unreadable_reading ~site ~detail = { site; finding = Unreadable { detail } }
    saying what it reports does not compile, so the account cannot gain a place
    that feeds it nothing. *)
 let reading = function
-  | Alloy_config_mode -> "mode"
+  | Alloy_config_mode
+  | Alloy_env_mode ->
+      "mode"
   | Orchestrator_restart_policy -> "restart policy"
   | Journal_storage -> "storage"
 
@@ -102,6 +114,7 @@ let reading = function
    it reads its value off does not compile. *)
 let subject = function
   | Alloy_config_mode -> Bondi_common.Defaults.alloy_config_path
+  | Alloy_env_mode -> Bondi_common.Defaults.alloy_env_path
   | Orchestrator_restart_policy -> Bondi_common.Builtin_container.orchestrator
   | Journal_storage -> Alloy_run_args.journal_path
 
