@@ -2,6 +2,7 @@ module Deploy = Bondi_server__Deploy
 module Handler_error = Bondi_server__Handler_error
 module Docker = Bondi_server__Docker__Client
 module Simple = Bondi_server__Strategy__Simple
+module Proxy = Bondi_server__Proxy
 module Crontab = Bondi_server__Crontab
 module Run = Bondi_server__Run
 module Payload_codec = Bondi_server__Payload_codec
@@ -720,6 +721,35 @@ let test_string_of_deployment_strategy () =
   Alcotest.check Alcotest.string "Blue_green to string" "blue-green"
     (Deploy.string_of_deployment_strategy Deploy.Blue_green)
 
+(* An image inspect whose [Config] carries exactly the health check given and
+   no labels. *)
+let image_with_healthcheck healthcheck : Docker.image_inspect_response =
+  { config = { healthcheck; labels = None } }
+
+let auto_strategy_of healthcheck =
+  Deploy.string_of_deployment_strategy
+    (Deploy.auto_strategy (image_with_healthcheck healthcheck))
+
+(* The two forms of [Test] that run a probe: an exec form and a shell form. *)
+let test_auto_picks_blue_green_for_cmd_healthcheck () =
+  Alcotest.check Alcotest.string "CMD" "blue-green"
+    (auto_strategy_of
+       (Some { test = [ "CMD"; "curl"; "-f"; "http://localhost:8080/health" ] }));
+  Alcotest.check Alcotest.string "CMD-SHELL" "blue-green"
+    (auto_strategy_of
+       (Some { test = [ "CMD-SHELL"; "curl -f http://localhost:8080/health" ] }))
+
+(* [HEALTHCHECK NONE] reports a [Test] of [["NONE"]]: the key is present but no
+   probe runs, so blue-green would wait for a health it never gets. An empty
+   [Test] runs no probe either. The CMD forms resolving to blue-green above are
+   this test's affirmative arm. *)
+let test_auto_picks_simple_for_none_and_absent () =
+  Alcotest.check Alcotest.string "NONE" "simple"
+    (auto_strategy_of (Some { test = [ "NONE" ] }));
+  Alcotest.check Alcotest.string "absent" "simple" (auto_strategy_of None);
+  Alcotest.check Alcotest.string "empty Test" "simple"
+    (auto_strategy_of (Some { test = [] }))
+
 let test_deploy_input_logs_flag () =
   let input = { minimal_input with logs = Some false } in
   Alcotest.check
@@ -772,7 +802,6 @@ let test_decode_input_accepts_volumes () =
       registry_pass = None;
       force_traefik_redeploy = None;
       cron_jobs = None;
-      drain_grace_period = None;
       deployment_strategy = None;
       health_timeout = None;
       poll_interval = None;
@@ -943,13 +972,29 @@ let test_decode_acme_ca_server () =
     ~field:"traefik_acme_ca_server" ~leaked:[ "ca.example.com" ]
     {|{"traefik_acme_ca_server":"http://ca.example.com/dir"}|}
 
+(* An older client still sends [drain_grace_period], as the float its encoder
+   writes. The decoder is strict, so dropping the field here would refuse
+   every deploy such a client makes; it is read and then used by nothing. The
+   port is asserted so the acceptance is of this body, read whole. *)
+let test_input_with_drain_grace_period_accepted () =
+  match
+    Deploy.decode_input
+      {|{"service_name":"web","image":"myapp:v1","port":8080,"drain_grace_period":5.0}|}
+  with
+  | Error e ->
+      Alcotest.failf "a payload carrying drain_grace_period was refused: %s"
+        (Handler_error.message e)
+  | Ok (input : Simple.deploy_input) ->
+      Alcotest.(check (option int))
+        "the rest of the payload is read" (Some 8080) input.port
+
 (* ------------------------------------------------------------------------- *)
 (* Traefik restart policy                                                    *)
 (* ------------------------------------------------------------------------- *)
 
 (* The running proxy as the container listing reports it, with the policy the
    daemon says it applied. Every arm below is this fixture; only the image tag,
-   the applied policy and the strategy differ, so an absence assertion cannot
+   the applied policy and the request differ, so an absence assertion cannot
    pass by failing to reach the proxy path at all. *)
 let traefik_policy_context ~traefik_image ~policy :
     Deploy.traefik_policy_context =
@@ -967,8 +1012,8 @@ let traefik_policy_context ~traefik_image ~policy :
 let applied_policy name : Docker.restart_policy =
   { name; maximum_retry_count = Some 0 }
 
-let policy_actions ~strategy ?(input = minimal_input) context =
-  List.map action_string (Deploy.traefik_policy_plan ~strategy input context)
+let policy_actions ?(input = minimal_input) context =
+  List.map action_string (Deploy.traefik_policy_plan input context)
 
 let converged = [ "UpdateRestartPolicy(traefik-1,unless-stopped)" ]
 
@@ -976,7 +1021,7 @@ let test_traefik_at_the_wrong_policy_plans_an_update () =
   Alcotest.check
     (Alcotest.list Alcotest.string)
     "converges the running proxy in place" converged
-    (policy_actions ~strategy:Deploy.Simple
+    (policy_actions
        (traefik_policy_context ~traefik_image:"traefik:v3.3.0"
           ~policy:(Some (applied_policy "no"))))
 
@@ -987,48 +1032,22 @@ let test_traefik_with_no_reported_policy_plans_an_update () =
   Alcotest.check
     (Alcotest.list Alcotest.string)
     "an unreported policy is not a pass" converged
-    (policy_actions ~strategy:Deploy.Simple
+    (policy_actions
        (traefik_policy_context ~traefik_image:"traefik:v3.3.0" ~policy:None))
 
 let test_traefik_at_the_declared_policy_plans_no_update () =
   Alcotest.check
     (Alcotest.list Alcotest.string)
     "leaves a compliant proxy alone" []
-    (policy_actions ~strategy:Deploy.Simple
+    (policy_actions
        (traefik_policy_context ~traefik_image:"traefik:v3.3.0"
           ~policy:(Some (applied_policy "unless-stopped"))))
-
-(* The simple strategy replaces a proxy whose tag no longer matches, and the
-   replacement is created with the policy already on it. The affirmative arm on
-   this exact fixture is the blue-green case below, which plans the update: the
-   emptiness here is caused by the replacement, not by the fixture failing to
-   reach the proxy path. *)
-let test_traefik_the_simple_strategy_will_replace_plans_no_update () =
-  Alcotest.check
-    (Alcotest.list Alcotest.string)
-    "a replaced proxy is not also updated" []
-    (policy_actions ~strategy:Deploy.Simple
-       (traefik_policy_context ~traefik_image:"traefik:v2.0"
-          ~policy:(Some (applied_policy "no"))))
-
-(* Blue-green never touches the proxy, so nothing is going to replace it and its
-   image tag decides nothing here. This is the arm that a strategy-local
-   convergence cannot have: on a box whose image declares a HEALTHCHECK the
-   proxy would stay at its wrong policy for as long as the box lives. *)
-let test_traefik_under_blue_green_is_converged_whatever_its_image () =
-  Alcotest.check
-    (Alcotest.list Alcotest.string)
-    "blue-green converges the proxy it does not redeploy" converged
-    (policy_actions ~strategy:Deploy.Blue_green
-       (traefik_policy_context ~traefik_image:"traefik:v2.0"
-          ~policy:(Some (applied_policy "no"))))
 
 let test_no_traefik_running_plans_no_update () =
   Alcotest.check
     (Alcotest.list Alcotest.string)
     "nothing to converge" []
-    (policy_actions ~strategy:Deploy.Simple
-       { Deploy.traefik = None; applied_policy = None })
+    (policy_actions { Deploy.traefik = None; applied_policy = None })
 
 (* The residue of the existing gate, pinned rather than assumed: a bondi.yaml
    that declares no reverse proxy converges none, even on a box that is running
@@ -1037,9 +1056,35 @@ let test_traefik_not_declared_plans_no_update () =
   Alcotest.check
     (Alcotest.list Alcotest.string)
     "an undeclared proxy is left alone" []
-    (policy_actions ~strategy:Deploy.Simple
+    (policy_actions
        ~input:
          { minimal_input with traefik_image = None; traefik_acme_email = None }
+       (traefik_policy_context ~traefik_image:"traefik:v3.3.0"
+          ~policy:(Some (applied_policy "no"))))
+
+(* A proxy about to be replaced is left alone, whichever strategy rolls the
+   workload forward: the proxy step creates its successor with the policy
+   already on it, under every strategy, so the plan takes none. The affirmative
+   arm is the same proxy at the requested version, which stays and so is
+   corrected in place. *)
+let test_traefik_policy_plan_strategy_independent () =
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "a proxy at another version is replaced, not updated" []
+    (policy_actions
+       (traefik_policy_context ~traefik_image:"traefik:v2.0"
+          ~policy:(Some (applied_policy "no"))));
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "a forced redeploy replaces it, so it is not updated" []
+    (policy_actions
+       ~input:{ minimal_input with force_traefik_redeploy = Some true }
+       (traefik_policy_context ~traefik_image:"traefik:v3.3.0"
+          ~policy:(Some (applied_policy "no"))));
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "the same proxy at the requested version is updated" converged
+    (policy_actions
        (traefik_policy_context ~traefik_image:"traefik:v3.3.0"
           ~policy:(Some (applied_policy "no"))))
 
@@ -1052,12 +1097,9 @@ let pull_string = function
       "PullTraefik(" ^ Bondi_common.Image_reference.to_string image ^ ")"
   | Deploy.PullCronImage job -> "PullCronImage(" ^ job.Simple.name ^ ")"
 
-let pulls ~strategy ?(workload_pulled = false) ?(traefik = None) input =
-  let context : Simple.deploy_context =
-    { current_traefik = traefik; current_workload = None }
-  in
+let pulls ?(workload_pulled = false) ?(traefik = None) input =
   List.map pull_string
-    (Deploy.pull_plan ~strategy ~workload_pulled input context)
+    (Deploy.pull_plan ~workload_pulled input ~current_traefik:traefik)
 
 let running_traefik image =
   Some
@@ -1081,7 +1123,7 @@ let two_cron_input =
    created, or the crontab is touched, so a failure anywhere in it leaves the
    box as it was. *)
 let test_pull_plan_names_every_image_a_first_deploy_needs () =
-  let names = pulls ~strategy:Deploy.Simple two_cron_input in
+  let names = pulls two_cron_input in
   Alcotest.check
     (Alcotest.list Alcotest.string)
     "proxy, workload, then each cron image"
@@ -1098,52 +1140,46 @@ let test_pull_plan_pulls_a_replaced_traefik () =
     (Alcotest.list Alcotest.string)
     "a proxy at another version is replaced, so its image is pulled"
     [ "PullTraefik(traefik:v3.3.0)"; "PullWorkload(myapp:v1)" ]
-    (pulls ~strategy:Deploy.Simple
-       ~traefik:(running_traefik "traefik:v2.0")
-       minimal_input)
+    (pulls ~traefik:(running_traefik "traefik:v2.0") minimal_input)
 
 let test_pull_plan_leaves_a_kept_traefik_unpulled () =
   Alcotest.check
     (Alcotest.list Alcotest.string)
     "a proxy that stays is not pulled"
     [ "PullWorkload(myapp:v1)" ]
-    (pulls ~strategy:Deploy.Simple
-       ~traefik:(running_traefik "traefik:v3.3.0")
-       minimal_input)
-
-let test_pull_plan_blue_green_never_pulls_traefik () =
-  Alcotest.check
-    (Alcotest.list Alcotest.string)
-    "blue-green refers to no proxy, so pulls none"
-    [
-      "PullWorkload(myapp:v1)"; "PullCronImage(backup)"; "PullCronImage(report)";
-    ]
-    (pulls ~strategy:Deploy.Blue_green two_cron_input)
+    (pulls ~traefik:(running_traefik "traefik:v3.3.0") minimal_input)
 
 let test_pull_plan_skips_a_workload_already_pulled () =
   Alcotest.check
     (Alcotest.list Alcotest.string)
     "auto selection pulled it to inspect it"
-    [ "PullCronImage(backup)"; "PullCronImage(report)" ]
-    (pulls ~strategy:Deploy.Blue_green ~workload_pulled:true two_cron_input)
+    [
+      "PullTraefik(traefik:v3.3.0)";
+      "PullCronImage(backup)";
+      "PullCronImage(report)";
+    ]
+    (pulls ~workload_pulled:true two_cron_input)
 
 let test_pull_plan_cron_only_deploy () =
   Alcotest.check
     (Alcotest.list Alcotest.string)
     "no service, so no proxy and no workload"
     [ "PullCronImage(backup)"; "PullCronImage(report)" ]
-    (pulls ~strategy:Deploy.Simple
-       { two_cron_input with service_name = None; image = None })
+    (pulls { two_cron_input with service_name = None; image = None })
 
 (* The order of the whole deploy, as a value. Every step that changes the box is
    named here, so "every pull precedes the first change" is a property of the
    plan and not of how [deploy] happens to be written. *)
 let mutating = function
   | Deploy.Pull_images
+  | Deploy.Check_image_labels
+  | Deploy.Validate_workload
+  | Deploy.Gather_workload
   | Deploy.Clean_up ->
       false
   | Deploy.Converge_restart_policy
   | Deploy.Snapshot_replaced
+  | Deploy.Converge_proxy
   | Deploy.Deploy_workload
   | Deploy.Apply_cron ->
       true
@@ -1184,7 +1220,302 @@ let test_the_workload_moves_before_the_crontab () =
   Alcotest.check Alcotest.bool "cleanup last" true
     (index Deploy.Clean_up = List.length steps - 1)
 
+let step_index step steps =
+  let rec go i = function
+    | [] -> Alcotest.fail "step missing"
+    | x :: _ when x = step -> i
+    | _ :: rest -> go (i + 1) rest
+  in
+  go 0 steps
+
+(* The proxy's image is pulled with every other image, before anything moves,
+   whenever the proxy will be created or replaced, whichever strategy runs.
+   [pull_plan] takes no strategy, so the two ways a deploy arrives at one are
+   the two inputs it can see: a strategy the request declares leaves the
+   workload to be pulled here, and one the image's health check chose has
+   already pulled it. The deploy then converges the proxy in a step of its own,
+   ahead of the workload. *)
+let test_pull_plan_lists_traefik_under_both_strategies () =
+  List.iter
+    (fun (workload_pulled, path) ->
+      let lists ~traefik =
+        pulls ~workload_pulled ~traefik minimal_input
+        |> List.mem "PullTraefik(traefik:v3.3.0)"
+      in
+      Alcotest.check Alcotest.bool
+        (path ^ ": a proxy that is created is pulled")
+        true (lists ~traefik:None);
+      Alcotest.check Alcotest.bool
+        (path ^ ": a proxy that is replaced is pulled")
+        true
+        (lists ~traefik:(running_traefik "traefik:v2.0"));
+      Alcotest.check Alcotest.bool
+        (path ^ ": a proxy that stays is not pulled")
+        false
+        (lists ~traefik:(running_traefik "traefik:v3.3.0")))
+    [
+      (false, "simple or blue-green, declared");
+      (true, "blue-green, chosen by the health check");
+    ];
+  let steps = Deploy.deploy_steps ~has_service:true in
+  let at step = step_index step steps in
+  Alcotest.check Alcotest.bool "the proxy converges after every pull" true
+    (at Deploy.Pull_images < at Deploy.Converge_proxy);
+  Alcotest.check Alcotest.bool "and before the workload moves" true
+    (at Deploy.Converge_proxy < at Deploy.Deploy_workload);
+  (* The snapshot records the image the running proxy holds, so it is taken
+     before the proxy is replaced and the old proxy's image reaches cleanup. *)
+  Alcotest.check Alcotest.bool "after the snapshot of what it replaces" true
+    (at Deploy.Snapshot_replaced < at Deploy.Converge_proxy)
+
+let proxy_action_string = function
+  | Proxy.CreateNetwork { network_name } ->
+      "CreateNetwork(" ^ network_name ^ ")"
+  | Proxy.PullImage { image } ->
+      "PullImage(" ^ Bondi_common.Image_reference.to_string image ^ ")"
+  | Proxy.StopAndRemove { container_id } ->
+      "StopAndRemove(" ^ container_id ^ ")"
+  | Proxy.EnsureTraefik { traefik_config } ->
+      "EnsureTraefik("
+      ^ Option.value ~default:"<no image>" traefik_config.container_config.image
+      ^ ")"
+
+let proxy_steps ~traefik input =
+  List.map proxy_action_string
+    (Deploy.proxy_plan input ~current_traefik:traefik)
+
+let replaced_proxy =
+  [
+    "CreateNetwork(bondi-network)";
+    "PullImage(traefik:v3.3.0)";
+    "StopAndRemove(traefik-1)";
+    "EnsureTraefik(traefik:v3.3.0)";
+  ]
+
+let pebble_url = "https://pebble:14000/dir"
+
+let pebble =
+  match Bondi_common.Acme_ca_server.of_string pebble_url with
+  | Ok server -> server
+  | Error msg -> Alcotest.failf "the fixture URL was refused: %s" msg
+
+(* A request that declares blue-green converges the proxy from the same fields
+   a simple one does: a changed image replaces it, and so does the redeploy
+   flag, which is how a changed certificate server reaches it. The certificate
+   server is carried into the command of the Traefik the plan creates. The twin
+   is the same box with nothing changed and nothing forced, which keeps it. *)
+let test_blue_green_replaces_traefik_on_image_ca_server_or_force () =
+  let blue_green =
+    { minimal_input with deployment_strategy = Some "blue-green" }
+  in
+  let unchanged = running_traefik "traefik:v3.3.0" in
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "a changed image replaces the proxy" replaced_proxy
+    (proxy_steps ~traefik:(running_traefik "traefik:v2.0") blue_green);
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "the redeploy flag replaces it" replaced_proxy
+    (proxy_steps ~traefik:unchanged
+       { blue_green with force_traefik_redeploy = Some true });
+  let with_ca =
+    {
+      blue_green with
+      traefik_acme_ca_server = Some pebble;
+      force_traefik_redeploy = Some true;
+    }
+  in
+  let planned = Deploy.proxy_plan with_ca ~current_traefik:unchanged in
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "a changed certificate server, with the flag, replaces it" replaced_proxy
+    (List.map proxy_action_string planned);
+  Alcotest.check
+    (Alcotest.list Alcotest.bool)
+    "the created Traefik is sent the certificate server" [ true ]
+    (List.filter_map
+       (function
+         | Proxy.EnsureTraefik { traefik_config } ->
+             Some
+               (List.mem
+                  ("--certificatesResolvers.bondi_resolver.acme.caServer="
+                 ^ pebble_url)
+                  (Option.value ~default:[] traefik_config.container_config.cmd))
+         | Proxy.CreateNetwork _
+         | Proxy.PullImage _
+         | Proxy.StopAndRemove _ ->
+             None)
+       planned);
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "nothing changed and nothing forced keeps it"
+    [ "CreateNetwork(bondi-network)" ]
+    (proxy_steps ~traefik:unchanged blue_green)
+
+(* A request with no [traefik:] block converges no proxy: nothing is created,
+   pulled or stopped, even on a box running a proxy at another version. The
+   affirmative arm is the same box with the block declared, which replaces it. *)
+let test_no_traefik_block_no_proxy_step () =
+  let undeclared =
+    {
+      minimal_input with
+      traefik_domain_name = None;
+      traefik_image = None;
+      traefik_acme_email = None;
+    }
+  in
+  let running = running_traefik "traefik:v2.0" in
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "no proxy step on a box running one" []
+    (proxy_steps ~traefik:running undeclared);
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "no proxy step on a box without one" []
+    (proxy_steps ~traefik:None undeclared);
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "and no proxy pull"
+    [ "PullWorkload(myapp:v1)" ]
+    (pulls ~traefik:running undeclared);
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "the block declared replaces the same proxy" replaced_proxy
+    (proxy_steps ~traefik:running minimal_input);
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "and pulls its image"
+    [ "PullTraefik(traefik:v3.3.0)"; "PullWorkload(myapp:v1)" ]
+    (pulls ~traefik:running minimal_input)
+
+(* The three proxy fields are declared together or not at all. Each partial
+   combination converges no proxy, even on a box running one; the affirmative
+   arm is the complete set, which replaces it. *)
+let test_partial_proxy_declaration_no_proxy_step () =
+  let image = Some (Test_helpers.image_reference "traefik:v3.3.0") in
+  let domain = Some "example.com" in
+  let email = Some "ops@example.com" in
+  let running = running_traefik "traefik:v2.0" in
+  let declared i d e =
+    {
+      minimal_input with
+      traefik_image = i;
+      traefik_domain_name = d;
+      traefik_acme_email = e;
+    }
+  in
+  List.iter
+    (fun (what, input) ->
+      Alcotest.check
+        (Alcotest.list Alcotest.string)
+        ("no proxy step with only " ^ what)
+        []
+        (proxy_steps ~traefik:running input))
+    [
+      ("an image", declared image None None);
+      ("a domain", declared None domain None);
+      ("an email", declared None None email);
+      ("an image and a domain", declared image domain None);
+      ("an image and an email", declared image None email);
+      ("a domain and an email", declared None domain email);
+    ];
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "the complete set replaces the same proxy" replaced_proxy
+    (proxy_steps ~traefik:running (declared image domain email))
+
 (* --- Deploy.deploy: the composition the plans sit underneath --- *)
+
+(* The service the label capture's image was built for: its [Config.Labels]
+   holds [traefik.http.routers.obsapp.middlewares]. *)
+let obsapp_input =
+  { minimal_input with service_name = Some (Test_helpers.router_name "obsapp") }
+
+let label_check_message ~context inspect =
+  match Deploy.image_label_check obsapp_input inspect with
+  | Error (Handler_error.Invalid_request msg) -> msg
+  | Error (Handler_error.Orchestrator_failure msg)
+  | Error (Handler_error.Not_ready msg) ->
+      Alcotest.failf
+        "%s: an image declaring the label is the caller's to fix, but it \
+         answered another class: %s"
+        context msg
+  | Ok () -> Alcotest.failf "%s: the image declaring the label passed" context
+
+(* A label set at create replaces the image's, so the retry middleware Bondi
+   writes on the router would silently drop the middlewares the image declares
+   [observed -- 2026-11-22, Docker Engine 29.10.0: created with Bondi's labels
+   the container carried Bondi's value; created with none, the image's]. The
+   deploy is refused instead, ahead of every step that changes the box, and the
+   order is the same whichever strategy runs, so nothing is stopped or removed
+   under either. Affirmative arm: the same service with an image that declares
+   no labels passes, and its router carries the retry middleware. *)
+let test_image_declaring_router_middlewares_is_refused () =
+  List.iter
+    (fun version ->
+      let context = "the label capture at " ^ version in
+      let msg =
+        label_check_message ~context
+          (Server_test_helpers.image_inspect_capture
+             ~kind:"router_middlewares_label" ~version)
+      in
+      Alcotest.(check bool)
+        (context ^ ": the refusal names the label")
+        true
+        (Bondi_common.String_utils.contains
+           ~needle:"traefik.http.routers.obsapp.middlewares" msg);
+      Alcotest.(check bool)
+        (context ^ ": the refusal names the image")
+        true
+        (Bondi_common.String_utils.contains ~needle:"myapp:v1" msg))
+    Server_test_helpers.capture_versions;
+  let steps = Deploy.deploy_steps ~has_service:true in
+  let check_at = step_index Deploy.Check_image_labels steps in
+  List.iteri
+    (fun i step ->
+      if mutating step then
+        Alcotest.(check bool)
+          "the check precedes every step that changes the box" true
+          (check_at < i))
+    steps;
+  Alcotest.(check bool)
+    "the check reads an image that has been pulled" true
+    (step_index Deploy.Pull_images steps < check_at);
+  List.iter
+    (fun version ->
+      Alcotest.(check (result unit string))
+        ("an image declaring no labels, at " ^ version ^ ", passes")
+        (Ok ())
+        (Result.map_error Handler_error.message
+           (Deploy.image_label_check obsapp_input
+              (Server_test_helpers.image_inspect_capture ~kind:"healthcheck_cmd"
+                 ~version))))
+    Server_test_helpers.capture_versions;
+  match Simple.service_config obsapp_input with
+  | Error e -> Alcotest.fail ("service_config refused: " ^ e)
+  | Ok (_, { Docker.labels; _ }) ->
+      Alcotest.(check (option string))
+        "and its router carries the retry middleware" (Some "obsapp-retry")
+        (Option.bind labels
+           (List.assoc_opt "traefik.http.routers.obsapp.middlewares"))
+
+(* Every refusal and every read the workload plans from precedes the first step
+   that changes the box, the restart-policy write and the proxy included. *)
+let test_workload_refusals_and_reads_precede_every_change () =
+  let steps = Deploy.deploy_steps ~has_service:true in
+  List.iter
+    (fun step ->
+      Alcotest.(check bool)
+        "a refusal or a read follows the label check" true
+        (step_index Deploy.Check_image_labels steps < step_index step steps);
+      List.iteri
+        (fun i later ->
+          if mutating later then
+            Alcotest.(check bool)
+              "and precedes every step that changes the box" true
+              (step_index step steps < i))
+        steps)
+    [ Deploy.Validate_workload; Deploy.Gather_workload ]
 
 (* [deploy]'s catch-all is reachable through no pure seam: [cron_plan] answers
    with a value, and everything after it is Docker. The Engine is reached over
@@ -1221,6 +1552,334 @@ let test_deploy_reports_an_escaping_exception () =
         (Bondi_common.String_utils.contains ~needle:"Docker_socket_unreachable"
            msg)
 
+(* --- Deploy.deploy against a scripted Engine --- *)
+
+(* An in-memory Docker socket. The client opens one connection per request, so
+   each connection reads one request off its writes, records its method and
+   target, and answers it once from [respond]. What a test asserts is the list
+   of requests the deploy made, which is what "nothing moved" means. *)
+module Fake_engine = struct
+  type t = { mutable requests : (string * string) list }
+
+  let calls t = List.rev t.requests
+
+  let header_end s =
+    let rec go i =
+      if i + 4 > String.length s then None
+      else if String.sub s i 4 = "\r\n\r\n" then Some (i + 4)
+      else go (i + 1)
+    in
+    go 0
+
+  let content_length head =
+    String.split_on_char '\n' head
+    |> List.find_map (fun line ->
+        match String.index_opt line ':' with
+        | Some i
+          when String.lowercase_ascii (String.trim (String.sub line 0 i))
+               = "content-length" ->
+            int_of_string_opt
+              (String.trim
+                 (String.sub line (i + 1) (String.length line - i - 1)))
+        | _ -> None)
+    |> Option.value ~default:0
+
+  (* The request is complete once its head and a declared body are in. A chunked
+     body is complete at its terminating chunk. *)
+  let complete s =
+    match header_end s with
+    | None -> false
+    | Some body_at ->
+        let head = String.lowercase_ascii (String.sub s 0 body_at) in
+        if Bondi_common.String_utils.contains ~needle:"chunked" head then
+          String.ends_with ~suffix:"0\r\n\r\n" s
+        else String.length s - body_at >= content_length head
+
+  type conn = {
+    engine : t;
+    respond : string -> string -> int * string;
+    written : Buffer.t;
+    mutable answer : string option;
+    mutable sent : int;
+  }
+
+  module Conn = struct
+    type tag = [ `Generic ]
+    type nonrec t = conn
+
+    let rec answer t =
+      match t.answer with
+      | Some a -> a
+      | None ->
+          let request = Buffer.contents t.written in
+          if complete request then (
+            let line =
+              List.hd (String.split_on_char '\r' request) |> String.trim
+            in
+            let meth, target =
+              match String.split_on_char ' ' line with
+              | m :: target :: _ -> (m, target)
+              | _ -> ("?", "?")
+            in
+            t.engine.requests <- (meth, target) :: t.engine.requests;
+            let code, body = t.respond meth target in
+            let a =
+              Printf.sprintf
+                "HTTP/1.1 %d X\r\n\
+                 Content-Length: %d\r\n\
+                 Connection: close\r\n\
+                 \r\n\
+                 %s"
+                code (String.length body) body
+            in
+            t.answer <- Some a;
+            a)
+          else (
+            Eio.Fiber.yield ();
+            answer t)
+
+    let read_methods = []
+
+    let single_read t buf =
+      let a = answer t in
+      if t.sent >= String.length a then raise End_of_file
+      else
+        let n = min (Cstruct.length buf) (String.length a - t.sent) in
+        Cstruct.blit_from_string a t.sent buf 0 n;
+        t.sent <- t.sent + n;
+        n
+
+    let single_write t bufs =
+      List.iter
+        (fun b -> Buffer.add_string t.written (Cstruct.to_string b))
+        bufs;
+      Cstruct.lenv bufs
+
+    let copy t ~src =
+      let buf = Cstruct.create 4096 in
+      try
+        while true do
+          let n = Eio.Flow.single_read src buf in
+          Buffer.add_string t.written (Cstruct.to_string (Cstruct.sub buf 0 n))
+        done
+      with
+      | End_of_file -> ()
+
+    let shutdown _ _ = ()
+    let close _ = ()
+  end
+
+  let make ~respond =
+    let engine = { requests = [] } in
+    let net = Eio_mock.Net.make "docker" in
+    let socket () =
+      let conn =
+        {
+          engine;
+          respond;
+          written = Buffer.create 256;
+          answer = None;
+          sent = 0;
+        }
+      in
+      (Eio.Resource.T (conn, Eio.Net.Pi.stream_socket (module Conn))
+        :> [ `Generic ] Eio.Net.stream_socket_ty Eio.Resource.t)
+    in
+    Eio_mock.Net.on_connect net (List.init 400 (fun _ -> `Run socket));
+    (engine, net)
+end
+
+let request_moves_the_box (meth, target) =
+  let has needle = Bondi_common.String_utils.contains ~needle target in
+  match meth with
+  | "DELETE" -> true
+  | "POST" -> has "/containers/"
+  | _ -> false
+
+let describe_requests requests =
+  String.concat "; " (List.map (fun (m, t) -> m ^ " " ^ t) requests)
+
+let check_nothing_moved ~context engine =
+  match List.filter request_moves_the_box (Fake_engine.calls engine) with
+  | [] -> ()
+  | moved ->
+      Alcotest.failf "%s: the deploy moved the box before it was refused: %s"
+        context (describe_requests moved)
+
+let ends_with_json target =
+  let path =
+    match String.index_opt target '?' with
+    | Some i -> String.sub target 0 i
+    | None -> target
+  in
+  String.ends_with ~suffix:"/json" path
+
+let engine_with ~containers ~image_inspect ~container_inspect meth target =
+  let has needle = Bondi_common.String_utils.contains ~needle target in
+  match (meth, has "/version") with
+  | _, true -> (500, "no negotiation")
+  | "POST", _ when has "/images/create" ->
+      (200, "{\"status\":\"Status: Image is up to date for myapp:v1\"}\r\n")
+  | "GET", _ when has "/containers/json" -> (200, containers)
+  | "GET", _ when has "/images/" && ends_with_json target -> image_inspect
+  | "GET", _ when has "/containers/" && ends_with_json target ->
+      container_inspect target
+  | _ -> (200, "{}")
+
+let ok_image_inspect () =
+  ( 200,
+    Server_test_helpers.image_inspect_capture_body ~kind:"no_healthcheck"
+      ~version:"v1.45" )
+
+let traefik_container_listing =
+  {|[{"Id":"t1","Image":"traefik:v3.0.0","ImageID":"sha256:old","Names":["/bondi-traefik"],"State":"running"}]|}
+
+let run_deploy ~respond input =
+  let engine, net = Fake_engine.make ~respond in
+  let clock = Eio_mock.Clock.make () in
+  let result = Deploy.deploy ~clock ~net input in
+  (engine, result)
+
+let refusal_message ~context = function
+  | Error (Handler_error.Orchestrator_failure msg) -> msg
+  | Error (Handler_error.Invalid_request msg)
+  | Error (Handler_error.Not_ready msg) ->
+      Alcotest.failf "%s: answered a class this refusal does not carry: %s"
+        context msg
+  | Ok _ -> Alcotest.failf "%s: the deploy was accepted" context
+
+(* A request that decodes but that the workload cannot be built from (here, no
+   port) is refused before the proxy is touched: [Converge_proxy] can remove the
+   running Traefik, which interrupts every site on the box, so every refusal the
+   request can meet is made before it. The box holds a Traefik at another image
+   and an unreadable policy, so both the policy write and the replacement would
+   be recorded had the deploy reached them. *)
+let test_a_refused_workload_is_refused_before_the_proxy_moves () =
+  Eio_mock.Backend.run @@ fun () ->
+  List.iter
+    (fun strategy ->
+      let context = "strategy " ^ strategy in
+      let engine, result =
+        run_deploy
+          ~respond:
+            (engine_with ~containers:traefik_container_listing
+               ~image_inspect:(ok_image_inspect ()) ~container_inspect:(fun _ ->
+                 (500, "unreadable")))
+          {
+            minimal_input with
+            port = None;
+            deployment_strategy = Some strategy;
+          }
+      in
+      let msg = refusal_message ~context result in
+      Alcotest.(check bool)
+        (context ^ ": the refusal names the port")
+        true
+        (Bondi_common.String_utils.contains ~needle:"port is required" msg);
+      Alcotest.(check bool)
+        (context ^ ": the images were pulled, so the arm reached the steps")
+        true
+        (List.exists
+           (fun (m, t) ->
+             m = "POST"
+             && Bondi_common.String_utils.contains ~needle:"/images/create" t)
+           (Fake_engine.calls engine));
+      check_nothing_moved ~context engine;
+      Alcotest.(check bool)
+        (context ^ ": no restart policy was written")
+        false
+        (List.exists
+           (fun (_, t) ->
+             Bondi_common.String_utils.contains ~needle:"/update" t)
+           (Fake_engine.calls engine)))
+    [ "simple"; "blue-green" ]
+
+(* The same read decides the strategy and the label check, so a failure of it
+   is one failure: the deploy stops as Bondi's fault, with nothing moved,
+   whether the request declared a strategy or left the image to choose one. *)
+let test_a_failed_image_inspect_fails_the_deploy_before_anything_moves () =
+  Eio_mock.Backend.run @@ fun () ->
+  List.iter
+    (fun strategy ->
+      let context =
+        match strategy with
+        | Some s -> "declared " ^ s
+        | None -> "chosen by the image"
+      in
+      let engine, result =
+        run_deploy
+          ~respond:
+            (engine_with ~containers:traefik_container_listing
+               ~image_inspect:(500, "inspect refused")
+               ~container_inspect:(fun _ -> (500, "unreadable")))
+          { minimal_input with deployment_strategy = strategy }
+      in
+      let msg = refusal_message ~context result in
+      Alcotest.(check bool)
+        (context ^ ": the failure carries the Engine's answer")
+        true
+        (Bondi_common.String_utils.contains ~needle:"inspect refused" msg);
+      (match result with
+      | Error e ->
+          Alcotest.check Alcotest.int
+            (context ^ ": an Engine failure exits 1")
+            1
+            (Handler_error.exit_code e)
+      | Ok _ -> ());
+      check_nothing_moved ~context engine)
+    [ None; Some "simple"; Some "blue-green" ]
+
+(* An interrupted blue-green deploy can leave [<name>-new], and what it is
+   decides what the next deploy does, so it is read before anything moves,
+   proxy included. A read that fails stops the deploy where it stands. *)
+let test_a_failed_temp_container_inspect_stops_before_anything_moves () =
+  Eio_mock.Backend.run @@ fun () ->
+  let containers =
+    {|[{"Id":"t1","Image":"traefik:v3.0.0","ImageID":"sha256:old","Names":["/bondi-traefik"],"State":"running"},{"Id":"n1","Image":"myapp:v0","ImageID":"sha256:o","Names":["/my-service-new"],"State":"running"}]|}
+  in
+  let engine, result =
+    run_deploy
+      ~respond:
+        (engine_with ~containers ~image_inspect:(ok_image_inspect ())
+           ~container_inspect:(fun target ->
+             if Bondi_common.String_utils.contains ~needle:"/n1/" target then
+               (500, "temp inspect refused")
+             else (500, "unreadable")))
+      { minimal_input with deployment_strategy = Some "blue-green" }
+  in
+  let msg = refusal_message ~context:"temp inspect" result in
+  Alcotest.(check bool)
+    "the failure carries the Engine's answer" true
+    (Bondi_common.String_utils.contains ~needle:"temp inspect refused" msg);
+  check_nothing_moved ~context:"temp inspect" engine;
+  Alcotest.(check bool)
+    "and no restart policy was written" false
+    (List.exists
+       (fun (_, t) -> Bondi_common.String_utils.contains ~needle:"/update" t)
+       (Fake_engine.calls engine))
+
+(* The words of a [Test] other than the two that run a probe are not all
+   "no HEALTHCHECK": [NONE] and an empty [Test] are, and a word Bondi does not
+   know is something else the operator needs to see named. *)
+let test_an_unrecognised_health_check_is_named () =
+  let reason healthcheck =
+    snd (Deploy.auto_selection (image_with_healthcheck healthcheck))
+  in
+  Alcotest.check Alcotest.string "NONE" "image has no HEALTHCHECK"
+    (reason (Some { test = [ "NONE" ] }));
+  Alcotest.check Alcotest.string "absent" "image has no HEALTHCHECK"
+    (reason None);
+  Alcotest.check Alcotest.string "CMD" "image has HEALTHCHECK"
+    (reason (Some { test = [ "CMD"; "true" ] }));
+  let unknown = Some { Docker.test = [ "GRPC"; "x" ] } in
+  Alcotest.check Alcotest.string "an unknown word selects simple" "simple"
+    (Deploy.string_of_deployment_strategy
+       (fst (Deploy.auto_selection (image_with_healthcheck unknown))));
+  Alcotest.(check bool)
+    "and its reason names the word" true
+    (Bondi_common.String_utils.contains
+       ~needle:"unrecognised health check `GRPC`" (reason unknown))
+
 let () =
   Alcotest.run "Deploy"
     [
@@ -1243,8 +1902,6 @@ let () =
             test_pull_plan_pulls_a_replaced_traefik;
           Alcotest.test_case "pull plan leaves a kept proxy" `Quick
             test_pull_plan_leaves_a_kept_traefik_unpulled;
-          Alcotest.test_case "pull plan blue-green no proxy" `Quick
-            test_pull_plan_blue_green_never_pulls_traefik;
           Alcotest.test_case "pull plan skips a pulled workload" `Quick
             test_pull_plan_skips_a_workload_already_pulled;
           Alcotest.test_case "every pull precedes the first change" `Quick
@@ -1253,6 +1910,8 @@ let () =
             test_the_workload_moves_before_the_crontab;
           Alcotest.test_case "pull plan cron-only" `Quick
             test_pull_plan_cron_only_deploy;
+          Alcotest.test_case "pull plan lists the proxy under both strategies"
+            `Quick test_pull_plan_lists_traefik_under_both_strategies;
           Alcotest.test_case "no cron jobs" `Quick test_cron_plan_no_cron_jobs;
           Alcotest.test_case "empty cron jobs" `Quick
             test_cron_plan_empty_cron_jobs;
@@ -1324,6 +1983,8 @@ let () =
             test_decode_refuses_unroutable_service_name;
           Alcotest.test_case "decode reads and refuses the certificate server"
             `Quick test_decode_acme_ca_server;
+          Alcotest.test_case "decode accepts an input with drain_grace_period"
+            `Quick test_input_with_drain_grace_period_accepted;
         ] );
       ( "strategy dispatch",
         [
@@ -1335,6 +1996,10 @@ let () =
             test_deployment_strategy_of_string_unknown;
           Alcotest.test_case "string_of_deployment_strategy roundtrip" `Quick
             test_string_of_deployment_strategy;
+          Alcotest.test_case "auto picks blue-green for a CMD health check"
+            `Quick test_auto_picks_blue_green_for_cmd_healthcheck;
+          Alcotest.test_case "auto picks simple for NONE and absent" `Quick
+            test_auto_picks_simple_for_none_and_absent;
         ] );
       ( "traefik restart policy",
         [
@@ -1344,17 +2009,45 @@ let () =
             test_traefik_with_no_reported_policy_plans_an_update;
           Alcotest.test_case "the declared policy plans no update" `Quick
             test_traefik_at_the_declared_policy_plans_no_update;
-          Alcotest.test_case "a proxy simple will replace plans no update"
-            `Quick test_traefik_the_simple_strategy_will_replace_plans_no_update;
-          Alcotest.test_case "blue-green converges the proxy it never replaces"
-            `Quick test_traefik_under_blue_green_is_converged_whatever_its_image;
           Alcotest.test_case "no proxy running plans no update" `Quick
             test_no_traefik_running_plans_no_update;
           Alcotest.test_case "an undeclared proxy plans no update" `Quick
             test_traefik_not_declared_plans_no_update;
+          Alcotest.test_case "the policy plan is strategy-independent" `Quick
+            test_traefik_policy_plan_strategy_independent;
+        ] );
+      ( "proxy convergence",
+        [
+          Alcotest.test_case
+            "blue-green replaces the proxy on image, ca server or force" `Quick
+            test_blue_green_replaces_traefik_on_image_ca_server_or_force;
+          Alcotest.test_case "no traefik block, no proxy step" `Quick
+            test_no_traefik_block_no_proxy_step;
+          Alcotest.test_case "a partial proxy declaration plans no step" `Quick
+            test_partial_proxy_declaration_no_proxy_step;
+        ] );
+      ( "image labels",
+        [
+          Alcotest.test_case
+            "an image declaring the router's middlewares is refused" `Quick
+            test_image_declaring_router_middlewares_is_refused;
         ] );
       ( "deploy",
         [
+          Alcotest.test_case
+            "a refused workload is refused before the proxy moves" `Quick
+            test_a_refused_workload_is_refused_before_the_proxy_moves;
+          Alcotest.test_case
+            "a failed image inspect fails the deploy before anything moves"
+            `Quick
+            test_a_failed_image_inspect_fails_the_deploy_before_anything_moves;
+          Alcotest.test_case
+            "a failed temp container inspect stops before anything moves" `Quick
+            test_a_failed_temp_container_inspect_stops_before_anything_moves;
+          Alcotest.test_case "workload refusals and reads precede every change"
+            `Quick test_workload_refusals_and_reads_precede_every_change;
+          Alcotest.test_case "an unrecognised health check is named" `Quick
+            test_an_unrecognised_health_check_is_named;
           Alcotest.test_case
             "an escaping exception becomes an orchestrator failure" `Quick
             test_deploy_reports_an_escaping_exception;

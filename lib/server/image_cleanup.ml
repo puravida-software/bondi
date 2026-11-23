@@ -150,26 +150,36 @@ let guarded f =
       raise fatal
   | exn -> Error (Printexc.to_string exn)
 
-(* The two containers whose images a deploy can replace, found by the same
-   lookups [Simple.gather_context] uses to decide what it stops, so the image
-   recorded here is the one held by the container that is then replaced. *)
+(* The containers whose images a deploy can replace, each found by its
+   name, as the deploy finds the proxy and the strategies find the workload
+   before stopping either, so the image recorded is the one held by the
+   container that is then replaced. A container whose image merely mentions
+   Traefik is not the proxy, and its image is not recorded. *)
+let replaced_images ~service_name (containers : Docker.Client.container list) =
+  let named name (container : Docker.Client.container) =
+    List.exists
+      (fun listed -> Docker.Client.normalize_container_name listed = name)
+      container.names
+  in
+  List.filter_map
+    (fun name ->
+      Option.map
+        (fun (container : Docker.Client.container) -> container.image_id)
+        (List.find_opt (named name) containers))
+    [
+      service_name;
+      (* The name a blue-green colour is started under; a swap interrupted
+         while it served is completed by promoting it, which replaces it. *)
+      service_name ^ "-new";
+      Bondi_common.Builtin_container.traefik;
+    ]
+
 let snapshot_replaced ~client ~net ~clock ~service_name =
   let lookup () =
     Docker.Client.with_request_bound ~clock ~what:"image cleanup snapshot"
     @@ fun () ->
-    let* traefik =
-      Docker.Client.get_container_by_image_name client ~net
-        ~image_name:"traefik"
-    in
-    let* service =
-      Docker.Client.get_container_by_name client ~net
-        ~container_name:service_name
-    in
-    Ok
-      (List.filter_map
-         (Option.map (fun (container : Docker.Client.container) ->
-              container.image_id))
-         [ service; traefik ])
+    let* containers = Docker.Client.list_containers client ~net ~all:true () in
+    Ok (replaced_images ~service_name containers)
   in
   match guarded lookup with
   | Ok replaced -> replaced

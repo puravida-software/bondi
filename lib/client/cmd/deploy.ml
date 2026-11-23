@@ -28,7 +28,6 @@ type deploy_payload = {
   registry_pass : string option; [@default None]
   force_traefik_redeploy : bool option; [@default None]
   cron_jobs : deploy_cron_job list option; [@default None]
-  drain_grace_period : float option; [@default None]
   deployment_strategy : string option; [@default None]
   health_timeout : float option; [@default None]
   poll_interval : float option; [@default None]
@@ -419,6 +418,10 @@ let validate_deployments (config : Config_file.t) deployments :
    say it to. *)
 let deprecation_notices (config : Config_file.t) =
   Deprecations.messages config.bondi_server
+  @
+  match config.user_service with
+  | None -> []
+  | Some service -> Deprecations.service_messages service
 
 let payload_for (config : Config_file.t) ~deployments ~force_traefik_redeploy
     (server : Config_file.server) cron_jobs =
@@ -479,8 +482,6 @@ let payload_for (config : Config_file.t) ~deployments ~force_traefik_redeploy
           registry_pass = service.registry_pass;
           force_traefik_redeploy = Some force_traefik_redeploy;
           cron_jobs;
-          drain_grace_period =
-            Option.map float_of_int service.drain_grace_period;
           deployment_strategy = service.deployment_strategy;
           health_timeout = Option.map float_of_int service.health_timeout;
           poll_interval = Option.map float_of_int service.poll_interval;
@@ -510,7 +511,6 @@ let payload_for (config : Config_file.t) ~deployments ~force_traefik_redeploy
           registry_pass = None;
           force_traefik_redeploy = Some force_traefik_redeploy;
           cron_jobs;
-          drain_grace_period = None;
           deployment_strategy = None;
           health_timeout = None;
           poll_interval = None;

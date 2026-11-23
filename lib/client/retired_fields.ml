@@ -56,6 +56,10 @@ let server_port_advice =
    service, which is the port your own container listens on and is read on \
    every deploy."
 
+let drain_grace_period_advice =
+  "it is no longer read. A blue-green deploy stops the old container while it \
+   is still attached to the network, and waits for no drain. Remove the line."
+
 let retired_in_bondi_server json =
   match member "bondi_server" json with
   | None -> []
@@ -73,20 +77,29 @@ let retired_in_server ~path server =
    each cron job's single server -- and it is the same record in both, so a port
    declared under either stops the same manifest from parsing. The index is
    carried into the path so the operator is sent to an entry rather than to a
-   list. *)
+   list. The service's own keys are reported ahead of its servers', in the order
+   the operator reads the block. *)
 let retired_in_service json =
   match member "service" json with
   | None -> []
-  | Some service -> (
-      match member "servers" service with
-      | None -> []
-      | Some servers ->
-          entries servers
-          |> List.mapi (fun index server ->
-              retired_in_server
-                ~path:(Printf.sprintf "service.servers[%d]" index)
-                server)
-          |> List.concat)
+  | Some service ->
+      let own =
+        if declared "drain_grace_period" service then
+          [ ("service.drain_grace_period", drain_grace_period_advice) ]
+        else []
+      in
+      let in_servers =
+        match member "servers" service with
+        | None -> []
+        | Some servers ->
+            entries servers
+            |> List.mapi (fun index server ->
+                retired_in_server
+                  ~path:(Printf.sprintf "service.servers[%d]" index)
+                  server)
+            |> List.concat
+      in
+      own @ in_servers
 
 let retired_in_cron_jobs json =
   match member "cron_jobs" json with

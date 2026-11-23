@@ -10,6 +10,11 @@
     This scan runs on the untyped document, before and instead of asking the
     decoder, which is the only place the key is still visible.
 
+    A key the record still parses and nothing acts on is listed too, ahead of
+    its removal. [service.drain_grace_period] is one: no deploy reads it, and
+    until this scan has a caller it is only warned about, where the
+    configuration is acted on.
+
     The module answers rather than prints, so the placement of the refusal is a
     property of the call site and can be tested there. *)
 

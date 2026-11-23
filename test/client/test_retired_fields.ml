@@ -130,6 +130,21 @@ let test_service_port_is_not_retired () =
   names ~what:"the server's port and not the service's"
     ~needle:"service.servers[0].port" message
 
+(* [drain_grace_period] sits on the service itself, not on a server entry
+   under it, so the path is the service's. The fixture also declares
+   [service.port], which is read on every deploy: a scan that refused every key
+   under [service] would name it too. *)
+let test_service_drain_grace_period_retired () =
+  let message =
+    refusal ~expectation:"expected a declared drain_grace_period to be refused"
+      {|{"service": {"name": "web", "port": 8080, "drain_grace_period": 5,
+                     "servers": [{"ip_address": "10.0.0.1"}]}}|}
+  in
+  names ~what:"the key" ~needle:"service.drain_grace_period" message;
+  names ~what:"what to do about it" ~needle:"Remove the line" message;
+  says_nothing_about ~what:"the service's own port" ~needle:"service.port"
+    message
+
 let () =
   run "retired fields"
     [
@@ -143,6 +158,8 @@ let () =
             test_a_retired_key_with_no_value_is_named;
           test_case "a port under a server entry is named" `Quick
             test_retired_server_port_is_named;
+          test_case "a declared service.drain_grace_period is named" `Quick
+            test_service_drain_grace_period_retired;
           test_case "every retired key is named at once" `Quick
             test_every_retired_key_is_named_at_once;
           test_case "service.port is not retired" `Quick

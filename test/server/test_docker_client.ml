@@ -1,46 +1,84 @@
 module Docker = Bondi_server__Docker__Client
+module Deploy = Bondi_server__Deploy
 
 let unwrap = function
   | Ok v -> v
   | Error msg -> Alcotest.fail ("unexpected error: " ^ msg)
 
-let test_image_inspect_response_with_healthcheck_json () =
-  let json =
-    Yojson.Safe.from_string
-      {|{
-        "ContainerConfig": {
-          "Healthcheck": {
-            "Test": ["CMD-SHELL", "curl -f http://localhost:8080/health"]
-          }
-        }
-      }|}
-  in
-  let response = Docker.image_inspect_response_of_yojson json |> unwrap in
-  let cc = Option.get response.container_config in
-  let healthcheck = cc.healthcheck in
-  Alcotest.check Alcotest.bool "healthcheck is present" true
-    (Option.is_some healthcheck);
-  let hc = Option.get healthcheck in
-  Alcotest.check
-    (Alcotest.list Alcotest.string)
-    "healthcheck test command"
-    [ "CMD-SHELL"; "curl -f http://localhost:8080/health" ]
-    hc.test
+let capture_versions = Server_test_helpers.capture_versions
+let image_inspect_capture = Server_test_helpers.image_inspect_capture
 
-let test_image_inspect_response_without_healthcheck_json () =
-  let json =
-    Yojson.Safe.from_string
-      {|{
-        "ContainerConfig": {
-          "Hostname": "abc123"
-        }
-      }|}
+let healthcheck_test (response : Docker.image_inspect_response) =
+  Option.map
+    (fun (healthcheck : Docker.image_healthcheck) -> healthcheck.test)
+    response.config.healthcheck
+
+(* Every capture, at both versions, read for the health check its image was
+   built with. A decode of anything but [Config] finds none for any of them. *)
+let test_image_inspect_healthcheck_from_config () =
+  List.iter
+    (fun (kind, expected) ->
+      List.iter
+        (fun version ->
+          Alcotest.check
+            Alcotest.(option (list string))
+            (Printf.sprintf "%s at %s" kind version)
+            expected
+            (healthcheck_test (image_inspect_capture ~kind ~version)))
+        capture_versions)
+    [
+      ("healthcheck_cmd", Some [ "CMD"; "true" ]);
+      ("healthcheck_none", Some [ "NONE" ]);
+      ("no_healthcheck", None);
+      ("router_middlewares_label", None);
+    ]
+
+(* [HEALTHCHECK NONE] is present in [Config] but declares no probe, so the
+   strategy it selects is the one an image with no health check selects. The
+   image with a [CMD] health check, read the same way, selects blue-green: a
+   decision that reported simple for everything would fail here. *)
+let test_healthcheck_none_is_no_healthcheck () =
+  let strategy_of ~kind ~version =
+    Deploy.string_of_deployment_strategy
+      (Deploy.auto_strategy (image_inspect_capture ~kind ~version))
   in
-  let response = Docker.image_inspect_response_of_yojson json |> unwrap in
-  let cc = Option.get response.container_config in
-  let healthcheck = cc.healthcheck in
-  Alcotest.check Alcotest.bool "healthcheck is absent" false
-    (Option.is_some healthcheck)
+  List.iter
+    (fun version ->
+      Alcotest.check Alcotest.string
+        ("HEALTHCHECK NONE at " ^ version)
+        "simple"
+        (strategy_of ~kind:"healthcheck_none" ~version);
+      Alcotest.check Alcotest.string
+        ("no HEALTHCHECK at " ^ version)
+        "simple"
+        (strategy_of ~kind:"no_healthcheck" ~version);
+      Alcotest.check Alcotest.string
+        ("HEALTHCHECK CMD at " ^ version)
+        "blue-green"
+        (strategy_of ~kind:"healthcheck_cmd" ~version))
+    capture_versions
+
+(* The label an image declares is read from [Config.Labels]; an image with none
+   reports [null] there, which reads as no labels. *)
+let test_image_inspect_labels_from_config () =
+  List.iter
+    (fun (kind, expected) ->
+      List.iter
+        (fun version ->
+          let response = image_inspect_capture ~kind ~version in
+          Alcotest.check
+            Alcotest.(option (list (pair string string)))
+            (Printf.sprintf "%s at %s" kind version)
+            expected response.config.labels)
+        capture_versions)
+    [
+      ( "router_middlewares_label",
+        Some
+          [
+            ("traefik.http.routers.obsapp.middlewares", "image-declared@docker");
+          ] );
+      ("healthcheck_cmd", None);
+    ]
 
 let test_inspect_state_with_health_json () =
   let json =
@@ -59,15 +97,17 @@ let test_inspect_state_with_health_json () =
   in
   let state = Docker.inspect_state_of_yojson json |> unwrap in
   Alcotest.check Alcotest.string "status" "running" state.status;
-  Alcotest.check Alcotest.bool "health is present" true
-    (Option.is_some state.health);
-  let health = Option.get state.health in
-  Alcotest.check Alcotest.string "health status" "healthy" health.status;
-  Alcotest.check Alcotest.int "failing streak" 0 health.failing_streak;
-  Alcotest.check Alcotest.int "log entries" 1 (List.length health.log);
-  let entry = List.hd health.log in
-  Alcotest.check Alcotest.string "log output" "OK\n" entry.output;
-  Alcotest.check Alcotest.int "log exit code" 0 entry.exit_code
+  match state.health with
+  | None -> Alcotest.fail "health is absent"
+  | Some health -> (
+      Alcotest.check Alcotest.string "health status" "healthy" health.status;
+      Alcotest.check Alcotest.int "failing streak" 0 health.failing_streak;
+      match health.log with
+      | [ entry ] ->
+          Alcotest.check Alcotest.string "log output" "OK\n" entry.output;
+          Alcotest.check Alcotest.int "log exit code" 0 entry.exit_code
+      | entries ->
+          Alcotest.failf "expected one log entry, got %d" (List.length entries))
 
 let test_inspect_state_without_health_json () =
   let json =
@@ -100,10 +140,12 @@ let test_inspect_state_unhealthy_with_streak_json () =
       }|}
   in
   let state = Docker.inspect_state_of_yojson json |> unwrap in
-  let health = Option.get state.health in
-  Alcotest.check Alcotest.string "health status" "unhealthy" health.status;
-  Alcotest.check Alcotest.int "failing streak" 3 health.failing_streak;
-  Alcotest.check Alcotest.int "log entries" 3 (List.length health.log)
+  match state.health with
+  | None -> Alcotest.fail "health is absent"
+  | Some health ->
+      Alcotest.check Alcotest.string "health status" "unhealthy" health.status;
+      Alcotest.check Alcotest.int "failing streak" 3 health.failing_streak;
+      Alcotest.check Alcotest.int "log entries" 3 (List.length health.log)
 
 let test_health_state_defaults_json () =
   let json =
@@ -207,6 +249,109 @@ let test_inspect_response_tolerates_unmodelled_leaf_keys () =
           | Some _
           | None ->
               Alcotest.fail "port binding for 8080/tcp missing"))
+
+(* The networks a container is on are the keys of [NetworkSettings.Networks],
+   in the shape the Engine reports them, with each endpoint's own fields beside
+   them. Two networks, so a decode that keeps only one, or reads an endpoint's
+   fields as the name, gives a different answer. *)
+let test_inspect_response_decodes_attached_networks () =
+  let json =
+    Yojson.Safe.from_string
+      {|{
+        "Created": "2026-11-22T10:00:00Z",
+        "RestartCount": 0,
+        "State": {"Status": "running", "ExitCode": 0},
+        "NetworkSettings": {
+          "SandboxID": "",
+          "Ports": {},
+          "Networks": {
+            "bondi-network": {
+              "IPAMConfig": null,
+              "Links": null,
+              "Aliases": ["my-service-new"],
+              "NetworkID": "network-one",
+              "EndpointID": "endpoint-one",
+              "Gateway": "172.18.0.1",
+              "IPAddress": "172.18.0.3"
+            },
+            "bridge": {
+              "IPAMConfig": null,
+              "Links": null,
+              "Aliases": null,
+              "NetworkID": "network-two",
+              "EndpointID": "endpoint-two",
+              "Gateway": "172.17.0.1",
+              "IPAddress": "172.17.0.2"
+            }
+          }
+        }
+      }|}
+  in
+  let response = Docker.inspect_response_of_yojson json |> unwrap in
+  match response.network_settings with
+  | None -> Alcotest.fail "inspect response carries no network settings"
+  | Some settings ->
+      Alcotest.check
+        (Alcotest.list Alcotest.string)
+        "attached networks"
+        [ "bondi-network"; "bridge" ]
+        settings.networks
+
+(* The capture of an image with no configuration (an import of an empty
+   tarball), taken at both versions: the Engine sends [Config] as an object
+   with every field empty, not null and not absent, so the decode reads it as
+   an image with no health check and no labels. *)
+let test_empty_config_image_decodes_as_no_healthcheck () =
+  List.iter
+    (fun version ->
+      let response = image_inspect_capture ~kind:"empty_config" ~version in
+      Alcotest.check
+        Alcotest.(option (list string))
+        ("no health check at " ^ version)
+        None
+        (healthcheck_test response);
+      Alcotest.check Alcotest.bool
+        ("no labels at " ^ version)
+        true
+        (response.config.labels = None))
+    capture_versions
+
+(* [attached_networks] writes each name as a key with an empty endpoint and
+   reads the keys back. *)
+let test_attached_networks_round_trip () =
+  let networks = [ "bondi-network"; "bridge" ] in
+  let json = Docker.attached_networks_to_yojson networks in
+  Alcotest.check Alcotest.string "written as one key per network"
+    {|{"bondi-network":{},"bridge":{}}|}
+    (Yojson.Safe.to_string json);
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "read back" networks
+    (Docker.attached_networks_of_yojson json |> unwrap)
+
+(* A container on no network reports [Networks] as null, which reads as none. *)
+let test_null_networks_decode_as_none () =
+  let json =
+    Yojson.Safe.from_string
+      {|{"Created": "2026-11-22T10:00:00Z", "RestartCount": 0,
+         "State": {"Status": "running", "ExitCode": 0},
+         "NetworkSettings": {"Networks": null}}|}
+  in
+  match (Docker.inspect_response_of_yojson json |> unwrap).network_settings with
+  | None -> Alcotest.fail "inspect response carries no network settings"
+  | Some settings ->
+      Alcotest.check
+        (Alcotest.list Alcotest.string)
+        "no networks" [] settings.networks
+
+(* The proxy and the workloads are created with this one value; it names the
+   network Bondi manages and nothing else. *)
+let test_default_networking_config_names_the_managed_network () =
+  Alcotest.check Alcotest.string "serialised"
+    (Printf.sprintf {|{"EndpointsConfig":{"%s":{}}}|}
+       Bondi_common.Defaults.network_name)
+    (Yojson.Safe.to_string
+       (Docker.networking_config_to_yojson Docker.default_networking_config))
 
 let test_inspect_response_without_host_config_decodes () =
   let json = Yojson.Safe.from_string (inspect_payload ~host_config:"") in
@@ -708,10 +853,12 @@ let () =
         ] );
       ( "image inspect",
         [
-          Alcotest.test_case "with healthcheck" `Quick
-            test_image_inspect_response_with_healthcheck_json;
-          Alcotest.test_case "without healthcheck" `Quick
-            test_image_inspect_response_without_healthcheck_json;
+          Alcotest.test_case "health check read from Config" `Quick
+            test_image_inspect_healthcheck_from_config;
+          Alcotest.test_case "HEALTHCHECK NONE is no health check" `Quick
+            test_healthcheck_none_is_no_healthcheck;
+          Alcotest.test_case "labels read from Config" `Quick
+            test_image_inspect_labels_from_config;
         ] );
       ( "restart policy",
         [
@@ -721,6 +868,16 @@ let () =
             test_inspect_response_tolerates_unmodelled_leaf_keys;
           Alcotest.test_case "inspect without host config" `Quick
             test_inspect_response_without_host_config_decodes;
+          Alcotest.test_case "inspect decodes the attached networks" `Quick
+            test_inspect_response_decodes_attached_networks;
+          Alcotest.test_case "attached networks round trip" `Quick
+            test_attached_networks_round_trip;
+          Alcotest.test_case "null Networks decodes as none" `Quick
+            test_null_networks_decode_as_none;
+          Alcotest.test_case "default networking config" `Quick
+            test_default_networking_config_names_the_managed_network;
+          Alcotest.test_case "empty-config image decodes" `Quick
+            test_empty_config_image_decodes_as_no_healthcheck;
           Alcotest.test_case "update serialises the policy" `Quick
             test_update_container_serialises_the_restart_policy;
         ] );

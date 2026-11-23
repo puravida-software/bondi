@@ -380,7 +380,6 @@ let test_deploy_payload_includes_logs_flag () =
       registry_pass = service.registry_pass;
       force_traefik_redeploy = None;
       cron_jobs = None;
-      drain_grace_period = None;
       deployment_strategy = None;
       health_timeout = None;
       poll_interval = None;
@@ -519,6 +518,35 @@ let test_payload_treats_empty_volumes_as_none () =
   check string "an empty list is sent as no list"
     (Yojson.Safe.to_string (service_payload_json None))
     (Yojson.Safe.to_string (service_payload_json (Some [])))
+
+(* deploy_payload drain_grace_period
+
+   The manifest still parses the field, and the payload never carries it: no
+   strategy waits on it any more, and every orchestrator a deploy can reach
+   reads its absence. The fixture declares it, so the omission is the
+   builder's and not the manifest's. *)
+let test_payload_omits_drain_grace_period () =
+  let config =
+    mk_config
+      ~user_service:
+        {
+          (mk_service "web") with
+          servers = [ payload_server ];
+          drain_grace_period = Some 5;
+        }
+      ()
+  in
+  let keys =
+    wire_keys
+      (composed
+       @@ Deploy.payload_for config
+            ~deployments:[ ("web", "v1") ]
+            ~force_traefik_redeploy:false payload_server None
+      |> Deploy.deploy_payload_to_yojson)
+  in
+  check bool "the payload is the service's" true (List.mem "service_name" keys);
+  check bool "no drain_grace_period key at all" false
+    (List.mem "drain_grace_period" keys)
 
 (* version_gate *)
 
@@ -1282,6 +1310,37 @@ let test_a_declared_api_token_reaches_deploys_output () =
   check (list string) "a configuration declaring neither says nothing" []
     (Deploy.deprecation_notices (Client_fixtures.mk_config ()))
 
+(* A service that still sets [drain_grace_period] deploys, and is told the
+   setting is ignored. Both arms are the same service, differing only in the
+   field, so the silence of the second is the field's and not a service the
+   notices never look at. *)
+let test_drain_grace_period_notice () =
+  let service drain_grace_period =
+    Client_fixtures.mk_config
+      ~user_service:{ (mk_service "web") with drain_grace_period }
+      ()
+  in
+  (match Deploy.deprecation_notices (service (Some 5)) with
+  | [ notice ] ->
+      check bool
+        ("the notice names the field: " ^ notice)
+        true
+        (Bondi_common.String_utils.contains ~needle:"service.drain_grace_period"
+           notice);
+      check bool
+        ("the notice says it is ignored: " ^ notice)
+        true
+        (Bondi_common.String_utils.contains ~needle:"ignored" notice);
+      check bool
+        ("the notice says what to do: " ^ notice)
+        true
+        (Bondi_common.String_utils.contains ~needle:"Remove" notice)
+  | notices ->
+      failf "expected one notice, got %d: [%s]" (List.length notices)
+        (String.concat " | " notices));
+  check (list string) "a service without the field says nothing" []
+    (Deploy.deprecation_notices (service None))
+
 let () =
   run "Deploy_helpers"
     [
@@ -1378,6 +1437,8 @@ let () =
             test_payload_carries_volumes_when_declared;
           test_case "treats an empty volumes list as none" `Quick
             test_payload_treats_empty_volumes_as_none;
+          test_case "omits drain_grace_period even when declared" `Quick
+            test_payload_omits_drain_grace_period;
           test_case "omits the certificate server when none is named" `Quick
             test_payload_omits_absent_ca_server;
           test_case "carries the certificate server when named" `Quick
@@ -1387,6 +1448,8 @@ let () =
         [
           test_case "a declared api_token reaches deploy's output" `Quick
             test_a_declared_api_token_reaches_deploys_output;
+          test_case "a declared drain_grace_period is said to be ignored" `Quick
+            test_drain_grace_period_notice;
         ] );
       ( "the exec a deploy runs",
         [

@@ -30,3 +30,36 @@ let messages (server : Config_file.bondi_server) =
         ]
   in
   binding @ token
+
+(* The same rule as above: every field of the service is named, so one added to
+   the record later is a compile error here rather than a field nobody asked
+   about. *)
+let service_messages (service : Config_file.user_service) =
+  let {
+    Config_file.name = _;
+    image = _;
+    port = _;
+    registry_user = _;
+    registry_pass = _;
+    env_vars = _;
+    servers = _;
+    drain_grace_period;
+    deployment_strategy = _;
+    health_timeout = _;
+    poll_interval = _;
+    logs = _;
+    volumes = _;
+  } =
+    service
+  in
+  match drain_grace_period with
+  | None -> []
+  | Some seconds ->
+      [
+        Printf.sprintf
+          "service.drain_grace_period is set to %d and is ignored: a \
+           blue-green deploy stops the old container while it is still \
+           attached to the network, and no longer waits for it to drain. \
+           Remove it from bondi.yaml."
+          seconds;
+      ]

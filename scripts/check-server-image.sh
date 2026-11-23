@@ -10,10 +10,11 @@
 # because a subcommand that works under `dune exec` and not in the image is a
 # subcommand nobody can call.
 #
-# Fifteen assertions. The first seven are reached with `docker exec` into a
+# Twenty-one assertions. The first seven are reached with `docker exec` into a
 # container started from the image passed in by the exact command the client
-# produces; the eighth to thirteenth, and 11a, are deploys sent through that same
-# container and judged from outside it, by container id; the fourteenth is asked from outside,
+# produces; 7a and the eighth to thirteenth, with 9a, 9b, 11a, 12a, 12b and 13a, are deploys
+# sent through that same container and judged from outside it, by container id;
+# the fourteenth is asked from outside,
 # because stopping a container is not a thing the container can be asked to do
 # from within it:
 #
@@ -35,7 +36,14 @@
 #      `BONDI_CHECK_TLS_HANDSHAKE` is set, and prints a `skipped:` line naming
 #      that variable when it is not. Both release workflows set it at the
 #      `just check-server-image` step, so nothing CI asserts is lost.
-#   8. a `simple` deploy, `arm_simple` in `deploy-arms.sh`. A service is deployed
+#  7a. a deploy onto a fresh box, `arm_blue_green_fresh` in `deploy-arms.sh`, run
+#      before the fixture makes its network and Traefik, and asserting both
+#      absent first: an image that declares a health check, deployed with no
+#      strategy named, deploys blue-green; the server creates the network and a
+#      Traefik, that Traefik is issued the host's certificate by this run's
+#      Pebble, and a request through it is answered by the new container, by
+#      id. The arm then removes what the deploy created.
+#   8. a `simple` deploy, `arm_simple`. A service is deployed
 #      at one tag and then at the next, into a network, a Traefik and a local
 #      registry this script starts itself and tears down after: the new
 #      container runs at the new tag, the old container is gone, and a request
@@ -48,6 +56,14 @@
 #      repository filter has to match to remove anything there.
 #   9. a `blue-green` deploy, `arm_blue_green`, of an image that declares a
 #      health check: the same three outcomes, asked the same way.
+#  9a. a first `blue-green` deploy of an image whose health check never passes,
+#      `arm_blue_green_first_fails`: it exits 1 naming the container unhealthy,
+#      and no container of the service remains, under its name or the
+#      temporary one.
+#  9b. with a service serving, a `blue-green` deploy of that image,
+#      `arm_blue_green_new_fails`: it exits 1, the container it started beside
+#      the serving one is gone, and the serving one, by id, still runs and
+#      still answers.
 #  10. two `simple` deploys side by side, `arm_two_services`: two services with
 #      different names and hosts on the one Traefik, each host's request
 #      answered by its own service's container, asked by container id.
@@ -64,29 +80,50 @@
 #      `arm_traefik_pull_fails`: it exits 1 naming that image, and the running
 #      Traefik and the service's container, each by id, still run, and the
 #      service still answers through that Traefik.
+# 12a. a `blue-green` swap under load, `arm_blue_green_swap`, of the drain workload
+#      (`drain/app.py`), which on SIGTERM closes its listener, finishes the
+#      requests it holds, then makes a DNS lookup and a round trip to a database
+#      off the network: with a request held by the old container, an open-loop
+#      stream through Traefik at 50 a second, of at least 600 requests, runs from
+#      before the deploy until after it. It fails if more than 1 in 100 requests
+#      fail, if the held request is not answered after SIGTERM with its database
+#      round trip done, if either shutdown probe fails, or if the old container's
+#      exit code, read from its `die` event, is 137 rather than 0.
+# 12b. uploads of known length and digest across the same kind of swap,
+#      `arm_blue_green_upload`: each is answered 2xx with a backend's record of
+#      its body equal in length and sha256 to what was sent, or fails visibly; no
+#      backend records a short body as complete, none receives an upload twice,
+#      and at least one upload was in flight to the old container at its SIGTERM.
 #  13. a deploy asking for another Traefik image, `arm_traefik_replaced`, run
-#      last: the gate's Traefik is gone, by id, and one the server created runs
+#      second to last: the gate's Traefik is gone, by id, and one the server created runs
 #      the asked-for image and answers for the service deployed with it. The
 #      deploy names Pebble as the certificate server, and the certificate that
 #      Traefik serves for the service's host was issued by this run's Pebble.
 #      That Traefik is the gate's copy, which logs at DEBUG, and its log names
 #      Pebble's directory and no Let's Encrypt host. The issuer check shows Pebble
 #      was used; only the log can show Let's Encrypt was not asked.
+# 13a. the same under `blue-green`, `arm_blue_green_traefik_replaced`, run last:
+#      a deploy asking for a Traefik image other than the one running replaces
+#      it, by id, and a second deploy asking for the same image with a forced
+#      Traefik redeploy replaces it again with another id; the service answers
+#      through each.
 #
 #      Every deploy names its image as `localhost:<port>/<name>:<tag>`, a
 #      reference with a registry port. Before any runs, the script refuses --
 #      fails, rather than skipping -- on an engine that already holds the
-#      network a deploy attaches to, any container whose image contains
-#      `traefik`, anything on host port 80, 443 or either registry's, or anything
+#      network a deploy attaches to, a container under Traefik's name, any
+#      container whose image contains `traefik`, anything on host port 80, 443
+#      or either registry's, or anything
 #      at the host path a Traefik the server creates binds its certificate
 #      store from, naming every holder and removing nothing. A deploy here would
-#      adopt the first two, so on a box running a real deployment this gate
+#      adopt the network and the container under Traefik's name, so on a box
+#      running a real deployment this gate
 #      stops there. Otherwise the fixture makes that certificate store, empty
 #      and of mode 600, and teardown removes it, with only the directories this
 #      run made for it, and asserts the host's /etc is as it found it. The
-#      fixture also runs Pebble, an ACME test server, on its network, and
-#      pushes a copy of the pinned Traefik that trusts Pebble at two tags,
-#      which assertions 12 and 13 ask a deploy for.
+#      fixture also runs Pebble, an ACME test server, which joins its network,
+#      and pushes a copy of the pinned Traefik that trusts Pebble at two tags,
+#      which assertions 7a, 12, 13 and 13a ask a deploy for.
 #
 # then a second container, started by the command the client produces for a
 # deployment that configures cron, which carries `--user root` and the spool
@@ -106,23 +143,32 @@
 # What this enumeration does not cover, named so its completeness is not read as
 # wider than it is:
 #
-#   - `deploy` given what a production deploy carries and assertions 8 to 13
+#   - `deploy` given what a production deploy carries and assertions 7a to 13a
 #     withhold. Registry credentials reach the engine for one arm only, 11a, from a
 #     registry the gate starts on loopback: a pull from Docker Hub with them, and
 #     a header naming a registry other than `localhost:<port>`, are not reached. No Let's Encrypt order:
-#     through assertion 12 the gate's Traefik defines no resolver, so a router
-#     is served with Traefik's default certificate, and the Traefik assertion 13
-#     has a deploy create orders from Pebble. A gate run on every build must not
+#     from assertion 8 through 12 the gate's Traefik defines no resolver, so a
+#     router is served with Traefik's default certificate, and every Traefik
+#     assertions 7a, 13 and 13a have a deploy create orders from Pebble. A gate run on every build must not
 #     drive a Let's Encrypt order, so a Traefik with no certificate server set,
 #     which orders from Let's Encrypt, is never created here. That Traefik also
 #     runs from the gate's copy of the image, which trusts Pebble and turns off
 #     Traefik's version check, so the image a production deploy names is not
 #     the one run. And every arm deploys through the container the no-cron
 #     command starts, never the cron one.
-#   - a deploy that fails after its pull: a health check that never passes, a
-#     container that will not start. The failures the arms assert are the
-#     missing tag in assertion 8, the missing layer in assertion 11 and the
-#     missing Traefik tag in assertion 12, all failed pulls.
+#   - the swap's shutdown probes as a production service makes them. The DNS
+#     lookup 12a asks for is of a name Docker's resolver on the network answers,
+#     not of a public name forwarded to the host's resolvers, so the gate sends
+#     no query to a third party; and its database is an echo the gate runs on
+#     the engine's host. Nor does 12a hold the stream to zero loss: requests
+#     dialled to the old container's address between its exit and Traefik
+#     dropping it wait out Traefik's dial timeout, and the arm counts them.
+#   - a deploy that fails after its pull other than by a health check that
+#     never passes under `blue-green`, which assertions 9a and 9b reach: a
+#     container that will not start, under either strategy. The other failures
+#     the arms assert are the missing tag in assertion 8, the missing layer in
+#     assertion 11 and the missing Traefik tag in assertion 12, all failed
+#     pulls.
 #   - that `status` reports the job assertion 6 ran. It does not and cannot:
 #     `status` lists cron jobs from the Bondi section of the crontab, and a job
 #     started by `run` writes no crontab entry. Manufacturing one would mean
@@ -143,12 +189,14 @@
 #     job container on the engine before either runs, and this script pulls it:
 #     `run` creates a container through the Engine API, which -- unlike the
 #     `docker run` CLI -- does not pull a missing image but answers 404 [observed
-#     against Docker Engine 29.8.0 on 2026-09-13]. Assertions 8 to 13 need four
+#     against Docker Engine 29.8.0 on 2026-09-13]. Assertions 7a to 13a need five
 #     more, each pinned by digest and pulled unless the engine already holds
 #     it: `registry:2` for the local registry, `traefik:v3.6.8` for the gate's
 #     Traefik, `busybox:1.37.0`, which is the workload's base, the probe that
 #     sends requests through that Traefik and the container that reads and
-#     writes the host's certificate store, and Pebble. A registry that
+#     writes the host's certificate store, Pebble, and `python:3-alpine`, the
+#     base of the drain workload and of the clients assertions 12a and 12b send
+#     their requests from. A registry that
 #     rate-limits or refuses fails this gate, and nothing here can tell that
 #     apart from the image under test being broken.
 #
@@ -834,8 +882,14 @@ esac
 
 echo "==> the deploy fixture: what this engine already holds"
 deploy_fixture_preconditions
-echo "==> the deploy fixture: a registry, workload images, $fixture_network and $fixture_traefik"
+echo "==> the deploy fixture: a registry, workload images and Pebble"
 deploy_fixture_up
+echo "==> $image: ${#fresh_box_arms[@]} deploy arm(s) on an engine with no $fixture_network and no $fixture_traefik"
+for arm in "${fresh_box_arms[@]}"; do
+    "$arm"
+done
+echo "==> the deploy fixture: $fixture_network, $fixture_traefik, and Pebble on $fixture_network"
+deploy_fixture_proxy_up
 echo "==> $image: ${#deploy_arms[@]} deploy arms, on the command a client with no cron jobs starts"
 for arm in "${deploy_arms[@]}"; do
     "$arm"

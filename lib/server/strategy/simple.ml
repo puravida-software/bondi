@@ -86,6 +86,19 @@ type cron_job = {
 }
 [@@deriving yojson]
 
+(* How many times a service router sends a request: the first try and the
+   resends. A resend goes to a backend that may be the one that just stopped, and
+   the Traefik Bondi creates abandons a dial to it after 1 s
+   ([Traefik.dial_timeout_flag]), so each lost try costs about 1 s.
+   [observed -- 2026-11-23, Traefik v3.6.8, Docker Engine 29.10.0, Step B of the
+   swap measurement, 1 s dial timeout on the gate's Traefik: 2 attempts lost
+   59 of 8593 swap requests (0.69 %, 1 of 10 runs over 1 in 100); 3 attempts
+   22 of 8378 (0.26 %, 0 of 10 over); 4 attempts 10 of 8355 (0.12 %, 0 of 10
+   over). At 4 attempts the longest exhausted request took 4.006 s before its
+   504, and the rescued ones a median of 1.046 s, at most 3.048 s.] Feature
+   0041, NFR-1. *)
+let retry_attempts = "4"
+
 type deploy_input = {
   service_name : service_name option; [@default None]
   image : service_image option; [@default None]
@@ -99,6 +112,8 @@ type deploy_input = {
   traefik_acme_ca_server : traefik_acme_ca_server option; [@default None]
   force_traefik_redeploy : bool option; [@default None]
   cron_jobs : cron_job list option; [@default None]
+  (* Read nowhere. Kept because the decode is strict, and an older client still
+     sends it: dropping it would refuse every deploy such a client makes. *)
   drain_grace_period : float option; [@default None]
   deployment_strategy : string option; [@default None]
   health_timeout : float option; [@default None]
@@ -108,18 +123,11 @@ type deploy_input = {
 }
 [@@deriving yojson]
 
-type deploy_context = {
-  current_traefik : Docker.Client.container option;
-  current_workload : Docker.Client.container option;
-}
+(* The workload alone: the proxy is converged by the deploy, ahead of this
+   strategy and of every other. *)
+type deploy_context = { current_workload : Docker.Client.container option }
 
 type action =
-  | CreateNetwork of { network_name : string }
-  | EnsureTraefik of {
-      domain_name : string;
-      acme_email : string;
-      traefik_config : Docker.Traefik.docker_config;
-    }
   | StopAndRemoveContainer of Docker.Client.container
   | PullImage of { image : Image_reference.t; with_auth : bool }
   | RunWorkload of {
@@ -133,12 +141,6 @@ type action =
 (* Pure helpers                                                              *)
 (* ------------------------------------------------------------------------- *)
 
-let default_networking_config : Docker.Client.networking_config =
-  let endpoint : Docker.Client.endpoint_config =
-    { aliases = None; ipv4_address = None }
-  in
-  { endpoints_config = Some [ (Bondi_common.Defaults.network_name, endpoint) ] }
-
 let env_vars_to_list env_vars =
   List.map (fun (key, value) -> key ^ "=" ^ value) env_vars
 
@@ -151,6 +153,14 @@ let service_image_reference image =
   | Some _, _
   | None, Some _ ->
       Image_reference.to_string image
+
+(** The label naming the middlewares of the service's router. Bondi writes it on
+    every service container, so it is also the key a deploy refuses to find
+    declared by the image itself. *)
+let router_middlewares_label name =
+  "traefik.http.routers."
+  ^ Bondi_common.Router_name.to_string name
+  ^ ".middlewares"
 
 (** The service's name, as checked, with the container config built for it. The
     name comes back with the config so that a caller needing both holds one that
@@ -178,6 +188,21 @@ let service_config (input : deploy_input) :
                      router name at decode. *)
                   let name_string = Bondi_common.Router_name.to_string name in
                   let router = "traefik.http.routers." ^ name_string in
+                  (* Each service's router retries a request its old container
+                     refused while exiting, against the one still serving.
+                     A request a backend had read, in full or in part, is not
+                     retried, so none an application received is sent twice
+                     [observed -- 2026-11-22, traefik v3.6.8: a POST read in
+                     full and an upload cut off mid-body each answered 502 with
+                     no retry, and the other backend received nothing]. The
+                     interval
+                     is Traefik v3.6's documented default, 0 (retry at once),
+                     written out so a change of that default changes nothing
+                     here. Named after the service: two services sharing one
+                     name would declare one middleware twice. *)
+                  let retry =
+                    "traefik.http.middlewares." ^ name_string ^ "-retry"
+                  in
                   let labels : string_map =
                     [
                       ("bondi.managed", "true");
@@ -192,6 +217,9 @@ let service_config (input : deploy_input) :
                       (router ^ ".entrypoints", "websecure");
                       (router ^ ".tls", "true");
                       (router ^ ".tls.certresolver", "bondi_resolver");
+                      (router_middlewares_label name, name_string ^ "-retry");
+                      (retry ^ ".retry.attempts", retry_attempts);
+                      (retry ^ ".retry.initialinterval", "0");
                       ( "traefik.http.services." ^ name_string
                         ^ ".loadbalancer.server.port",
                         string_of_int port );
@@ -219,9 +247,6 @@ let service_config (input : deploy_input) :
 
 let gather_context ~client ~net (input : deploy_input) :
     (deploy_context, string) result =
-  let* current_traefik =
-    Docker.Client.get_container_by_image_name client ~net ~image_name:"traefik"
-  in
   let* current_workload =
     match input.service_name with
     | Some name ->
@@ -229,99 +254,11 @@ let gather_context ~client ~net (input : deploy_input) :
           ~container_name:(Bondi_common.Router_name.to_string name)
     | None -> Ok None
   in
-  Ok { current_traefik; current_workload }
+  Ok { current_workload }
 
 (* ------------------------------------------------------------------------- *)
 (* Phase 2: Plan (pure)                                                     *)
 (* ------------------------------------------------------------------------- *)
-
-let should_run_traefik (input : deploy_input) =
-  Option.is_some input.traefik_domain_name
-  && Option.is_some input.traefik_image
-  && Option.is_some input.traefik_acme_email
-
-let should_redeploy_traefik (input : deploy_input)
-    (current_traefik : Docker.Client.container) : bool =
-  let force_redeploy =
-    Option.value ~default:false input.force_traefik_redeploy
-  in
-  if force_redeploy then true
-  else
-    (* The version is compared and the name is not, so a Traefik already running
-       the requested version under another spelling of its name is left alone.
-       A digest is a version as a tag is, so a new pin redeploys. A bare image
-       id parses, as name [sha256] with the hex as its tag, and is compared
-       like any other version, so it redeploys. Only an image that does not
-       parse at all is never redeployed over. *)
-    let same_version a b =
-      Option.equal String.equal (Image_reference.tag a) (Image_reference.tag b)
-      && Option.equal String.equal (Image_reference.digest a)
-           (Image_reference.digest b)
-    in
-    match
-      (input.traefik_image, Image_reference.of_string current_traefik.image)
-    with
-    | None, _ -> false
-    | Some requested, Ok current -> not (same_version current requested)
-    | Some _, Error (Image_reference.Empty | Malformed _) -> false
-
-(* What the plan does about the running Traefik. A replacement carries the
-   container it stops, and keeping one carries nothing, so there is no state
-   that stops a container without deploying a new one. *)
-type traefik_decision =
-  | Traefik_absent
-  | Traefik_replace of Docker.Client.container
-  | Traefik_keep
-
-let traefik_decision input (context : deploy_context) =
-  match context.current_traefik with
-  | None -> Traefik_absent
-  | Some container ->
-      if should_redeploy_traefik input container then Traefik_replace container
-      else Traefik_keep
-
-let traefik_actions (input : deploy_input) (context : deploy_context) :
-    (action list, string) result =
-  if not (should_run_traefik input) then Ok []
-  else
-    let network =
-      CreateNetwork { network_name = Bondi_common.Defaults.network_name }
-    in
-    let deploy ~stop =
-      match
-        ( input.traefik_image,
-          input.traefik_domain_name,
-          input.traefik_acme_email )
-      with
-      | Some image, Some domain_name, Some acme_email ->
-          let traefik_config : Docker.Traefik.config =
-            {
-              network_name = Bondi_common.Defaults.network_name;
-              domain_name;
-              traefik_image = Some image;
-              acme_email;
-              acme_ca_server = input.traefik_acme_ca_server;
-            }
-          in
-          let docker_config = Docker.Traefik.get_docker_config traefik_config in
-          (* The pull comes before the stop, so a Traefik image that cannot be
-             pulled leaves the running proxy in place and serving. *)
-          Ok
-            ((network :: PullImage { image; with_auth = false } :: stop)
-            @ [
-                EnsureTraefik
-                  { domain_name; acme_email; traefik_config = docker_config };
-              ])
-      | None, _, _
-      | _, None, _
-      | _, _, None ->
-          Error "missing required traefik configuration"
-    in
-    match traefik_decision input context with
-    | Traefik_keep -> Ok [ network ]
-    | Traefik_absent -> deploy ~stop:[]
-    | Traefik_replace container ->
-        deploy ~stop:[ StopAndRemoveContainer container ]
 
 let workload_actions (input : deploy_input) (context : deploy_context) :
     (action list, string) result =
@@ -354,75 +291,21 @@ let workload_actions (input : deploy_input) (context : deploy_context) :
                     container_name = Bondi_common.Router_name.to_string name;
                     config = service_cfg;
                     host_config = Workload_host_config.of_volumes input.volumes;
-                    networking_conf = default_networking_config;
+                    networking_conf = Docker.Client.default_networking_config;
                   };
               ]))
 
 let plan (input : deploy_input) (context : deploy_context) :
     (action list, string) result =
-  let* traefik = traefik_actions input context in
-  let* workload = workload_actions input context in
-  Ok (traefik @ workload)
+  workload_actions input context
 
 (* ------------------------------------------------------------------------- *)
 (* Phase 3: Interpreter                                                     *)
 (* ------------------------------------------------------------------------- *)
 
-let wait_for_traefik ~clock ~client ~net ~container_id : (unit, string) result =
-  let max_retries = 30 in
-  let rec loop attempt last_state =
-    if attempt >= max_retries then
-      Error
-        (Printf.sprintf "timeout waiting for Traefik to start, last state: %s"
-           last_state)
-    else
-      let state =
-        Result.map
-          (fun (inspect : Docker.Client.inspect_response) ->
-            inspect.state.status)
-          (Docker.Client.inspect_container client ~net ~clock ~container_id)
-      in
-      match state with
-      | Ok "running" -> Ok ()
-      | Ok "created" ->
-          let* () = Docker.Client.start_container client ~net ~container_id in
-          Eio.Time.sleep clock 1.0;
-          loop (attempt + 1) "created"
-      | Ok "exited" ->
-          let* () = Docker.Client.start_container client ~net ~container_id in
-          Eio.Time.sleep clock 1.0;
-          loop (attempt + 1) "exited"
-      | Ok status ->
-          Eio.Time.sleep clock 1.0;
-          loop (attempt + 1) status
-      | Error msg -> Error msg
-  in
-  loop 0 ""
-
-let interpret ~clock ~client ~net (actions : action list) :
-    (unit, string) result =
+let interpret ~client ~net (actions : action list) : (unit, string) result =
   let rec run = function
     | [] -> Ok ()
-    | CreateNetwork { network_name } :: rest ->
-        let* () =
-          Docker.Client.create_network_if_not_exists client ~net ~network_name
-        in
-        run rest
-    | EnsureTraefik { traefik_config; domain_name = _; acme_email = _ } :: rest
-      ->
-        let opts : Docker.Client.run_image_options =
-          {
-            container_name = Bondi_common.Builtin_container.traefik;
-            config = traefik_config.container_config;
-            host_config = Some traefik_config.host_config;
-            networking_conf = Some default_networking_config;
-          }
-        in
-        let* container_id =
-          Docker.Client.run_image_with_opts client ~net opts
-        in
-        let* () = wait_for_traefik ~clock ~client ~net ~container_id in
-        run rest
     | StopAndRemoveContainer container :: rest ->
         let* () =
           Docker.Client.stop_container client ~net ~container_id:container.id
@@ -457,7 +340,7 @@ let interpret ~clock ~client ~net (actions : action list) :
 (* Entry point                                                               *)
 (* ------------------------------------------------------------------------- *)
 
-let deploy ~clock ~client ~net (input : deploy_input) : (unit, string) result =
+let deploy ~client ~net (input : deploy_input) : (unit, string) result =
   let* context = gather_context ~client ~net input in
   let* actions = plan input context in
-  interpret ~clock ~client ~net actions
+  interpret ~client ~net actions

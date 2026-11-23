@@ -151,6 +151,9 @@ type user_service = {
   registry_pass : string option; [@default None]
   env_vars : string_map;
   servers : server list;
+  (* Parsed and acted on by nothing: a blue-green deploy waits for no drain.
+     Kept because parsing is strict, and said out loud where the configuration
+     is acted on -- see Deprecations. *)
   drain_grace_period : int option; [@default None]
   deployment_strategy : string option; [@default None]
   health_timeout : int option; [@default None]

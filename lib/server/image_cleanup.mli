@@ -76,18 +76,27 @@ val interpret :
     raise converts that into an [Error] inside [remove], or a raise on one
     removal skips the rest. *)
 
+val replaced_images :
+  service_name:string -> Docker.Client.container list -> string list
+(** From a container listing, purely: the image id held by the container named
+    [service_name], then the one held by [<service_name>-new], the colour a
+    blue-green swap starts and an interrupted one completes, then the one held
+    by the container under the proxy's reserved name
+    {!Bondi_common.Builtin_container.traefik}, each when it exists. A container
+    whose image merely mentions Traefik is not the proxy, and its image is not
+    one the deploy replaces. *)
+
 val snapshot_replaced :
   client:Docker.Client.t ->
   net:_ Eio.Net.t ->
   clock:_ Eio.Time.clock ->
   service_name:string ->
   string list
-(** The image ids held at deploy start by the container named [service_name],
-    when it exists, and by the Traefik container, when one exists. Read before
-    the workload moves, because afterwards the replaced containers are gone and
-    so is the record of which images they held.
+(** {!replaced_images} of the box's container listing, at deploy start. Read
+    before the proxy and the workload move, because afterwards the replaced
+    containers are gone and so is the record of which images they held.
 
-    It cannot fail a deploy: the lookups are bounded by one deadline, and a
+    It cannot fail a deploy: the listing is bounded by one deadline, and a
     failure, a timeout or a raised transport exception is written as one
     {!Diagnostics.write} line and answered with [[]], so cleanup goes ahead
     without the replaced images. [Eio.Cancel.Cancelled] propagates. *)

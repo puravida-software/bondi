@@ -20,6 +20,7 @@ The example service throughout this guide is a web API called `my-api`, publishe
 - [2. Deployment Strategies](#2-deployment-strategies)
   - [Simple (default)](#simple-default)
   - [Blue-Green](#blue-green)
+  - [Retried requests](#retried-requests)
 - [3. Cron Jobs](#3-cron-jobs)
 - [4. Alloy (Grafana Cloud Logs)](#4-alloy-grafana-cloud-logs)
 - [5. Managed Containers](#5-managed-containers)
@@ -99,7 +100,7 @@ Key fields:
 | `traefik.domain_name` | Your domain. Traefik will request a TLS certificate from Let's Encrypt and route traffic for both `my-api.example.com` and `www.my-api.example.com`. |
 | `traefik.image` | The Traefik image. An image with no tag pulls `latest`, a moving target, unlike a workload image, which Bondi refuses without a tag or digest. Pin a tag, as in the example above. An empty value is refused, and an image in a private registry is not supported: Traefik is pulled without credentials. |
 | `traefik.acme_email` | Email for Let's Encrypt certificate notifications. |
-| `traefik.acme_ca_server` | Optional. The ACME directory URL Traefik orders its TLS certificates from. Omit it to use Let's Encrypt production. Set it to use another ACME server, for example Let's Encrypt staging on a test box: `https://acme-staging-v02.api.letsencrypt.org/directory`. It must be an absolute `https://` URL that names a host; any other value is refused when `bondi.yaml` is read. A change takes effect when Traefik is redeployed — see [Redeploying Traefik](#redeploying-traefik). Under blue-green, which Bondi also picks for a service with no `deployment_strategy` whose image has a `HEALTHCHECK`, Bondi does not replace Traefik, so a new `acme_ca_server` needs a deploy with `deployment_strategy: simple`, or Traefik removed by hand. |
+| `traefik.acme_ca_server` | Optional. The ACME directory URL Traefik orders its TLS certificates from. Omit it to use Let's Encrypt production. Set it to use another ACME server, for example Let's Encrypt staging on a test box: `https://acme-staging-v02.api.letsencrypt.org/directory`. It must be an absolute `https://` URL that names a host; any other value is refused when `bondi.yaml` is read. A change takes effect when Traefik is redeployed, under either deployment strategy — see [Redeploying Traefik](#redeploying-traefik). |
 | `bondi_server.version` | Version of the bondi-orchestrator image to run on the server. |
 | `servers[].port` | Accepted and ignored — setting it changes nothing. Nothing dials the orchestrator any more; `bondi deploy` and `bondi status` run the server's subcommands inside its container over SSH, and `bondi setup` publishes no host port for any orchestrator it creates — a container an older Bondi created may still publish one until a version bump makes `bondi setup` replace it. The field is still accepted so that a `bondi.yaml` written before that change keeps parsing. Not to be confused with `service.port` above. |
 | `bondi_server.bind_address` | Accepted and ignored — setting it changes nothing, and `bondi setup` and `bondi deploy` each print a line saying so. The orchestrator serves no HTTP, so there is no socket to bind. The field is still accepted so that a `bondi.yaml` written before that change keeps parsing; removal is planned, so remove it from your `bondi.yaml`. |
@@ -289,7 +290,7 @@ The check runs only when the deploy sends volumes. A deploy that names only cron
 
 #### Blue-green: both containers mount the same directory
 
-During a [blue-green](#blue-green) switch, the old container and the new one run side by side until the new one passes its health check and the old one has drained. For that whole time both mount the same host directory. This is intended. Bondi does no locking, and your application owns concurrent access to the data.
+During a [blue-green](#blue-green) switch, the old container and the new one run side by side from the moment the new one starts until the old one has exited after its stop. For that whole time both mount the same host directory. This is intended. Bondi does no locking, and your application owns concurrent access to the data.
 
 An SQLite database in a mounted directory is the classic hazard. For the length of the switch, two versions of your application have the same database open, and the new version may migrate a schema that the old one is still writing to. If your application cannot tolerate that, use the [simple strategy](#simple-default), which stops the old container before it starts the new one.
 
@@ -443,13 +444,13 @@ This shows a table with your service, cron jobs, infrastructure components (orch
 
 The simple strategy is the default. It pulls the new image first, so a failed pull leaves the old container running, then stops the old container and starts the new one. There is a brief period of downtime during the switch.
 
-You do not need to set anything — omitting `deployment_strategy` uses simple.
+Set `deployment_strategy: simple` to use it whatever the image declares. If you omit `deployment_strategy`, Bondi chooses for you after it pulls the image: blue-green when the image's `HEALTHCHECK` runs a command (`CMD` or `CMD-SHELL`), simple otherwise. An image with no `HEALTHCHECK`, or with `HEALTHCHECK NONE`, is deployed with simple.
 
 ### Blue-Green
 
-Blue-green deployments eliminate downtime. Bondi starts the new container alongside the old one, waits for it to pass its health check, then switches Traefik's routing and drains the old container.
+Blue-green deployments avoid the stop-then-start gap of the simple strategy. Bondi starts the new container alongside the old one and waits for it to pass its health check. It then gives Traefik a moment to route to the new container, and stops the old one while it is still on Traefik's network.
 
-> **Important:** Your Docker image must define a `HEALTHCHECK` instruction. Blue-green deployments rely on Docker's health check to decide when the new container is ready.
+> **Important:** Your Docker image must define a `HEALTHCHECK` instruction. Blue-green deployments rely on Docker's health check to decide when the new container is ready. If you set `deployment_strategy: blue-green` for an image without one, the new container never reports `healthy`, so the deploy fails and rolls back once `health_timeout` has passed. Until then Traefik sends it a share of your traffic, because Traefik routes to a container that reports no health status.
 
 Enable it by adding `deployment_strategy: blue-green` to your service:
 
@@ -475,18 +476,23 @@ bondi deploy my-api:v2.0.0
 
 What happens under the hood:
 
-1. A temporary container (`my-api-new`) is started with the new image
+1. A temporary container (`my-api-new`) is started with the new image, on the same network as the old one, so Traefik routes to both
 2. Bondi polls Docker's health check until the container reports `healthy` (or the timeout is reached)
-3. The old container is disconnected from the Traefik network — it stops receiving new traffic
-4. A grace period allows in-flight requests to drain
-5. The old container is stopped and removed
-6. The new container is renamed to `my-api`
+3. Bondi waits 3 seconds, so that Traefik, which applies container changes at most every 2 seconds, is routing to the new container before the old one stops
+4. The old container is stopped and removed. It stays attached to the network until it exits, so it can still resolve names and reach its database while it shuts down. Traefik stops routing to it when it exits
+5. The new container is renamed to `my-api`
 
-If the health check fails or the timeout is reached, Bondi **automatically rolls back** — the new container is stopped and removed, and the old container continues serving traffic.
+Your application should stop accepting new connections when it receives `SIGTERM`, finish the requests it holds, and exit. A request the old container refuses while it shuts down is retried against the new one; see [Retried requests](#retried-requests).
+
+The switch is not lossless. In Bondi's release checks, a steady 50 requests a second through a switch lost 3 to 6 requests in each run of 825 to 875. Those are requests sent to the old container in the moment between its exit and Traefik dropping it.
+
+If the health check fails or the timeout is reached, Bondi **automatically rolls back**: the new container is stopped and removed, the deploy exits non-zero, and the old container continues serving traffic, untouched. On a first deploy, with no old container, the rollback removes the container the deploy started, so a failed first deploy leaves nothing of the service behind. If the rollback itself fails, the error reports both failures.
+
+If a deploy fails after the new container passed its health check, for example while the old one was being stopped, `my-api-new` can be left as the container serving your traffic. The next deploy recognises a running, healthy `my-api-new` on Traefik's network as live. It does not remove it: it first completes the interrupted switch (stops any old `my-api`, renames `my-api-new` to `my-api`), and only after the new image has been pulled. A `my-api-new` that is stopped, unhealthy or off the network is left over from a failed deploy and is removed.
 
 #### Tuning blue-green deployments
 
-Three optional fields let you adjust the behavior:
+Two optional fields let you adjust the behavior:
 
 ```yaml
 service:
@@ -496,14 +502,24 @@ service:
   deployment_strategy: blue-green
   health_timeout: 120       # seconds to wait for healthy (default: 120)
   poll_interval: 1          # seconds between health checks (default: 1)
-  drain_grace_period: 2     # seconds to drain before stopping old container (default: 2)
 ```
 
 | Field | Default | Description |
 |---|---|---|
 | `health_timeout` | `120` | Maximum seconds to wait for the new container to become healthy. If exceeded, Bondi rolls back. |
 | `poll_interval` | `1` | Seconds between health check polls. |
-| `drain_grace_period` | `2` | Seconds to wait after disconnecting the old container from the network, allowing in-flight requests to complete. |
+
+> **Retired:** `drain_grace_period` no longer has any effect. Bondi used to detach the old container from the network and wait this many seconds before stopping it. Detaching it did not take it out of Traefik's routing, and it cut the container off from DNS and its database while it was still serving. The old container is now stopped while still attached, after the fixed 3-second wait described above, which is not configurable. A `bondi.yaml` that still sets the field is ignored for now: `bondi deploy` prints a warning saying so. A later release will refuse the field instead, so remove it from your `bondi.yaml`.
+
+### Retried requests
+
+Every service's Traefik router, under either strategy, uses a retry middleware that Bondi declares on the service's container as `<service name>-retry`. It allows up to 4 attempts and retries at once, with no backoff. When the container Traefik picked refuses the connection, as an old container that has stopped listening does during a switch, Traefik retries the request, and the retry reaches the new container when one is serving. Bondi-created Traefik gives up on a backend that does not answer after a 1 second dial timeout, so each attempt is quick.
+
+This reduces the loss during a switch; it does not remove it. Measured with Traefik v3.6.8 on Docker Engine 29.10.0, 0.12% of requests failed during swaps (10 of 8355 over 10 runs). A request that used all its attempts failed after about 4 seconds with a `504`. Requests that a retry rescued were typically answered in about 1 second, and at most about 3 seconds.
+
+Traefik does not resend a request that reached your application. A request your application read, in whole or in part, and then failed to answer is returned to the client as an error (`502`), not delivered a second time. An upload cut off by a switch therefore either completes or fails visibly. It never reaches your application truncated.
+
+Bondi writes the router's labels itself. An image that declares `traefik.http.routers.<service name>.middlewares` among its own labels is refused: the deploy fails before anything is stopped, and the error names the label and the image. Bondi's label would otherwise replace the image's without a word. Remove the label from the image and deploy again. Other router keys an image declares that Bondi also writes (`rule`, `entrypoints`, `tls`, `tls.certresolver`, the service port, and the `-retry` middleware keys) are not refused: Bondi's labels override them.
 
 ### Old images
 
@@ -1045,7 +1061,9 @@ bondi deploy my-api:v2.0.0 --redeploy-traefik
 
 The `--redeploy-traefik` flag forces Traefik to be stopped and restarted, even if the image version has not changed. Note that you still need to specify a service deploy target.
 
-A changed `acme_email` or `acme_ca_server` takes effect only with this flag, and only when the deploy runs the simple strategy. Under blue-green, which Bondi also picks for a service with no `deployment_strategy` whose image has a `HEALTHCHECK`, Bondi does not replace Traefik, so the flag changes nothing: deploy once with `deployment_strategy: simple`, or remove Traefik by hand. A deploy without it keeps the running Traefik when the image version has not changed, and that Traefik goes on ordering certificates from the server it was started with.
+Every deploy of a service converges Traefik the same way, whichever deployment strategy it runs. Bondi's Traefik is the container named `bondi-traefik`; another container running a Traefik image is never taken for it, replaced or removed. A deploy creates Traefik when no `bondi-traefik` exists, and replaces it when `traefik.image` has changed or this flag is given. The new Traefik image is pulled before the running Traefik is stopped, so a pull that fails leaves the running one serving.
+
+A changed `acme_email` or `acme_ca_server` takes effect only with this flag. A deploy without it keeps the running Traefik when the image version has not changed, and that Traefik goes on ordering certificates from the server it was started with.
 
 ### Full configuration example
 
@@ -1059,7 +1077,6 @@ service:
   deployment_strategy: blue-green
   health_timeout: 120
   poll_interval: 1
-  drain_grace_period: 2
   registry_user: "{{REGISTRY_USER}}"
   registry_pass: "{{REGISTRY_PASS}}"
   env_vars:
@@ -1184,6 +1201,16 @@ Step 3 before step 4 is the part that is easy to get wrong, because step 3 looks
   ```
 
   A deploy that declares no volumes is unaffected by this. Create each host directory before that first deploy too — see [Create the host directory first](#create-the-host-directory-first).
+
+- **A service with no `deployment_strategy` whose image has a `HEALTHCHECK` moves to blue-green on its next deploy.** Two containers of the service run at once during the switch. If they share a volume or an SQLite database, read [Blue-green: both containers mount the same directory](#blue-green-both-containers-mount-the-same-directory) before that deploy, or set `deployment_strategy: simple`.
+
+- **Images that declare `traefik.http.routers.<name>.middlewares` are refused.** Remove the label from the image; see [Retried requests](#retried-requests).
+
+- **Traefik is found by name.** A Traefik container not named `bondi-traefik` is no longer adopted, and the deploy will try to create one, which likely fails on ports 80 and 443. Blue-green deploys also now replace Traefik when `traefik.image` changes.
+
+- **Retries and the dial timeout reach existing setups in two steps.** Bondi-created Traefik now starts with a 1 second dial timeout to backends. An existing Traefik picks it up only through `--redeploy-traefik` or a Traefik image change. Service routers retry up to 4 attempts, applied at each service's next deploy. See [Retried requests](#retried-requests).
+
+- **The first blue-green deploy of each service after upgrading from 0.28.0 or earlier is interrupted once, during the switch.** A service container started by 0.28.0 or earlier declares the service's Traefik router without the [retry middleware](#retried-requests), and the new container declares it with the middleware. While both are running, Traefik sees one router defined two different ways and serves neither, so requests to the service are answered `404` from the moment Traefik adds the healthy new container until the old one exits. Measured with Traefik v3.6.8, that was about 2.3 seconds. The cause goes away with that first deploy: from then on the running container declares the router with the middleware, as each new one does.
 
 - Check that every cron job's `network` is either absent or exactly `bondi-network`, and the same for every managed container's `network`. Any other value now fails before anything is deployed instead of failing at run time — see [Reaching other containers from a cron job](#reaching-other-containers-from-a-cron-job).
 

@@ -2,11 +2,13 @@
     jobs.
 
     This is what acts on a [bondi.yaml]. It plans the cron half of the request,
-    chooses a deployment strategy, pulls what that strategy needs, converges the
-    reverse proxy's restart policy, rolls the workload forward, writes each
-    job's files and the crontab, and then removes the images the deploy left
-    behind. A request that names no service is a cron-only deploy: it plans,
-    writes the cron half, removes the old images, and touches no workload.
+    chooses a deployment strategy, pulls every image the deploy needs, refuses a
+    workload image that declares its router's middlewares, converges the reverse
+    proxy's restart policy and then the proxy itself, whichever strategy is
+    chosen, rolls the workload forward, writes each job's files and the crontab,
+    and then removes the images the deploy left behind. A request that names no
+    service is a cron-only deploy: it plans, writes the cron half, removes the
+    old images, and touches no workload.
 
     The order is not incidental. The cron plan is pure and is refused first, so
     a job declaring a network Bondi does not manage is rejected before the
@@ -52,6 +54,20 @@ type deployment_strategy =
 val string_of_deployment_strategy : deployment_strategy -> string
 (** The wire name of a strategy: ["simple"] or ["blue-green"]. It is what the
     response reports and what a request declares, so the two cannot drift. *)
+
+val auto_strategy : Docker.Client.image_inspect_response -> deployment_strategy
+(** The strategy an image selects when the request declares none, purely from
+    the image's [Config.Healthcheck]. Only a [Test] of [CMD] or [CMD-SHELL] is a
+    health check and selects {!Blue_green}. [HEALTHCHECK NONE], which reports a
+    [Test] of [["NONE"]], selects {!Simple}, as an image with no health check
+    does: blue-green would wait for a health that never comes. *)
+
+val auto_selection :
+  Docker.Client.image_inspect_response -> deployment_strategy * string
+(** {!auto_strategy} with the reason it gives, for the response. A [Test] whose
+    first word is neither a probe, [NONE] nor empty selects {!Simple} under a
+    reason that names the word, and is not reported as the image having no
+    [HEALTHCHECK]. *)
 
 val deployment_strategy_of_string : string -> deployment_strategy option
 (** Read the strategy a request declared. [None] for anything else, which
@@ -126,6 +142,18 @@ val cron_plan :
     the box, so a network created by hand is invisible to it and every remedy
     the message offers is one the operator can apply in [bondi.yaml]. *)
 
+val proxy_plan :
+  Strategy.Simple.deploy_input ->
+  current_traefik:Docker.Client.container option ->
+  Proxy.action list
+(** The reverse proxy's convergence, purely, from the request and the container
+    a lookup by the proxy's name returned. It is the same under every strategy:
+    the proxy is a property of the box, not of how the workload is rolled
+    forward. A request that declares no proxy (no Traefik image, domain and ACME
+    email) plans nothing at all, even on a box running one. Otherwise the plan
+    is [Proxy.plan] of [Proxy.decide]: a proxy that is created or replaced is
+    pulled before anything of it is stopped. *)
+
 (** An image the deploy runs, to be pulled before anything on the box changes.
 *)
 type pull =
@@ -136,32 +164,61 @@ type pull =
       (** Pulled with that job's own registry credentials. *)
 
 val pull_plan :
-  strategy:deployment_strategy ->
   workload_pulled:bool ->
   Strategy.Simple.deploy_input ->
-  Strategy.Simple.deploy_context ->
+  current_traefik:Docker.Client.container option ->
   pull list
 (** Every image the deploy needs, purely. {!deploy} runs the whole list before a
     restart policy is written, a container is stopped, removed or created, or
     the crontab is touched, so a pull that fails leaves the box as it was. The
-    proxy is listed only when the simple strategy will create or replace it, and
-    the workload is left out when [workload_pulled] says choosing the strategy
-    already pulled it. A request with no service names no workload and no proxy.
-*)
+    proxy is listed whenever {!proxy_plan} will create or replace it, whatever
+    the strategy, and the workload is left out when [workload_pulled] says
+    choosing the strategy already pulled it. A request with no service names no
+    workload and no proxy. *)
+
+val image_label_check :
+  Strategy.Simple.deploy_input ->
+  Docker.Client.image_inspect_response ->
+  (unit, Handler_error.t) result
+(** Refuse a service whose image declares, in its own [Config.Labels], the
+    middlewares of the service's router
+    ([traefik.http.routers.<service>.middlewares]), purely, from the pulled
+    image's inspect. Bondi writes that label on the container itself, to give
+    the router its retry middleware, and a label set at create replaces the
+    image's, so the image's middlewares would be dropped without a word. The
+    refusal is [Invalid_request], naming the label and the image: the remedy is
+    the caller's, in the image. Any other label, and a request naming no service
+    or no image, passes. *)
 
 (** One step of a deploy, in the order [deploy] takes them. *)
 type deploy_step =
   | Pull_images  (** Every image from {!pull_plan}; changes nothing. *)
+  | Check_image_labels
+      (** {!image_label_check} on the inspect of the pulled workload image;
+          changes nothing. *)
+  | Validate_workload
+      (** Every refusal the workload can meet, made purely, so a request the
+          workload cannot be built from is refused before the proxy is touched;
+          changes nothing. *)
+  | Gather_workload
+      (** What blue-green plans from, including what is under [<name>-new], read
+          before anything moves; changes nothing. *)
   | Converge_restart_policy
   | Snapshot_replaced
+      (** Record the images the proxy and the workload hold, before either is
+          replaced. *)
+  | Converge_proxy  (** {!proxy_plan}, under every strategy. *)
   | Deploy_workload
   | Apply_cron
   | Clean_up  (** Image removal; last, and cannot fail the deploy. *)
 
 val deploy_steps : has_service:bool -> deploy_step list
 (** The whole deploy's order, purely. {!Pull_images} precedes every step that
-    changes the box, on every strategy; a request with no service has no
-    restart-policy write, snapshot or workload step. *)
+    changes the box, on every strategy, {!Check_image_labels},
+    {!Validate_workload} and {!Gather_workload} follow it ahead of them all, and
+    the proxy converges after the snapshot and before the workload moves. A
+    request with no service has no label check, restart-policy write, snapshot,
+    proxy or workload step. *)
 
 type traefik_policy_context = {
   traefik : Docker.Client.container option;
@@ -175,17 +232,14 @@ type traefik_policy_context = {
     non-compliant, and a deploy must not be blocked on reading one. *)
 
 val traefik_policy_plan :
-  strategy:deployment_strategy ->
-  Strategy.Simple.deploy_input ->
-  traefik_policy_context ->
-  deploy_action list
+  Strategy.Simple.deploy_input -> traefik_policy_context -> deploy_action list
 (** Plan the proxy's restart policy, purely. Nothing is planned when the request
     declares no proxy -- a box running one that the request no longer declares
     is corrected by declaring it again, not by writing to a container the
-    request does not claim -- when the strategy in force is about to replace the
-    proxy anyway, or when the applied policy already matches. The correction is
-    written in place rather than by recreating: rebuilding the proxy to change
-    one field would drop TLS for every site on the box. *)
+    request does not claim -- when {!proxy_plan} is about to replace the proxy
+    anyway, whatever the strategy, or when the applied policy already matches.
+    The correction is written in place rather than by recreating: rebuilding the
+    proxy to change one field would drop TLS for every site on the box. *)
 
 val build_response :
   strategy:deployment_strategy ->
@@ -223,14 +277,14 @@ val deploy :
     rather than passed in because the registry credentials it carries come out
     of the request.
 
-    Of the steps inside it, only the cron plan can answer [Invalid_request]: it
-    is the one that fails on what the caller wrote. Everything after the cron
-    plan is Bondi acting on the caller's behalf, so its failures are
-    [Orchestrator_failure] by construction, and an exception escaping a gather
-    or a strategy is reported as one too rather than escaping into the
-    transport. [Eio.Cancel.Cancelled] is the exception to that: it propagates
-    rather than being classified, because a cancelled fiber that returned a
-    value would break structured concurrency.
+    Of the steps inside it, two can answer [Invalid_request], because they fail
+    on what the caller supplied: the cron plan, and {!image_label_check} on the
+    image the caller built. Everything else is Bondi acting on the caller's
+    behalf, so its failures are [Orchestrator_failure] by construction, and an
+    exception escaping a gather or a strategy is reported as one too rather than
+    escaping into the transport. [Eio.Cancel.Cancelled] is the exception to
+    that: it propagates rather than being classified, because a cancelled fiber
+    that returned a value would break structured concurrency.
 
     The other refusals of what the caller wrote, a body that does not decode and
     an image reference that does not parse, are {!decode_input}'s, made before

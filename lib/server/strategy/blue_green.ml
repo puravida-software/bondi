@@ -1,14 +1,47 @@
-let default_drain_grace_period = 2.0
 let default_poll_interval = 1.0
 let default_health_timeout = 120.0
+
+(** How long the new colour serves beside the old one, once healthy, before the
+    old one is stopped. Traefik applies what its Docker provider sees at most
+    once per providersThrottleDuration, 2 s by default, so the configuration
+    that adds the new container can land up to 2 s after its [healthy] event.
+    Stopped before then, the old container is the only server Traefik knows and
+    refuses everything sent to it, with nothing to retry against. 3 s is that
+    default with a margin. Measured on Docker Engine 29.10.0 with Traefik
+    v3.6.8, in swaps run by hand in this plan's order under a steady 50 requests
+    a second: with no settle 58 of 508 and 72 of 504 failed, with 3 s 3 of 654
+    and 4 of 654; and through this strategy, polling health every quarter
+    second, 57 of 693 with no settle and 5 of 837 with 3 s
+    [observed 2026-11-22]. Neither configurable nor read by the simple strategy,
+    whose stop precedes its new container and has no such window. *)
+let settle_before_stop = 3.0
 
 (* ------------------------------------------------------------------------- *)
 (* Types                                                                     *)
 (* ------------------------------------------------------------------------- *)
 
+(** What gather found under [<name>-new], the name a new colour is started under
+    beside a running workload. A deploy that failed past the health check can
+    leave it as the container Traefik is serving, so it is read before it is
+    touched. *)
+type temp_container =
+  | Absent
+  | Orphan of Docker.Client.container
+      (** Not running, not healthy, or not on the shared network: nothing is
+          served by it, so it is removed before the new colour starts. *)
+  | Live of Docker.Client.container
+      (** Running, healthy and on the shared network: an interrupted swap,
+          completed before the new colour is planned against it. *)
+
+(** What gather read under [<name>-new]: the container and its inspect, kept
+    unclassified so that deciding what it is stays in {!plan}. *)
+type temp_read =
+  | No_temp
+  | Temp of Docker.Client.container * Docker.Client.inspect_response
+
 type blue_green_context = {
   current_workload : Docker.Client.container option;
-  orphaned_new_container : Docker.Client.container option;
+  temp_read : temp_read;
 }
 
 type blue_green_config = {
@@ -20,10 +53,8 @@ type blue_green_config = {
          beside a running workload and the one started on a first deploy
          cannot mount differently. *)
   networking_conf : Docker.Client.networking_config;
-  network_name : string;
   poll_interval : float;
   health_timeout : float;
-  drain_grace_period : float;
 }
 
 type action =
@@ -39,8 +70,9 @@ type action =
       poll_interval : float;
       timeout : float;
     }
-  | DisconnectFromNetwork of { container_id : string; network_name : string }
-  | DrainGracePeriod of { seconds : float }
+  | SettleBeforeStop of { seconds : float }
+      (** A fixed wait, so the proxy routes to the new colour before the old one
+          is stopped. *)
   | StopAndRemoveContainer of { container_id : string }
   | RenameContainer of { container_id : string; new_name : string }
 
@@ -55,62 +87,137 @@ type deploy_plan = {
 
 let ( let* ) = Result.bind
 
+(** Classifies the container found under [<name>-new] from its inspect. Only a
+    container proven to be serving is [Live]: running, reporting [healthy], and
+    attached to [network_name], the network Traefik routes over. Anything short
+    of that proof is [Orphan], including a health word the Engine API does not
+    define, because nothing but a passing check shows it is serving. *)
+let classify_temp_container ~network_name (container : Docker.Client.container)
+    (inspect : Docker.Client.inspect_response) : temp_container =
+  let running =
+    match inspect.state.status with
+    | "running" -> true
+    | _ -> false
+  in
+  let healthy =
+    match inspect.state.health with
+    | Some { status = "healthy"; _ } -> true
+    | Some _
+    | None ->
+        false
+  in
+  let attached =
+    match inspect.network_settings with
+    | Some { networks } -> List.mem network_name networks
+    | None -> false
+  in
+  match (running, healthy, attached) with
+  | true, true, true -> Live container
+  | false, (true | false), (true | false)
+  | true, false, (true | false)
+  | true, true, false ->
+      Orphan container
+
 let plan (config : blue_green_config) (context : blue_green_context) :
     deploy_plan =
-  let cleanup =
-    match context.orphaned_new_container with
-    | Some container ->
-        [ CleanupOrphanedContainer { container_id = container.id } ]
-    | None -> []
+  (* What is under the temp name is settled first. An orphan is removed. A live
+     one is the container serving after a swap that failed past the health
+     check, so that swap is completed (the old workload, if any, stopped while
+     attached, then the live one renamed) and it becomes the workload the new
+     colour replaces. *)
+  let temp_container =
+    match context.temp_read with
+    | No_temp -> Absent
+    | Temp (container, inspect) ->
+        classify_temp_container ~network_name:Bondi_common.Defaults.network_name
+          container inspect
   in
-  let main_actions =
-    match context.current_workload with
+  let settle_temp, workload =
+    match temp_container with
+    | Absent -> ([], context.current_workload)
+    | Orphan container ->
+        ( [ CleanupOrphanedContainer { container_id = container.id } ],
+          context.current_workload )
+    | Live live ->
+        let stop_old =
+          match context.current_workload with
+          | Some old -> [ StopAndRemoveContainer { container_id = old.id } ]
+          | None -> []
+        in
+        ( stop_old
+          @ [
+              RenameContainer
+                { container_id = live.id; new_name = config.container_name };
+            ],
+          Some live )
+  in
+  (* The rollback target is the container each branch starts: beside a
+     workload, the temp name, so the one still serving is left alone; with
+     nothing serving, the service's own name. *)
+  let main_actions, rollback_container_name =
+    match workload with
     | Some workload ->
-        [
-          RunNewContainer
-            {
-              container_name = config.temp_container_name;
-              config = config.config;
-              host_config = config.host_config;
-              networking_conf = config.networking_conf;
-            };
-          WaitForHealthy
-            {
-              container_name = config.temp_container_name;
-              poll_interval = config.poll_interval;
-              timeout = config.health_timeout;
-            };
-          DisconnectFromNetwork
-            { container_id = workload.id; network_name = config.network_name };
-          DrainGracePeriod { seconds = config.drain_grace_period };
-          StopAndRemoveContainer { container_id = workload.id };
-          RenameContainer
-            {
-              container_id = config.temp_container_name;
-              new_name = config.container_name;
-            };
-        ]
+        ( [
+            RunNewContainer
+              {
+                container_name = config.temp_container_name;
+                config = config.config;
+                host_config = config.host_config;
+                networking_conf = config.networking_conf;
+              };
+            WaitForHealthy
+              {
+                container_name = config.temp_container_name;
+                poll_interval = config.poll_interval;
+                timeout = config.health_timeout;
+              };
+            (* Healthy is not yet routed: Traefik may add the new colour up to
+               its throttle later, so the old one serves until then. *)
+            SettleBeforeStop { seconds = settle_before_stop };
+            (* Stopped while still attached to the network: Traefik drops it on
+             its [die] event [observed -- Traefik v3.6.8, engine 29.10.0, the
+             hand-run swap recorded in scripts/deploy-arms.sh], and until then
+             it keeps DNS and its database. Detaching it first reloads nothing
+             in Traefik [assumed -- from the Traefik v3.6.8 source and docs
+             read for feature 0041 FR-4; no run records it] and cuts it off
+             mid-shutdown. *)
+            StopAndRemoveContainer { container_id = workload.id };
+            RenameContainer
+              {
+                container_id = config.temp_container_name;
+                new_name = config.container_name;
+              };
+          ],
+          config.temp_container_name )
     | None ->
-        [
-          RunNewContainer
-            {
-              container_name = config.container_name;
-              config = config.config;
-              host_config = config.host_config;
-              networking_conf = config.networking_conf;
-            };
-          WaitForHealthy
-            {
-              container_name = config.container_name;
-              poll_interval = config.poll_interval;
-              timeout = config.health_timeout;
-            };
-        ]
+        ( [
+            RunNewContainer
+              {
+                container_name = config.container_name;
+                config = config.config;
+                host_config = config.host_config;
+                networking_conf = config.networking_conf;
+              };
+            WaitForHealthy
+              {
+                container_name = config.container_name;
+                poll_interval = config.poll_interval;
+                timeout = config.health_timeout;
+              };
+          ],
+          config.container_name )
   in
-  {
-    success_path = cleanup @ main_actions;
-    rollback_container_name = config.temp_container_name;
-  }
+  { success_path = settle_temp @ main_actions; rollback_container_name }
+
+(** The message a failed health wait answers with, given how the rollback that
+    followed it went. A rollback that failed is reported beside the failure that
+    caused it, so neither is lost; one that succeeded adds nothing. *)
+let failure_after_rollback ~cause (rollback : (unit, string) result) : string =
+  match rollback with
+  | Ok () -> cause
+  | Error rollback_error ->
+      Printf.sprintf "%s; the rollback that followed also failed: %s" cause
+        rollback_error
 
 (* ------------------------------------------------------------------------- *)
 (* Phase 3: Interpreter                                                     *)
@@ -200,19 +307,12 @@ let interpret ~clock ~client ~net (plan : deploy_plan) : (unit, string) result =
             ~timeout
         with
         | Ok () -> run rest
-        | Error msg ->
-            let _rollback_result =
-              rollback ~client ~net
-                ~rollback_container_name:plan.rollback_container_name
-            in
-            Error msg)
-    | DisconnectFromNetwork { container_id; network_name } :: rest ->
-        let* () =
-          Docker.Client.disconnect_from_network client ~net ~container_id
-            ~network_name
-        in
-        run rest
-    | DrainGracePeriod { seconds } :: rest ->
+        | Error cause ->
+            Error
+              (failure_after_rollback ~cause
+                 (rollback ~client ~net
+                    ~rollback_container_name:plan.rollback_container_name)))
+    | SettleBeforeStop { seconds } :: rest ->
         Eio.Time.sleep clock seconds;
         run rest
     | StopAndRemoveContainer { container_id } :: rest ->
@@ -231,16 +331,29 @@ let interpret ~clock ~client ~net (plan : deploy_plan) : (unit, string) result =
 (* Phase 1: Gather context (read-only)                                       *)
 (* ------------------------------------------------------------------------- *)
 
-let gather_context ~client ~net ~container_name ~temp_container_name :
+let gather_context ~clock ~client ~net ~container_name ~temp_container_name :
     (blue_green_context, string) result =
   let* current_workload =
     Docker.Client.get_container_by_name client ~net ~container_name
   in
-  let* orphaned_new_container =
+  let* temp =
     Docker.Client.get_container_by_name client ~net
       ~container_name:temp_container_name
   in
-  Ok { current_workload; orphaned_new_container }
+  (* Read before anything is touched: an inspect that fails stops the deploy
+     here, with nothing moved, rather than guessing what the container is. What
+     it is is decided by [plan]. *)
+  let* temp_read =
+    match temp with
+    | None -> Ok No_temp
+    | Some container ->
+        let* inspect =
+          Docker.Client.inspect_container client ~net ~clock
+            ~container_id:container.id
+        in
+        Ok (Temp (container, inspect))
+  in
+  Ok { current_workload; temp_read }
 
 (* ------------------------------------------------------------------------- *)
 (* Entry point                                                               *)
@@ -258,9 +371,6 @@ let config_of_input (input : Simple.deploy_input) :
   in
   let temp_container_name = container_name ^ "-new" in
   let* _, service_cfg = Simple.service_config input in
-  let drain_grace_period =
-    Option.value ~default:default_drain_grace_period input.drain_grace_period
-  in
   let poll_interval =
     Option.value ~default:default_poll_interval input.poll_interval
   in
@@ -273,19 +383,23 @@ let config_of_input (input : Simple.deploy_input) :
       temp_container_name;
       config = service_cfg;
       host_config = Workload_host_config.of_volumes input.volumes;
-      networking_conf = Simple.default_networking_config;
-      network_name = Bondi_common.Defaults.network_name;
+      networking_conf = Docker.Client.default_networking_config;
       poll_interval;
       health_timeout;
-      drain_grace_period;
     }
 
-let deploy ~clock ~client ~net ~(input : Simple.deploy_input) :
-    (unit, string) result =
+(** Every read the strategy plans from, taken before anything on the box moves
+    and so before the proxy does. The configuration is built here too, so a
+    request the workload cannot be built from is refused ahead of the reads. *)
+let gather ~clock ~client ~net ~(input : Simple.deploy_input) :
+    (blue_green_config * blue_green_context, string) result =
   let* config = config_of_input input in
   let* context =
-    gather_context ~client ~net ~container_name:config.container_name
+    gather_context ~clock ~client ~net ~container_name:config.container_name
       ~temp_container_name:config.temp_container_name
   in
-  let deploy_plan = plan config context in
-  interpret ~clock ~client ~net deploy_plan
+  Ok (config, context)
+
+let deploy ~clock ~client ~net (config : blue_green_config)
+    (context : blue_green_context) : (unit, string) result =
+  interpret ~clock ~client ~net (plan config context)

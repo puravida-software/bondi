@@ -4,7 +4,7 @@ module Pull_stream = Bondi_server__Docker__Pull_stream
    [POST /images/create], saved byte for byte with their [\r\n] line ends; their
    provenance is in [fixtures/README.md]. The path is resolved from the test
    executable rather than the working directory, so the read holds under
-   [dune exec] as well as [dune runtest]. *)
+   [dune runtest], which is what copies the fixtures next to the executable. *)
 let fixture name =
   let path =
     Filename.concat
