@@ -38,6 +38,19 @@ let ca_server_flags = function
         ^ Bondi_common.Acme_ca_server.to_string server;
       ]
 
+(* How long Traefik waits to open a connection to a backend before it gives the
+   attempt up, and the router's retry middleware resends the request. Traefik's
+   default is 30 s, so a request that dialled a backend which had just stopped
+   hung until the client gave up and nothing was retried.
+   [observed -- 2026-11-23, Traefik v3.6.8, Docker Engine 29.10.0, Step A of the
+   swap measurement: with this flag at 1s and 2 attempts, the blue-green swap
+   lost 59 of 8593 requests (0.69 %), against 89 of 10157 (0.88 %) with it
+   unset; the hung requests became dial errors the retry resent.] Together with
+   [Simple.retry_attempts] it bounds a lost request's wait at about 4 s. Feature
+   0041, NFR-1. The swap arm in scripts/deploy-arms.sh reads this line, so the
+   gate's Traefik runs with the flag a Bondi-created one does. *)
+let dial_timeout_flag = "--serversTransport.forwardingTimeouts.dialTimeout=1s"
+
 let docker_cmd ~acme_email ~acme_ca_server =
   [
     "--providers.docker";
@@ -46,6 +59,7 @@ let docker_cmd ~acme_email ~acme_ca_server =
     "--entrypoints.web.http.redirections.entryPoint.to=websecure";
     "--entrypoints.web.http.redirections.entryPoint.scheme=https";
     "--entrypoints.websecure.address=:443";
+    dial_timeout_flag;
     "--certificatesResolvers.bondi_resolver.acme.email=" ^ acme_email;
     "--certificatesResolvers.bondi_resolver.acme.storage=/acme/acme.json";
     "--certificatesResolvers.bondi_resolver.acme.httpchallenge=true";

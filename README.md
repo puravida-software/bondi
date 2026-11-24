@@ -190,7 +190,7 @@ with, and `unknown` where no release built the binary.
 Bondi will eventually support two deployment strategies:
 
 - **Simple**: Pull the new image, stop the old container, and run the new container.
-- **Blue-green (TODO)**: Run the new image in a new container, make it's health check passes, change Traefik's routing to point to the new container, then stop the old container.
+- **Blue-green**: Start the new container, wait until its health check passes, wait a short settle, then stop the old container while it is still attached to the network. Traefik drops it when it exits.
 
 ## Roadmap
 
@@ -213,7 +213,6 @@ Use cases:
     - Traefik
 - [x] Add blue-green deployments for services
 - [ ] Add Alloy support for Grafana Cloud
-- [ ] Add optional automatic rollbacks for blue-green deployments
 - [ ] Allow custom healthchecks in bondi.yaml for images without a built-in HEALTHCHECK
 - [ ] When the cron job finishes, call a service like healthchecks.io
 - [ ] Allow removing a service/cron job

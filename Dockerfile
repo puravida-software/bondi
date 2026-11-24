@@ -35,7 +35,12 @@ WORKDIR /build
 
 # Install system dependencies for building
 USER root
-RUN apk add --no-cache \
+# Observed 2026-11-23: the pinned base ships python3 3.14.10-r1 (via xcb-proto)
+# while the live repository has python3 3.14.10-r2 and a new python3-ndbm
+# 3.14.10-r2 that takes over a file owned by python3-r1. apk installs ndbm
+# before upgrading python3 and aborts, so upgrade python3 first.
+RUN apk add --no-cache --upgrade python3 \
+ && apk add --no-cache \
     linux-headers \
     gmp-dev \
     libev-dev \

@@ -46,7 +46,6 @@ type deploy_payload = {
   registry_pass : string option;
   force_traefik_redeploy : bool option;
   cron_jobs : deploy_cron_job list option;
-  drain_grace_period : float option;
   deployment_strategy : string option;
   health_timeout : float option;
   poll_interval : float option;

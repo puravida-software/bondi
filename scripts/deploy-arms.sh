@@ -39,6 +39,12 @@ busybox_image="busybox@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694b
 # `ghcr.io/letsencrypt/pebble:latest` resolved to on 2026-11-19 [observed, Docker
 # Engine 29.10.0].
 pebble_image="ghcr.io/letsencrypt/pebble@sha256:0c81f05db371f436c97fb894bd6d2ab8fc9c8e2ce40f8bef8a8e15941bcd75ef"
+# Python, the base of the drain workload and of the clients the swap and upload
+# arms send their requests from, because those need a listener closed on
+# SIGTERM, threads and a digest over a body, which busybox cannot give. The
+# digest is the index Docker Hub served for `python:3-alpine` (Python 3.14.7) on
+# 2026-11-22 [observed, Docker Engine 29.10.0].
+python_image="python@sha256:c6ead215bfd31f1e433d968853b7a769989117115b728874824e6c0a27cb96fc"
 
 # The host port the registry is published on, and so the port every workload
 # reference names: a deploy carries `localhost:<port>/<name>:<tag>`, which is the
@@ -111,6 +117,15 @@ acme_path_of() {
     return 1
 }
 
+# The flag a Traefik the server creates is given for how long it dials a backend
+# before it resends the request, taken from the server's source for the reason the
+# names above are: the swap arm measures what a deploy does behind that Traefik,
+# and a second spelling here would measure it behind another. The fixture's own
+# Traefik adds this flag to its command and no other of the server's, since the
+# others (certificates, the redirect, the published ports) do not change how a
+# request reaches a backend.
+dial_timeout_flag="$(spelling_of "$here/../lib/server/docker/traefik.ml" dial_timeout_flag)"
+
 acme_host_path="$(acme_path_of "$here/../lib/server/docker/traefik.ml")"
 # The same three paths relative to /etc, as the probe below is given them: the
 # file, then its directory, then that directory's, so the directories are deepest
@@ -127,30 +142,61 @@ acme_rel_dirs=("${acme_rel%/*}" "${acme_rel%/*/*}")
 # arm's on one Traefik rather than competing with it for one router.
 # `arm_two_services` asserts that directly; every later arm depends on it.
 #
-# `arm_traefik_replaced` runs last, because it has a deploy replace the gate's
-# Traefik with one the server creates: every arm before it asserts through the
-# gate's own.
-deploy_arms=(arm_simple arm_blue_green arm_two_services arm_pull_stream_fails
-    arm_registry_credentials arm_traefik_pull_fails arm_traefik_replaced)
+# `arm_traefik_replaced` runs second to last, because it has a deploy replace the
+# gate's Traefik with one the server creates: every arm before it asserts through
+# the gate's own. `arm_blue_green_traefik_replaced` runs after it, because it
+# asks for a Traefik image other than the one that arm left running.
+#
+# The swap and upload arms run before both, through the gate's Traefik, which
+# defines its routers from container labels alone: the retry middleware they
+# depend on is the one every deploy labels its router with.
+deploy_arms=(arm_simple arm_blue_green arm_blue_green_first_fails
+    arm_blue_green_new_fails arm_two_services arm_pull_stream_fails
+    arm_registry_credentials arm_traefik_pull_fails arm_blue_green_swap
+    arm_blue_green_upload arm_traefik_replaced arm_blue_green_traefik_replaced)
+
+# The arms that run on an engine with neither the network a deploy attaches to
+# nor a Traefik, before the fixture makes either: the registry, the workload
+# images and Pebble are up, and nothing a deploy would adopt is. Each tears down
+# what its deploys created before the fixture's network and Traefik come up.
+fresh_box_arms=(arm_blue_green_fresh)
 
 # The host ports the fixture needs free: 80 and 443, which a Traefik the server
 # creates publishes on every interface, and the two registries'.
 fixture_host_ports=(80 443 "$registry_port" "$auth_registry_port")
 
+# The id of the network of that name, and the empty string when there is none.
+# Listed and matched exactly, rather than asked of `docker network inspect`,
+# whose non-zero exit would not say whether the network is absent or the engine
+# did not answer. A listing that fails is returned explicitly, because this runs
+# inside a command substitution, where `set -e` does not reach, and an empty
+# answer from it would read as an absence.
+network_id_of() {
+    local networks
+    if ! networks="$(docker network ls --no-trunc --format '{{.ID}}\t{{.Name}}')"; then
+        echo "error: the engine did not list its networks" >&2
+        return 1
+    fi
+    printf '%s\n' "$networks" | awk -F '\t' -v name="$1" '$2 == name { print $1 }'
+}
+
 # Refuse, naming what holds it, when the engine already has anything a deploy here
 # would adopt or the registry or a Traefik the server creates would collide with,
 # its host's acme.json included.
-# A deploy attaches to the network by name and adopts any container whose image
-# contains `traefik`, running or not, so either would put an operator's own
-# deployment under this gate's deploys. The check refuses rather than skips: a gate
-# that skipped would report green having asserted nothing.
+# A deploy attaches to the network by name and takes the container under
+# Traefik's name for its proxy, running or not, whatever its image, so either
+# would put an operator's own deployment under this gate's deploys. A container
+# whose image contains `traefik` is refused as well: a deploy does not take it
+# for the proxy, but it is an operator's proxy all the same, and refusing it
+# removes nothing. The check refuses rather than skips: a gate that skipped would
+# report green having asserted nothing.
 #
 # Every holder is named, not only the first, so one run says everything that has to
 # move. Nothing here removes or changes anything, and no docker call it makes has
 # an effect that outlives the run: the one image it may pull is recorded for
 # teardown, and the one container it runs removes itself.
 deploy_fixture_preconditions() {
-    local held networks network_id containers traefik_holders port listener publisher
+    local held network_id containers traefik_holders port listener publisher
     local acme_state dir tool
     held=()
 
@@ -164,22 +210,24 @@ deploy_fixture_preconditions() {
         fi
     done
 
-    # Listed and matched exactly, rather than asked of `docker network inspect`,
-    # whose non-zero exit would not say whether the network is absent or the
-    # engine did not answer. A listing that fails aborts here under `set -e`.
-    networks="$(docker network ls --no-trunc --format '{{.ID}}\t{{.Name}}')"
-    network_id="$(printf '%s\n' "$networks" | awk -F '\t' -v name="$fixture_network" '$2 == name { print $1 }')"
+    network_id="$(network_id_of "$fixture_network")"
     if [ -n "$network_id" ]; then
         held+=("the network $fixture_network exists (id $network_id)")
     fi
 
-    # The image field alone, as the server matches it: a container merely named
-    # after Traefik is not one a deploy would adopt. `--no-trunc` is load-bearing.
-    # Without it the CLI prints a container created from a digest reference with
-    # the image's short id in place of `traefik@sha256:…`, while the Engine API
-    # the server reads returns the reference, so the listing would miss exactly
-    # the holder the server adopts [observed -- 2026-11-16, Docker Engine 29.9.3].
+    # The name exactly, as the server finds its proxy: a container whose name
+    # merely contains Traefik's is not one a deploy would take.
+    # `--no-trunc` is load-bearing for the image match below. Without it the CLI
+    # prints a container created from a digest reference with the image's short
+    # id in place of `traefik@sha256:…`, while the Engine API returns the
+    # reference [observed -- 2026-11-16, Docker Engine 29.9.3].
     containers="$(docker ps --all --no-trunc --format '{{.ID}}\t{{.Names}}\t{{.Image}}')"
+    traefik_holders="$(printf '%s\n' "$containers" | awk -F '\t' -v name="$fixture_traefik" '$2 == name { print $1 " (image " $3 ")" }')"
+    if [ -n "$traefik_holders" ]; then
+        while IFS= read -r line; do
+            held+=("a container named '$fixture_traefik': $line")
+        done <<< "$traefik_holders"
+    fi
     traefik_holders="$(printf '%s\n' "$containers" | awk -F '\t' 'index($3, "traefik") { print $1 " " $2 " (image " $3 ")" }')"
     if [ -n "$traefik_holders" ]; then
         while IFS= read -r line; do
@@ -285,8 +333,25 @@ registry_certs=""
 # registry rather than finding it already here.
 workload_repo="localhost:$registry_port/bondi-check-workload"
 healthcheck_repo="localhost:$registry_port/bondi-check-workload-healthcheck"
+# A third repository, pushed at one tag, whose health check never passes though
+# it serves as the others do: the failed blue-green arms deploy it.
+unhealthy_repo="localhost:$registry_port/bondi-check-workload-unhealthy"
 workload_tags=(v1 v2)
 workload_port=8080
+# The drain workload, pushed at the same two tags, which the swap and upload arms
+# deploy blue-green: `drain/app.py` beside this script, which says what it
+# serves and what it does on SIGTERM. Its health check is a production one
+# rather than the other workloads' one-second check: probed every ten seconds
+# once healthy, and unhealthy only after three failures, so a container that is
+# stopped leaves Traefik on its `die` event, before its health check could fail
+# [observed for this order in a hand-run swap -- 2026-11-22, Traefik v3.6.8: the
+# one event Traefik took for the old container was `die`]. During its start
+# period it is probed every second, so a new one passes within about a second.
+drain_repo="localhost:$registry_port/bondi-check-drain"
+drain_source="$here/drain"
+# The image the clients run from: the echo, the request stream and the uploads,
+# built on the engine and never pushed, because no deploy names it.
+drain_client_image="bondi-check-drain-client:$$"
 
 # The reference a pinned image is pulled under is removed at teardown only when
 # this run pulled it. An image that was on the engine before is someone else's.
@@ -425,37 +490,47 @@ remove_acme_json() {
     echo "ok: $acme_host_path is gone, and the host's /etc is as it was before the run"
 }
 
-# Pebble, on the gate's network only and under the alias its own TLS certificate
-# names, so a container there reaches its directory at `pebble_directory`. It is
-# told to treat every challenge as valid, because nothing outside that network
-# can reach a host the arms name. Up means its directory answers, asked from the
-# network rather than inferred from the container running.
+# Pebble, started on the engine's default bridge before the network a deploy
+# attaches to exists, because the fresh-box arms need it while that network is
+# absent. It joins that network under the alias its own TLS certificate names,
+# through `join_pebble`, each time the network is made, so a container there
+# reaches its directory at `pebble_directory`. It is told to treat every
+# challenge as valid, because nothing outside that network can reach a host the
+# arms name. Up means its directory answers, asked inside Pebble's own network
+# namespace rather than inferred from the container running; that it answers
+# under the alias is what the issuance assertions show.
 fixture_pebble="bondi-check-pebble-$$"
 pebble_directory="https://pebble:14000/dir"
 start_pebble() {
     local pebble_id attempt
     pebble_id="$(docker run --detach --name "$fixture_pebble" --label "$fixture_label" \
-        --network "$fixture_network" --network-alias pebble \
         --env PEBBLE_VA_ALWAYS_VALID=1 \
         "$pebble_image")"
     attempt=0
     while [ "$attempt" -lt "$attempts" ]; do
-        if docker run --rm --label "$fixture_label" --network "$fixture_network" "$busybox_image" \
-            wget -q -T 2 --no-check-certificate -O - "$pebble_directory" \
+        if docker run --rm --label "$fixture_label" --network "container:$fixture_pebble" "$busybox_image" \
+            wget -q -T 2 --no-check-certificate -O - "https://localhost:14000/dir" \
             > "$work/pebble-directory" 2> /dev/null \
             && grep -qF '"newOrder"' "$work/pebble-directory"; then
-            echo "ok: $fixture_pebble ($pebble_id) serves its ACME directory at $pebble_directory on $fixture_network"
+            echo "ok: $fixture_pebble ($pebble_id) serves its ACME directory"
             return 0
         fi
         attempt=$((attempt + 1))
         sleep 1
     done
     {
-        echo "error: $fixture_pebble did not serve its ACME directory at $pebble_directory after ${attempts}s"
+        echo "error: $fixture_pebble did not serve its ACME directory after ${attempts}s"
         echo "--- pebble logs ---"
         docker logs "$pebble_id" 2>&1 || true
     } >&2
     return 1
+}
+
+# Pebble joins the network a deploy attaches to, under the alias its directory
+# is named by.
+join_pebble() {
+    docker network connect --alias pebble "$fixture_network" "$fixture_pebble"
+    echo "ok: $fixture_pebble joined $fixture_network as pebble"
 }
 
 # The gate's copy of the pinned Traefik image, which trusts Pebble's CA: Pebble's
@@ -464,10 +539,9 @@ start_pebble() {
 # 2026-11-19: the unmodified image refused Pebble's directory as signed by an
 # unknown authority, and this copy registered and was issued a certificate]. It
 # bakes in this run's label, so a Traefik a deploy creates from it is removed at
-# teardown. It is pushed under a repository whose name contains `traefik`, because
-# a deploy adopts Traefik by that substring, and at two tags, because a deploy
-# replaces a running Traefik when the version it asks for differs. Both tags are
-# removed from the engine once pushed, so a deploy of either pulls it.
+# teardown. It is pushed at two tags, because a deploy replaces a running Traefik
+# when the version it asks for differs. Both tags are removed from the engine
+# once pushed, so a deploy of either pulls it.
 #
 # The copy also logs at DEBUG, so that the ACME directory it contacts is in its
 # log and `expect_log_lacks_host` has something to read: at the default level,
@@ -642,9 +716,12 @@ push_workload() {
             healthcheck)
                 printf 'HEALTHCHECK --interval=1s --timeout=2s --retries=3 CMD wget -q -O /dev/null http://127.0.0.1:%s/ || exit 1\n' "$workload_port"
                 ;;
+            unhealthy)
+                printf 'HEALTHCHECK --interval=1s --timeout=2s --retries=3 CMD false\n'
+                ;;
             no-healthcheck) : ;;
             *)
-                echo "error: push_workload: expected healthcheck or no-healthcheck, got '$healthcheck'" >&2
+                echo "error: push_workload: expected healthcheck, unhealthy or no-healthcheck, got '$healthcheck'" >&2
                 return 1
                 ;;
         esac
@@ -657,6 +734,44 @@ push_workload() {
     "${push_command[@]}" push --quiet "$reference" > /dev/null
     docker image rm "$reference" > /dev/null
     echo "ok: pushed $reference to the registry, and removed it from the engine"
+}
+
+# One tag of the drain workload, built from `drain/app.py` and pushed as
+# `push_workload` pushes the others. The port it listens on and the one its
+# health check asks are both `workload_port`, the port every deploy names.
+push_drain_workload() {
+    local tag reference dockerfile
+    tag="$1"
+    reference="$drain_repo:$tag"
+    dockerfile="$work/drain-workload.Dockerfile"
+    {
+        printf 'FROM %s\n' "$python_image"
+        printf 'LABEL %s check-server-image.workload-tag=%s\n' "$fixture_label" "$tag"
+        printf 'ENV PORT=%s\n' "$workload_port"
+        printf 'COPY app.py /app.py\n'
+        printf 'HEALTHCHECK --interval=10s --timeout=3s --retries=3 --start-period=30s --start-interval=1s CMD wget -q -O /dev/null http://127.0.0.1:%s/health || exit 1\n' "$workload_port"
+        printf 'CMD ["python", "-u", "/app.py"]\n'
+    } > "$dockerfile"
+    fixture_images+=("$reference")
+    docker build --quiet --tag "$reference" --file "$dockerfile" "$drain_source" > /dev/null
+    docker push --quiet "$reference" > /dev/null
+    docker image rm "$reference" > /dev/null
+    echo "ok: pushed $reference to the registry, and removed it from the engine"
+}
+
+# The clients' image, left on the engine for the arms to run and removed at
+# teardown. It carries the fixture's label, so every container run from it does.
+build_drain_client() {
+    local dockerfile
+    dockerfile="$work/drain-client.Dockerfile"
+    {
+        printf 'FROM %s\n' "$python_image"
+        printf 'LABEL %s\n' "$fixture_label"
+        printf 'COPY echo.py stream.py upload.py /\n'
+    } > "$dockerfile"
+    fixture_images+=("$drain_client_image")
+    docker build --quiet --tag "$drain_client_image" --file "$dockerfile" "$drain_source" > /dev/null
+    echo "ok: built $drain_client_image"
 }
 
 # A request to the registry's HTTP API from this shell, trusting only the
@@ -781,6 +896,7 @@ deploy_fixture_up() {
     pull_pinned "$traefik_image"
     pull_pinned "$busybox_image"
     pull_pinned "$pebble_image"
+    pull_pinned "$python_image"
     create_acme_json
     start_registry
     start_auth_registry
@@ -789,13 +905,65 @@ deploy_fixture_up() {
     for tag in "${workload_tags[@]}"; do
         push_workload "$workload_repo" "$tag" no-healthcheck
         push_workload "$healthcheck_repo" "$tag" healthcheck
+        push_drain_workload "$tag"
     done
+    build_drain_client
+    push_workload "$unhealthy_repo" v1 unhealthy
     push_missing_layer
     build_traefik_copy
+    start_pebble
+}
+
+# The rest of the fixture, once the fresh-box arms have run and torn down what
+# their deploys created: the network, the gate's Traefik, and Pebble on that
+# network.
+deploy_fixture_proxy_up() {
     fixture_network_id="$(docker network create --label "$fixture_label" "$fixture_network")"
     echo "ok: created the network $fixture_network ($fixture_network_id)"
+    require_network_on_its_bridge "$fixture_network_id" || return 1
     start_traefik
-    start_pebble
+    join_pebble
+}
+
+# The network's subnet has to be routed to the network's own bridge. A host VPN
+# client that claims the subnet (GlobalProtect's gpd0 took 172.19.0.0/16 here
+# [observed -- 2026-11-23]) sends the gate's traffic into the VPN: dials to a
+# container on the network then fail or stall for reasons that have nothing to do
+# with the code under check, and the swap arm's request counts are meaningless.
+# One address of the subnet that no container holds (the gateway's next one) is
+# asked of the host's routing table, and the interface it names must be the
+# bridge. Refused before the gate's Traefik starts, naming the subnet and the
+# interface. The fresh-box arms before it create their own network by a deploy,
+# and their requests come from the host's namespace only to the published ports.
+require_network_on_its_bridge() {
+    local id inspected subnet gateway bridge probe route via
+    id="$1"
+    if ! inspected="$(docker network inspect --format '{{(index .IPAM.Config 0).Subnet}} {{(index .IPAM.Config 0).Gateway}} {{index .Options "com.docker.network.bridge.name"}}' "$id")"; then
+        echo "error: the engine did not describe the network $fixture_network ($id)" >&2
+        return 1
+    fi
+    read -r subnet gateway bridge <<< "$inspected"
+    bridge="${bridge:-br-${id:0:12}}"
+    probe="${gateway%.*}.$((${gateway##*.} + 1))"
+    if ! command -v ip > /dev/null; then
+        echo "error: the deploy arms check the route to $subnet with ip, which is not on PATH (install iproute2)" >&2
+        return 1
+    fi
+    if ! route="$(ip route get "$probe")"; then
+        echo "error: ip route get $probe failed, so the route to $fixture_network's subnet $subnet is unknown" >&2
+        return 1
+    fi
+    via="$(sed -n 's/.* dev \([^ ]*\).*/\1/p' <<< "$route" | head -n 1)"
+    if [ "$via" != "$bridge" ]; then
+        {
+            echo "error: the subnet $subnet of $fixture_network is routed through ${via:-no interface}, not through its own bridge $bridge."
+            echo "A VPN or another network owns that range on this host, so a request to a container on it would not reach it."
+            echo "ip route get $probe: $route"
+            echo "Nothing was deployed. Disconnect the VPN, or run on a host where $subnet is free."
+        } >&2
+        return 1
+    fi
+    echo "ok: $subnet is routed through $bridge"
 }
 
 # The gate's own Traefik, under the name the server gives the one it creates. It
@@ -822,7 +990,8 @@ start_traefik() {
         --global.sendanonymoususage=false \
         --providers.docker \
         --providers.docker.exposedbydefault=false \
-        --entrypoints.websecure.address=:443)"
+        --entrypoints.websecure.address=:443 \
+        "$dial_timeout_flag")"
     # Up means routing: an unrouted host answered with Traefik's own 404, which is
     # a status only a listening Traefik gives. A refused connection is not up yet.
     attempt=0
@@ -924,6 +1093,36 @@ expect_gone() {
     echo "ok: $id is gone"
 }
 
+# No container on the engine has any of the names given, asked of a listing that
+# succeeds on a healthy engine, for the reason `expect_gone` asks one. Names are
+# matched exactly, so a container whose name merely contains one is not taken
+# for it. The affirmative half is the caller's: a witness that the same deploy
+# did, or could, put a container under the name.
+expect_no_container_named() {
+    local containers name holder
+    containers="$(docker ps --all --no-trunc --format '{{.ID}}\t{{.Names}}')"
+    for name in "$@"; do
+        holder="$(printf '%s\n' "$containers" | awk -F '\t' -v name="$name" '$2 == name { print $1 }')"
+        if [ -n "$holder" ]; then
+            echo "error: expected no container named $name, and $holder is" >&2
+            return 1
+        fi
+        echo "ok: no container is named $name"
+    done
+}
+
+# No network of that name is on the engine. Its affirmative half is the caller's,
+# as `expect_no_container_named`'s is.
+expect_no_network() {
+    local network_id
+    network_id="$(network_id_of "$1")"
+    if [ -n "$network_id" ]; then
+        echo "error: expected no network named $1, and $network_id is" >&2
+        return 1
+    fi
+    echo "ok: no network is named $1"
+}
+
 # What the engine holds under a reference, asked of the listing the way cleanup's
 # own filter reads it: `docker image ls` names each tag as repository and tag,
 # registry port included. `expect_image_listed` is the affirmative half of
@@ -984,7 +1183,9 @@ expect_served_by() {
 
 # One deploy of a service through `$container`, whose status and streams land
 # where `run_subcommand` leaves them. The payload names the strategy, rather than
-# leaving the server to choose one from whether the image has a health check.
+# leaving the server to choose one from whether the image has a health check,
+# except for a strategy of `auto`, which names none, as a manifest that sets no
+# `deployment_strategy` sends none.
 # Of itself it names no `traefik_image` and no `traefik_acme_email`, so the
 # server adopts the gate's Traefik rather than replacing it, and no registry
 # credential, which only `arm_registry_credentials` sends. Any arguments after the
@@ -1011,8 +1212,12 @@ deploy_service() {
     done
     payload="$work/deploy-$service-${reference##*:}.json"
     {
-        printf '{"service_name": "%s", "image": "%s", "port": %s, "traefik_domain_name": "%s", "deployment_strategy": "%s"' \
-            "$service" "$reference" "$workload_port" "$host" "$strategy"
+        printf '{"service_name": "%s", "image": "%s", "port": %s, "traefik_domain_name": "%s"' \
+            "$service" "$reference" "$workload_port" "$host"
+        case "$strategy" in
+            auto) ;;
+            *) printf ', "deployment_strategy": "%s"' "$strategy" ;;
+        esac
         for member in "$@"; do
             printf ', %s' "$member"
         done
@@ -1081,32 +1286,87 @@ arm_simple() {
 blue_green_service="bondi-check-blue-green-$$"
 blue_green_host="blue-green.check-server-image.invalid"
 
+# The settings the blue-green wait reads, stated rather than left to the server:
+# a health check that never passes fails here in half a minute, not in the
+# server's two.
+blue_green_settings=('"health_timeout": 30.0' '"poll_interval": 1.0')
+
 # The `blue-green` strategy starts the next tag beside the running container, waits
 # for its health check, moves traffic to it and only then removes the old one, so
-# its image is the repository that declares a `HEALTHCHECK`. The settings the wait
-# and the switch read are stated rather than left to the server: a health check
-# that never passes fails here in half a minute, not in the server's two.
+# its image is the repository that declares a `HEALTHCHECK`.
 #
 # The new container is started under a temporary name and renamed once the old one
 # is gone, so the v2 id is read under the service's own name, after the deploy: an
 # id that only the temporary name held would mean the switch never finished.
 arm_blue_green() {
-    local v1 v2 v1_id v2_id settings
+    local v1 v2 v1_id v2_id
     v1="$healthcheck_repo:v1"
     v2="$healthcheck_repo:v2"
-    settings=('"health_timeout": 30.0' '"poll_interval": 1.0' '"drain_grace_period": 2.0')
 
     echo "==> $image: a blue-green deploy of $v1, then of $v2"
-    deploy_service "$blue_green_service" "$v1" "$blue_green_host" blue-green "${settings[@]}"
+    deploy_service "$blue_green_service" "$v1" "$blue_green_host" blue-green "${blue_green_settings[@]}"
     expect_code "deploy $v1" 0
     v1_id="$(container_id_of "$blue_green_service")"
     expect_running_at "$v1_id" "$v1"
-    deploy_service "$blue_green_service" "$v2" "$blue_green_host" blue-green "${settings[@]}"
+    deploy_service "$blue_green_service" "$v2" "$blue_green_host" blue-green "${blue_green_settings[@]}"
     expect_code "deploy $v2" 0
     v2_id="$(container_id_of "$blue_green_service")"
     expect_running_at "$v2_id" "$v2"
     expect_gone "$v1_id"
     expect_served_by "$blue_green_host" "$v2_id"
+}
+
+# The service the failed first deploy arm deploys, named and hosted apart from
+# the other arms' for the reasons the `simple` arm's are.
+first_fails_service="bondi-check-first-fails-$$"
+first_fails_host="first-fails.check-server-image.invalid"
+
+# A first blue-green deploy whose container never passes its health check exits
+# 1 and leaves no container of the service behind, under its own name or the
+# temporary one. With nothing serving, the deploy starts the container under the
+# service's own name, so that is the one its rollback has to remove. The stream
+# naming that container unhealthy is the affirmative half of the absence: the
+# deploy did start it, and the server read its health, so its absence afterwards
+# is a removal and not a container that never was. Exactly exit 1, for the
+# reason the `simple` arm's missing tag is.
+arm_blue_green_first_fails() {
+    local reference
+    reference="$unhealthy_repo:v1"
+
+    echo "==> $image: a first blue-green deploy of $reference, whose health check never passes"
+    expect_no_container_named "$first_fails_service" "$first_fails_service-new"
+    deploy_service "$first_fails_service" "$reference" "$first_fails_host" blue-green "${blue_green_settings[@]}"
+    expect_code "deploy $reference" 1
+    expect_stream_contains "deploy $reference" stderr "container $first_fails_service is unhealthy"
+    expect_no_container_named "$first_fails_service" "$first_fails_service-new"
+}
+
+# The service the failed replacement arm deploys, named and hosted apart from the
+# other arms' for the reasons the `simple` arm's are.
+new_fails_service="bondi-check-new-fails-$$"
+new_fails_host="new-fails.check-server-image.invalid"
+
+# With v1 serving, a blue-green deploy of an image whose health check never
+# passes exits 1 and leaves v1 serving, by the same container id, and the
+# container it started beside v1, under the temporary name, gone. The stream
+# naming that container unhealthy is the affirmative half of its absence.
+arm_blue_green_new_fails() {
+    local v1 failing v1_id
+    v1="$healthcheck_repo:v1"
+    failing="$unhealthy_repo:v1"
+
+    echo "==> $image: a blue-green deploy of $v1, then of $failing, whose health check never passes"
+    deploy_service "$new_fails_service" "$v1" "$new_fails_host" blue-green "${blue_green_settings[@]}"
+    expect_code "deploy $v1" 0
+    v1_id="$(container_id_of "$new_fails_service")"
+    expect_running_at "$v1_id" "$v1"
+    expect_served_by "$new_fails_host" "$v1_id"
+    deploy_service "$new_fails_service" "$failing" "$new_fails_host" blue-green "${blue_green_settings[@]}"
+    expect_code "deploy $failing" 1
+    expect_stream_contains "deploy $failing" stderr "container $new_fails_service-new is unhealthy"
+    expect_running_at "$v1_id" "$v1"
+    expect_served_by "$new_fails_host" "$v1_id"
+    expect_no_container_named "$new_fails_service-new"
 }
 
 # The two services the side-by-side arm deploys, named and hosted apart from each
@@ -1413,6 +1673,481 @@ arm_traefik_pull_fails() {
     expect_served_by "$traefik_pull_fails_host" "$v1_id"
 }
 
+# The database the drain workload reaches, as `host:port`, once the echo is up,
+# and the empty string before.
+drain_echo_address=""
+drain_echo="bondi-check-drain-echo-$$"
+
+# The echo is started off the network a deploy attaches to, on the engine's
+# default bridge, and published on that network's gateway address alone, on a
+# port the engine picks: the drain workload reaches it through the host, as a
+# service reaches a database hosted elsewhere, and a container with no network
+# cannot reach it at all. Up means a round trip from a container on that network
+# came back, which is also what shows the workload's route to it exists. Started
+# once, by whichever arm asks first.
+start_drain_echo() {
+    local gateway published attempt
+    if [ -n "$drain_echo_address" ]; then
+        return 0
+    fi
+    gateway="$(docker network inspect --format '{{range .IPAM.Config}}{{.Gateway}} {{end}}' "$fixture_network" \
+        | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
+    if [ -z "$gateway" ]; then
+        echo "error: $fixture_network has no IPv4 gateway for the drain echo to publish on" >&2
+        return 1
+    fi
+    docker run --detach --name "$drain_echo" --label "$fixture_label" \
+        --publish "$gateway::15432" "$drain_client_image" python -u /echo.py > /dev/null
+    published="$(docker port "$drain_echo" 15432/tcp | head -n 1)"
+    case "$published" in
+        "$gateway":[0-9]*) ;;
+        *)
+            echo "error: the drain echo was published at '$published', expected $gateway:<port>" >&2
+            return 1
+            ;;
+    esac
+    attempt=0
+    while [ "$attempt" -lt "$attempts" ]; do
+        if [ "$(docker run --rm --label "$fixture_label" --network "$fixture_network" "$busybox_image" \
+            sh -c "echo ping | nc -w 2 ${published%:*} ${published##*:}" 2> /dev/null)" = ping ]; then
+            drain_echo_address="$published"
+            echo "ok: the drain echo answers at $published from $fixture_network, off it"
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        sleep 1
+    done
+    echo "error: the drain echo at $published did not answer from $fixture_network after ${attempts}s" >&2
+    docker logs "$drain_echo" >&2 2>&1 || true
+    return 1
+}
+
+# The payload members a drain workload deploy adds: the blue-green settings, and
+# where its database is and which name it looks up on shutdown. The name is the
+# gate's Traefik's, which Docker's resolver on the network answers: a lookup the
+# workload can only make while it has a network, and one that sends no query to
+# a third party's resolver, which a lookup of a public name would.
+#
+# The health wait polls every quarter second rather than the other arms' second,
+# so the server acts on the new container's health as soon after its `healthy`
+# event as it can. Traefik applies what its Docker provider sees at most every
+# two seconds, so the configuration that adds the new container can land up to
+# two seconds after that event; a server that stopped the old container at once
+# would stop the only one Traefik knows. That window is what the settle before
+# the stop covers, and a fast poll is what keeps it open when the settle is
+# missing: with the one-second poll a run with no settle lost 6 of 726 requests
+# and passed [observed -- 2026-11-22, Docker Engine 29.10.0].
+drain_members() {
+    drain_deploy_members=('"health_timeout": 30.0' '"poll_interval": 0.25'
+        "\"env_vars\": {\"DB_HOST\": \"${drain_echo_address%:*}\", \"DB_PORT\": \"${drain_echo_address##*:}\", \"DNS_NAME\": \"$fixture_traefik\"}")
+}
+drain_deploy_members=()
+
+# What the container being replaced says and how it ends, recorded from before the
+# deploy that stops it, because that deploy removes it: its log, followed into
+# `$work/<prefix>-old.log`, which ends when the container is removed, and the
+# exit code its `die` event carries, into `$work/<prefix>-old.die`. The event is
+# followed rather than asked for afterwards, because the engine keeps only its
+# most recent events for a later query and the health checks of every workload on
+# the engine fill that quickly. Each follower is bounded: the log's by the
+# container's removal, which teardown also does, and the event stream's by an
+# `--until` five minutes on, so neither outlives a run that fails between here and
+# `stop_following_old`.
+following_logs_pid=""
+following_events_pid=""
+follow_old() {
+    local id prefix
+    id="$1"
+    prefix="$2"
+    docker logs --follow "$id" > "$work/$prefix-old.log" 2>&1 &
+    following_logs_pid=$!
+    docker events --filter "container=$id" --filter event=die \
+        --format '{{.Actor.Attributes.exitCode}}' --until "$(($(date +%s) + 300))" \
+        > "$work/$prefix-old.die" &
+    following_events_pid=$!
+}
+
+# The log follower ends on its own once the deploy has removed the container; it
+# is given ten seconds to, and stopped after them, in which case the lines it did
+# not read are missing and the assertions on them fail. The event stream is then
+# stopped.
+stop_following_old() {
+    local attempt
+    attempt=0
+    while kill -0 "$following_logs_pid" 2> /dev/null && [ "$attempt" -lt 50 ]; do
+        attempt=$((attempt + 1))
+        sleep 0.2
+    done
+    kill "$following_logs_pid" "$following_events_pid" 2> /dev/null || true
+    wait "$following_logs_pid" "$following_events_pid" 2> /dev/null || true
+}
+
+# The line of the old container's log that has the event, or the empty string.
+# Every line names its event second and its fields as key=value.
+old_line() {
+    awk -v event="$2" '$2 == event' "$work/$1-old.log" | head -n 1
+}
+
+# The old container left on its own: its `die` event carries exit code 0, not
+# the 137 of the SIGKILL the engine sends at the stop timeout, and its log has
+# the line it writes last.
+expect_old_exited_on_its_own() {
+    local prefix code
+    prefix="$1"
+    code="$(cat "$work/$prefix-old.die")"
+    case "$code" in
+        0) ;;
+        137)
+            echo "error: the old container was killed at the stop timeout: its die event carries exit code 137" >&2
+            return 1
+            ;;
+        *)
+            echo "error: expected one die event with exit code 0 for the old container, got '$code'" >&2
+            return 1
+            ;;
+    esac
+    if [ -z "$(old_line "$prefix" stopping)" ]; then
+        echo "error: the old container exited 0 without logging that it was stopping" >&2
+        cat "$work/$prefix-old.log" >&2
+        return 1
+    fi
+    echo "ok: the old container exited 0 on its own after SIGTERM: $(old_line "$prefix" stopping)"
+}
+
+# The service the swap arm deploys, named and hosted apart from the other arms'
+# for the reasons the `simple` arm's are.
+swap_service="bondi-check-swap-$$"
+swap_host="swap.check-server-image.invalid"
+# The request stream's rate and per-request timeout, and how long it runs before
+# the deploy starts and after it returns. The window must hold at least 600
+# requests, so the 1-in-100 bound allows a handful rather than one or two. At 50 a
+# second the ten seconds of margin give 500, and the deploy, its three-second
+# settle included, adds the rest; a window that falls short fails the arm rather
+# than passing it on fewer.
+swap_rate=50
+swap_timeout=15
+swap_lead=5
+swap_tail=5
+swap_minimum_requests=600
+
+# A blue-green swap under a steady stream of requests through Traefik, with a
+# request held in flight by the container being replaced. The drain workload
+# deployed at v1 is replaced by v2. Before that deploy, a slow request is sent to
+# v1 directly, by its address on the network, and is seen to have reached it;
+# the workload holds it until SIGTERM and two seconds more, so it is in flight
+# when the stop arrives, whatever the deploy's timing. An open-loop stream then
+# runs from before the deploy until after it. The arm fails if more than 1 in 100
+# of the stream's requests failed, if the stream sent fewer than 600, if either
+# of v1's shutdown probes (a DNS lookup and a database round trip, made after
+# its requests finished) failed, if the held request did not come back 200 with
+# its round trip after SIGTERM done, or if v1 exited by SIGKILL. That the stream
+# was answered by v1 and by v2 is the affirmative half of its bound: the
+# requests counted crossed the swap.
+arm_blue_green_swap() {
+    local v1 v2 v1_id v2_id short_old short_new old_address slow stream_pid stream_status
+    local summary total failed by_old by_new slow_status slow_body dns db released attempt verdict_failures
+    v1="$drain_repo:v1"
+    v2="$drain_repo:v2"
+    slow="bondi-check-drain-slow-$$"
+
+    echo "==> $image: a blue-green deploy of $v1, then of $v2 under a stream of requests"
+    start_drain_echo
+    drain_members
+    deploy_service "$swap_service" "$v1" "$swap_host" blue-green "${drain_deploy_members[@]}"
+    expect_code "deploy $v1" 0
+    v1_id="$(container_id_of "$swap_service")"
+    expect_running_at "$v1_id" "$v1"
+    expect_served_by "$swap_host" "$v1_id"
+    short_old="${v1_id:0:12}"
+
+    follow_old "$v1_id" swap
+    old_address="$(docker inspect --format "{{(index .NetworkSettings.Networks \"$fixture_network\").IPAddress}}" "$v1_id")"
+    docker run --detach --name "$slow" --label "$fixture_label" --network "$fixture_network" "$busybox_image" \
+        wget -q -T 60 -O - "http://$old_address:$workload_port/slow?s=2" > /dev/null
+    attempt=0
+    while [ -z "$(old_line swap slow-start)" ] && [ "$attempt" -lt 50 ]; do
+        attempt=$((attempt + 1))
+        sleep 0.2
+    done
+    if [ -z "$(old_line swap slow-start)" ]; then
+        echo "error: the slow request did not reach $short_old within 10s" >&2
+        docker logs "$slow" >&2 2>&1 || true
+        return 1
+    fi
+    echo "ok: a slow request is held by $short_old: $(old_line swap slow-start)"
+
+    docker run --rm --name "bondi-check-drain-stream-$$" --label "$fixture_label" --network "$fixture_network" \
+        "$drain_client_image" python -u /stream.py "https://$fixture_traefik/" "$swap_host" "$swap_rate" "$swap_timeout" \
+        > "$work/swap-stream" 2> "$work/swap-stream-stderr" &
+    stream_pid=$!
+    sleep "$swap_lead"
+    deploy_service "$swap_service" "$v2" "$swap_host" blue-green "${drain_deploy_members[@]}"
+    expect_code "deploy $v2" 0
+    sleep "$swap_tail"
+    docker kill --signal TERM "bondi-check-drain-stream-$$" > /dev/null
+    stream_status=0
+    wait "$stream_pid" || stream_status=$?
+    stop_following_old
+    v2_id="$(container_id_of "$swap_service")"
+    expect_running_at "$v2_id" "$v2"
+    expect_gone "$v1_id"
+    short_new="${v2_id:0:12}"
+
+    # Every verdict below is reached and printed before the arm fails, so one run
+    # says everything that went wrong in the swap.
+    verdict_failures=0
+    if [ "$stream_status" != 0 ]; then
+        echo "error: the request stream exited $stream_status" >&2
+        cat "$work/swap-stream-stderr" >&2
+        verdict_failures=$((verdict_failures + 1))
+    fi
+    if ! summary="$(awk -v old="$short_old" -v new="$short_new" '
+        { total++ }
+        $2 < 200 || $2 > 299 { failed++ }
+        $2 >= 200 && $2 <= 299 && $3 == old { by_old++ }
+        $2 >= 200 && $2 <= 299 && $3 == new { by_new++ }
+        END { printf "%d %d %d %d\n", total, failed, by_old, by_new }' "$work/swap-stream")"; then
+        echo "error: the request stream's log could not be summarised" >&2
+        summary="0 0 0 0"
+        verdict_failures=$((verdict_failures + 1))
+    fi
+    read -r total failed by_old by_new <<< "$summary"
+    echo "the stream: $total requests at $swap_rate/s, each failed after ${swap_timeout}s without an answer; $failed failed, $by_old answered by $short_old, $by_new by $short_new"
+    if [ "$failed" -gt 0 ]; then
+        echo "  the requests that failed (started, status, body or error, seconds):"
+        awk '$2 < 200 || $2 > 299 { print "    " $0 }' "$work/swap-stream"
+    fi
+    if [ "$total" -lt "$swap_minimum_requests" ]; then
+        echo "error: the stream sent $total requests, fewer than the $swap_minimum_requests a 1-in-100 bound needs" >&2
+        verdict_failures=$((verdict_failures + 1))
+    fi
+    if [ "$by_old" -eq 0 ] || [ "$by_new" -eq 0 ]; then
+        echo "error: the stream did not cross the swap: $by_old answers from $short_old, $by_new from $short_new" >&2
+        verdict_failures=$((verdict_failures + 1))
+    fi
+    if [ $((failed * 100)) -gt "$total" ]; then
+        echo "error: $failed of $total requests through $fixture_traefik failed during the swap, more than 1 in 100" >&2
+        verdict_failures=$((verdict_failures + 1))
+    else
+        echo "ok: $failed of $total requests failed during the swap, no more than 1 in 100"
+    fi
+
+    if ! slow_status="$(docker wait "$slow")"; then
+        echo "error: the engine did not report how $slow ended" >&2
+        slow_status="unknown"
+        verdict_failures=$((verdict_failures + 1))
+    fi
+    if ! slow_body="$(docker logs "$slow" 2>&1)"; then
+        echo "error: the engine did not return the log of $slow" >&2
+        slow_body=""
+        verdict_failures=$((verdict_failures + 1))
+    fi
+    if ! docker rm "$slow" > /dev/null; then
+        echo "error: the engine did not remove $slow" >&2
+        verdict_failures=$((verdict_failures + 1))
+    fi
+    released="$(old_line swap slow-done)"
+    case "$slow_status:$slow_body:$released" in
+        "0:$short_old slow db_before=ok"*"db_after=ok"*":"*"released_by_sigterm=True db_after=ok"*)
+            echo "ok: the held request came back from $short_old after SIGTERM: $slow_body"
+            ;;
+        *)
+            {
+                echo "error: expected the held request answered 200 by $short_old, its round trip after SIGTERM ok"
+                echo "  wget exited $slow_status with '$slow_body'"
+                echo "  the old container logged '$released'"
+            } >&2
+            verdict_failures=$((verdict_failures + 1))
+            ;;
+    esac
+
+    dns="$(old_line swap shutdown-dns)"
+    db="$(old_line swap shutdown-db)"
+    case "$dns" in
+        *" result=ok:"*) echo "ok: after its requests finished, the old container resolved $fixture_traefik: $dns" ;;
+        *)
+            echo "error: the old container's DNS lookup on shutdown did not succeed: '$dns'" >&2
+            verdict_failures=$((verdict_failures + 1))
+            ;;
+    esac
+    case "$db" in
+        *" result=ok:"*) echo "ok: after its requests finished, the old container reached its database: $db" ;;
+        *)
+            echo "error: the old container's database round trip on shutdown did not succeed: '$db'" >&2
+            verdict_failures=$((verdict_failures + 1))
+            ;;
+    esac
+    if ! expect_old_exited_on_its_own swap; then
+        verdict_failures=$((verdict_failures + 1))
+    fi
+    if [ "$verdict_failures" != 0 ]; then
+        {
+            echo "error: the swap failed $verdict_failures of its checks; the old container's log:"
+            cat "$work/swap-old.log"
+        } >&2
+        return 1
+    fi
+}
+
+# The service the upload arm deploys, named and hosted apart from the other arms'
+# for the reasons the `simple` arm's are.
+upload_service="bondi-check-upload-$$"
+upload_host="upload.check-server-image.invalid"
+# Each upload is 256 KiB paced at 128 KiB a second, so it is in flight for about
+# two seconds, and one starts every quarter second, so about eight are in flight
+# at any moment: the container being replaced holds some of them when it is sent
+# SIGTERM, each with less left to read than its five seconds of grace.
+upload_size=262144
+upload_pace=131072
+upload_interval=0.25
+upload_timeout=15
+
+# The upload verdict, from the backends' logs (the old container's, then the
+# new's) and the uploader's lines, as `ERROR <reason>` lines and one
+# `SUMMARY <sent> <answered 2xx> <matched> <failed visibly> <crossed>` line. An
+# upload and a backend's record of it are joined by the upload's id, never by
+# order. An upload answered 2xx is matched when a backend recorded its body
+# complete, at the length and digest sent; one answered otherwise failed
+# visibly. A record of a complete body at any other length or digest than the
+# one sent, and an id that reached a backend more than once, are errors whatever
+# the upload's answer. An upload crossed the swap when it reached the old
+# container before that container logged SIGTERM and was not recorded before it.
+upload_verdict() {
+    awk -v old_log="$1" -v uploads="$3" '
+        function field(name,    i) {
+            for (i = 3; i <= NF; i++) {
+                if (index($i, name "=") == 1) {
+                    return substr($i, length(name) + 2)
+                }
+            }
+            return ""
+        }
+        FILENAME == uploads {
+            sent[$1] = 1; sent_length[$1] = $2; sent_digest[$1] = $3; status[$1] = $4
+            next
+        }
+        FILENAME == old_log && $2 == "sigterm" { sigterm = 1 }
+        $2 == "upload-start" {
+            id = field("id")
+            starts[id]++
+            if (FILENAME == old_log && !sigterm) { before_sigterm[id] = 1 }
+        }
+        $2 == "upload" {
+            id = field("id")
+            recorded[id] = 1
+            complete[id] = field("complete"); length_read[id] = field("length"); digest_read[id] = field("sha256")
+            if (FILENAME == old_log && !sigterm) { recorded_before_sigterm[id] = 1 }
+        }
+        END {
+            for (id in sent) {
+                total++
+                if (status[id] >= 200 && status[id] <= 299) {
+                    answered++
+                    if (recorded[id] && complete[id] == "True" && length_read[id] == sent_length[id] && digest_read[id] == sent_digest[id]) {
+                        matched++
+                    } else {
+                        printf "ERROR upload %s was answered %s, and no backend recorded its %s bytes whole (recorded: complete=%s length=%s)\n", id, status[id], sent_length[id], complete[id], length_read[id]
+                    }
+                } else {
+                    visible++
+                }
+            }
+            for (id in recorded) {
+                if (complete[id] == "True" && (!(id in sent) || length_read[id] != sent_length[id] || digest_read[id] != sent_digest[id])) {
+                    printf "ERROR a backend recorded upload %s complete at %s bytes, sha256 %s, and %s bytes were sent\n", id, length_read[id], digest_read[id], sent_length[id]
+                }
+            }
+            for (id in starts) {
+                if (starts[id] > 1) { printf "ERROR upload %s reached a backend %d times\n", id, starts[id] }
+                if (before_sigterm[id] && !recorded_before_sigterm[id]) { crossed++ }
+            }
+            printf "SUMMARY %d %d %d %d %d\n", total, answered, matched, visible, crossed
+        }' "$1" "$2" "$3"
+}
+
+# Uploads of known length and digest run through Traefik across a blue-green swap
+# of the drain workload, from v1 to v2. Each one is either answered 2xx with a
+# backend's record of its body equal, in length and digest, to what was sent, or
+# fails visibly; no backend records a short body as complete, and no upload
+# reaches a backend twice. That uploads were matched, and that at least one was
+# in flight to v1 when v1 was sent SIGTERM, are the affirmative halves: the
+# uploads judged crossed the swap.
+arm_blue_green_upload() {
+    local v1 v2 v1_id v2_id short_old uploader_pid uploader_status verdict summary
+    local total answered matched visible crossed verdict_failures
+    v1="$drain_repo:v1"
+    v2="$drain_repo:v2"
+
+    echo "==> $image: a blue-green deploy of $v1, then of $v2 under uploads"
+    start_drain_echo
+    drain_members
+    deploy_service "$upload_service" "$v1" "$upload_host" blue-green "${drain_deploy_members[@]}"
+    expect_code "deploy $v1" 0
+    v1_id="$(container_id_of "$upload_service")"
+    expect_running_at "$v1_id" "$v1"
+    expect_served_by "$upload_host" "$v1_id"
+    short_old="${v1_id:0:12}"
+
+    follow_old "$v1_id" upload
+    docker run --rm --name "bondi-check-drain-upload-$$" --label "$fixture_label" --network "$fixture_network" \
+        "$drain_client_image" python -u /upload.py "$fixture_traefik" "$upload_host" \
+        "$upload_interval" "$upload_size" "$upload_pace" "$upload_timeout" "u$$" \
+        > "$work/uploads" 2> "$work/uploads-stderr" &
+    uploader_pid=$!
+    sleep "$swap_lead"
+    deploy_service "$upload_service" "$v2" "$upload_host" blue-green "${drain_deploy_members[@]}"
+    expect_code "deploy $v2" 0
+    sleep "$swap_tail"
+    docker kill --signal TERM "bondi-check-drain-upload-$$" > /dev/null
+    uploader_status=0
+    wait "$uploader_pid" || uploader_status=$?
+    stop_following_old
+    v2_id="$(container_id_of "$upload_service")"
+    expect_running_at "$v2_id" "$v2"
+    expect_gone "$v1_id"
+    docker logs "$v2_id" > "$work/upload-new.log" 2>&1
+
+    verdict_failures=0
+    if [ "$uploader_status" != 0 ]; then
+        echo "error: the uploader exited $uploader_status" >&2
+        cat "$work/uploads-stderr" >&2
+        verdict_failures=$((verdict_failures + 1))
+    fi
+    verdict="$(upload_verdict "$work/upload-old.log" "$work/upload-new.log" "$work/uploads")"
+    summary="$(printf '%s\n' "$verdict" | sed -n 's/^SUMMARY //p')"
+    if [ -z "$summary" ]; then
+        echo "error: the uploads' verdict carried no SUMMARY line, so nothing here was compared" >&2
+        verdict_failures=$((verdict_failures + 1))
+        summary="0 0 0 0 0"
+    fi
+    read -r total answered matched visible crossed <<< "$summary"
+    echo "the uploads: $total of $upload_size bytes each; $answered answered 2xx, $matched of them recorded whole by a backend; $visible failed visibly; $crossed in flight to $short_old at its SIGTERM"
+    if printf '%s\n' "$verdict" | grep -q '^ERROR '; then
+        printf '%s\n' "$verdict" | sed -n 's/^ERROR /error: /p' >&2
+        verdict_failures=$((verdict_failures + 1))
+    fi
+    if [ "${visible:-0}" -gt 0 ]; then
+        echo "  the uploads that failed visibly (id, length, sha256, status, body or error):"
+        awk '$4 < 200 || $4 > 299 { print "    " $0 }' "$work/uploads"
+    fi
+    if [ "${matched:-0}" -eq 0 ]; then
+        echo "error: no upload was answered 2xx and recorded whole, so nothing here was compared" >&2
+        verdict_failures=$((verdict_failures + 1))
+    fi
+    if [ "${crossed:-0}" -eq 0 ]; then
+        echo "error: no upload was in flight to $short_old when it was sent SIGTERM, so none crossed the swap" >&2
+        verdict_failures=$((verdict_failures + 1))
+    fi
+    if [ "$verdict_failures" != 0 ]; then
+        {
+            echo "error: the uploads failed $verdict_failures of their checks; the old container's log:"
+            cat "$work/upload-old.log"
+        } >&2
+        return 1
+    fi
+    echo "ok: every upload answered 2xx was recorded whole, the rest failed visibly, and none was recorded short"
+}
+
 # The service the Traefik replacement arm deploys, named and hosted apart from
 # the other arms' for the reasons the `simple` arm's are.
 traefik_replaced_service="bondi-check-traefik-replaced-$$"
@@ -1446,6 +2181,158 @@ arm_traefik_replaced() {
     expect_issued_by_pebble "$new_id" "$traefik_replaced_host"
     expect_log_names_host "$new_id" "${pebble_directory#https://}"
     expect_log_lacks_host "$new_id" letsencrypt.org
+}
+
+# The service the blue-green Traefik replacement arm deploys, named and hosted
+# apart from the other arms' for the reasons the `simple` arm's are.
+blue_green_traefik_service="bondi-check-blue-green-traefik-$$"
+blue_green_traefik_host="blue-green-traefik.check-server-image.invalid"
+
+# Under blue-green, the deploy converges Traefik as it does under simple. A
+# deploy asking for a Traefik image other than the one running replaces it: the
+# Traefik `arm_traefik_replaced` left running the copy's second tag, seen
+# running before, is gone, and one running the first tag stands under the same
+# name. A second deploy asking for that same image with a forced redeploy, and
+# nothing else changed, replaces it again: another id, the one before it gone.
+# The service is answered through each Traefik by the container that deploy
+# left serving, so what serves is the Traefik just created.
+arm_blue_green_traefik_replaced() {
+    local v1 copy running old_id first_id second_id v1_id redeployed_id
+    v1="$healthcheck_repo:v1"
+    copy="$traefik_copy_repo:${traefik_copy_tags[0]}"
+    running="$traefik_copy_repo:${traefik_copy_tags[1]}"
+
+    echo "==> $image: a blue-green deploy of $v1 asking for Traefik at $copy, then again with a forced Traefik redeploy"
+    old_id="$(container_id_of "$fixture_traefik")"
+    expect_running_at "$old_id" "$running"
+    traefik_settings "$copy"
+    deploy_service "$blue_green_traefik_service" "$v1" "$blue_green_traefik_host" blue-green \
+        "${blue_green_settings[@]}" "${traefik_members[@]}"
+    expect_code "deploy with Traefik $copy" 0
+    expect_stream_contains "deploy with Traefik $copy" stdout '"strategy":"blue-green"'
+    first_id="$(container_id_of "$fixture_traefik")"
+    expect_running_at "$first_id" "$copy"
+    expect_gone "$old_id"
+    v1_id="$(container_id_of "$blue_green_traefik_service")"
+    expect_running_at "$v1_id" "$v1"
+    expect_served_by "$blue_green_traefik_host" "$v1_id"
+
+    deploy_service "$blue_green_traefik_service" "$v1" "$blue_green_traefik_host" blue-green \
+        "${blue_green_settings[@]}" "${traefik_members[@]}" '"force_traefik_redeploy": true'
+    expect_code "deploy with Traefik $copy, redeployed" 0
+    expect_stream_contains "deploy with Traefik $copy, redeployed" stdout '"strategy":"blue-green"'
+    second_id="$(container_id_of "$fixture_traefik")"
+    expect_running_at "$second_id" "$copy"
+    expect_gone "$first_id"
+    redeployed_id="$(container_id_of "$blue_green_traefik_service")"
+    expect_running_at "$redeployed_id" "$v1"
+    expect_served_by "$blue_green_traefik_host" "$redeployed_id"
+}
+
+# The service the fresh-box arm deploys, named and hosted apart from the other
+# arms' for the reasons the `simple` arm's are.
+fresh_service="bondi-check-fresh-$$"
+fresh_host="fresh.check-server-image.invalid"
+
+# A deploy sent to the orchestrator in the background, with Pebble joined to the
+# network a deploy attaches to as soon as the deploy has made it, and then waited
+# for: its status and streams land where `run_subcommand` leaves them. A fresh
+# box has no such network for Pebble to be on before the deploy, and a Traefik
+# the deploy creates orders a host's certificate only once a router names that
+# host. Under blue-green that is once the new container passes its health check,
+# after the network, the Traefik and the container have all been made, so
+# Pebble is on the network by then [assumed from Traefik's Docker provider,
+# which leaves out a container whose health check has not passed; the order is
+# not observed here]. A Traefik that ordered before Pebble joined would fail the
+# issuance assertion, never pass it.
+#
+# The network is recorded for teardown as soon as it is seen: the preconditions
+# and the arm saw no network of that name before the deploy, so it is the one
+# this run's deploy made. The poll ends when the deploy does.
+deploy_service_joining_pebble() {
+    local deploy_pid network_id
+    rm -f "$work/background-status"
+    (
+        deploy_service "$@"
+        echo "$subcommand_status" > "$work/background-status"
+    ) &
+    deploy_pid=$!
+    while kill -0 "$deploy_pid" 2> /dev/null; do
+        if ! network_id="$(network_id_of "$fixture_network")"; then
+            kill "$deploy_pid" 2> /dev/null || true
+            wait "$deploy_pid" 2> /dev/null || true
+            echo "error: the network could not be looked up while the deploy ran" >&2
+            return 1
+        fi
+        if [ -n "$network_id" ]; then
+            fixture_network_id="$network_id"
+            join_pebble
+            break
+        fi
+        sleep 0.2
+    done
+    # The status is read from the file the subshell wrote, so the wait's own
+    # status is not the deploy's, and under `set -e` it must not end the arm here.
+    wait "$deploy_pid" || true
+    if [ -z "$fixture_network_id" ]; then
+        if ! fixture_network_id="$(network_id_of "$fixture_network")"; then
+            echo "error: the network could not be looked up after the deploy" >&2
+            return 1
+        fi
+    fi
+    if [ ! -s "$work/background-status" ]; then
+        echo "error: the deploy ran in the background and left no status" >&2
+        return 1
+    fi
+    subcommand_status="$(cat "$work/background-status")"
+}
+
+# On an engine with neither the network a deploy attaches to nor a Traefik, an
+# image that declares a health check, deployed with no strategy named, deploys
+# blue-green: the server creates the network and a Traefik, that Traefik orders
+# the host's certificate from the certificate server the deploy named, Pebble,
+# and a request for the host through it is answered by the new container. Both
+# absences are asked before the deploy, and both are present after it, so what
+# stands is what the deploy made. The arm then removes what the deploy made, the
+# images it pulled included, so the network and Traefik the fixture makes next
+# are made on an engine as it found them, and a later deploy of these images
+# pulls them again.
+arm_blue_green_fresh() {
+    local reference copy traefik_id workload_id
+    reference="$healthcheck_repo:v1"
+    copy="$traefik_copy_repo:${traefik_copy_tags[0]}"
+
+    echo "==> $image: a deploy of $reference with no strategy named, on an engine with no $fixture_network and no $fixture_traefik"
+    expect_no_network "$fixture_network"
+    expect_no_container_named "$fixture_traefik" "$fresh_service" "$fresh_service-new"
+    traefik_settings "$copy"
+    deploy_service_joining_pebble "$fresh_service" "$reference" "$fresh_host" auto \
+        "${blue_green_settings[@]}" "${traefik_members[@]}"
+    expect_code "deploy $reference" 0
+    expect_stream_contains "deploy $reference" stdout '"strategy":"blue-green"'
+    if [ -z "$fixture_network_id" ]; then
+        echo "error: expected the deploy to create the network $fixture_network, and there is none" >&2
+        return 1
+    fi
+    echo "ok: the deploy created the network $fixture_network ($fixture_network_id)"
+    traefik_id="$(container_id_of "$fixture_traefik")"
+    expect_running_at "$traefik_id" "$copy"
+    workload_id="$(container_id_of "$fresh_service")"
+    expect_running_at "$workload_id" "$reference"
+    expect_served_by "$fresh_host" "$workload_id"
+    expect_issued_by_pebble "$traefik_id" "$fresh_host"
+
+    echo "==> $image: removing what the deploy of $reference created"
+    docker rm --force "$workload_id" "$traefik_id" > /dev/null
+    expect_gone "$workload_id"
+    expect_gone "$traefik_id"
+    docker network disconnect "$fixture_network" "$fixture_pebble"
+    docker network rm "$fixture_network_id" > /dev/null
+    fixture_network_id=""
+    expect_no_network "$fixture_network"
+    docker image rm "$reference" "$copy" > /dev/null
+    expect_image_absent "$reference"
+    expect_image_absent "$copy"
 }
 
 # Remove what the fixture made: every container carrying this run's label (the

@@ -402,6 +402,57 @@ let test_snapshot_survives_an_unreachable_docker () =
        ~net:(unreachable_net Docker_unreachable)
        ~clock ~service_name:"app")
 
+(* The proxy whose image a deploy may replace is the container under the
+   proxy's reserved name. A container listed ahead of it whose image merely
+   contains "traefik" belongs to someone else, and its image is not recorded as
+   one this deploy replaces. The affirmative arm is that same container under
+   the reserved name, whose image is recorded. *)
+let test_traefik_protected_by_name_not_image () =
+  let container ~names ~image ~image_id =
+    Server_test_helpers.mk_container ~id:image_id ~image ~names ~image_id ()
+  in
+  let foreign ~names =
+    container ~names ~image:"traefik:v2.11" ~image_id:"sha256:foreign"
+  in
+  let proxy =
+    container
+      ~names:[ "/" ^ Bondi_common.Builtin_container.traefik ]
+      ~image:"registry:5000/edge-proxy:v3.3.0" ~image_id:"sha256:proxy"
+  in
+  let service =
+    container ~names:[ "/app" ] ~image:"app:0.37.0" ~image_id:id_0370
+  in
+  check (list string) "the service and the proxy, never the look-alike"
+    [ id_0370; "sha256:proxy" ]
+    (Image_cleanup.replaced_images ~service_name:"app"
+       [ foreign ~names:[ "/someone-elses-proxy" ]; proxy; service ]);
+  check (list string) "the look-alike under the reserved name is the proxy"
+    [ id_0370; "sha256:foreign" ]
+    (Image_cleanup.replaced_images ~service_name:"app"
+       [
+         foreign ~names:[ "/" ^ Bondi_common.Builtin_container.traefik ];
+         service;
+       ])
+
+(* Completing an interrupted blue-green swap promotes the [<name>-new]
+   container, so its image is one the deploy may replace: it is recorded
+   beside the service's and the proxy's. *)
+let test_interrupted_swap_records_the_temp_containers_image () =
+  let container ~names ~image_id =
+    Server_test_helpers.mk_container ~id:image_id ~image:"app:x" ~names
+      ~image_id ()
+  in
+  check (list string) "the service, the temp container, then the proxy"
+    [ id_0370; "sha256:temp"; "sha256:proxy" ]
+    (Image_cleanup.replaced_images ~service_name:"app"
+       [
+         container ~names:[ "/app-new" ] ~image_id:"sha256:temp";
+         container ~names:[ "/app" ] ~image_id:id_0370;
+         container
+           ~names:[ "/" ^ Bondi_common.Builtin_container.traefik ]
+           ~image_id:"sha256:proxy";
+       ])
+
 let () =
   run "image_cleanup"
     [
@@ -450,5 +501,12 @@ let () =
             test_run_propagates_cancellation;
           test_case "snapshot survives an unreachable docker" `Quick
             test_snapshot_survives_an_unreachable_docker;
+        ] );
+      ( "snapshot",
+        [
+          test_case "traefik protected by name, not image" `Quick
+            test_traefik_protected_by_name_not_image;
+          test_case "interrupted swap records the temp container's image" `Quick
+            test_interrupted_swap_records_the_temp_containers_image;
         ] );
     ]

@@ -137,7 +137,13 @@ case "$1" in
         ;;
 esac
 case "$1 $2" in
-    "network ls") cat "$STUB_DIR/networks" ;;
+    "network ls")
+        if [ -e "$STUB_DIR/networks-fail" ]; then
+            echo "Cannot connect to the Docker daemon" >&2
+            exit 1
+        fi
+        cat "$STUB_DIR/networks"
+        ;;
     "ps --all")
         case "$3" in
             # Teardown's listing of the containers that carry this run's label:
@@ -201,7 +207,15 @@ case "$1" in
         esac
         ;;
     version) echo "linux amd64" ;;
-    network | rm | exec | restart) ;;
+    network)
+        case "$2" in
+            inspect)
+                [ ! -e "$STUB_DIR/inspect-fails" ] || { echo "Error: No such network" >&2; exit 1; }
+                cat "$STUB_DIR/network-inspect"
+                ;;
+        esac
+        ;;
+    rm | exec | restart) ;;
     *) echo "stub docker: unexpected invocation: $*" >&2; exit 99 ;;
 esac
 S
@@ -240,6 +254,16 @@ case "$1" in
     *) echo "stub openssl: unexpected invocation: $*" >&2; exit 99 ;;
 esac
 S
+# The host's routing table, answering `ip route get ADDRESS` from `route-answer`,
+# or failing when a case plants `route-fails`.
+cat > "$stubs/ip" <<'S'
+#!/usr/bin/env bash
+echo "$*" >> "$STUB_DIR/ip.log"
+[ "$1 $2" = "route get" ] || { echo "stub ip: unexpected invocation: $*" >&2; exit 99; }
+[ ! -e "$STUB_DIR/route-fails" ] || { echo "RTNETLINK answers: Network is unreachable" >&2; exit 2; }
+cat "$STUB_DIR/route-answer"
+S
+chmod +x "$stubs/ip"
 chmod +x "$stubs/docker" "$stubs/ss" "$stubs/docker-fn" "$stubs/curl" "$stubs/timeout" "$stubs/openssl"
 
 failures=0
@@ -405,13 +429,24 @@ printf 'aaa111\tbridge\nnet999\t%s\n' "$network" > "$scratch/case/networks"
 run_case "the network held is refused" 1 "the network $network exists (id net999)"
 
 new_case
+touch "$scratch/case/networks-fail"
+run_case "an engine that cannot list its networks is refused" 1 "error: the engine did not list its networks"
+
+new_case
 printf 'c1\tweb\tnginx:1\nc2\tedge\ttraefik@sha256:abc\n' > "$scratch/case/containers"
 run_case "a container whose image holds traefik is refused" 1 "a container whose image contains 'traefik': c2 edge (image traefik@sha256:abc)"
 
-# A container merely named after Traefik is not one a deploy adopts.
+# The container under Traefik's name is the proxy a deploy takes, whatever its
+# image.
 new_case
-printf 'c3\ttraefik-notes\tnginx:1\n' > "$scratch/case/containers"
-run_case "a container only named traefik passes" 0 "ok: no $network"
+printf 'c1\tweb\tnginx:1\nc4\t%s\tnginx:1\n' "$traefik" > "$scratch/case/containers"
+run_case "a container under Traefik's name is refused" 1 "a container named '$traefik': c4 (image nginx:1)"
+
+# A container whose name merely contains Traefik's, from an image that does not,
+# is not one a deploy takes.
+new_case
+printf 'c3\t%s-notes\tnginx:1\n' "$traefik" > "$scratch/case/containers"
+run_case "a container only named after traefik passes" 0 "ok: no $network"
 
 # An acme.json already on the host is a certificate store a Traefik there owns:
 # a deploy here would bind it, and teardown would remove it.
@@ -659,5 +694,48 @@ echo "issuer=CN=Pebble Intermediate CA 1a2b3c" > "$scratch/case/served-issuer"
 run_refusal_body "expect_issued_by_pebble passes a certificate this run's Pebble issued" \
     "$issued_body" 0 "was issued by Pebble Intermediate CA 1a2b3c, this run's Pebble"
 relay_removed || fail "expect_issued_by_pebble passes a certificate this run's Pebble issued: the relay was not removed"
+
+# The network's subnet has to be routed through its own bridge. The fake network is
+# 172.30.0.0/16, gateway 172.30.0.1, on a bridge the engine named by option.
+# Every answer is well-formed except the one a case plants.
+new_route_case() {
+    new_fn_case
+    cp "$stubs/ip" "$scratch/case/bin/"
+    echo "172.30.0.0/16 172.30.0.1 br-fixture0001" > "$scratch/case/network-inspect"
+    echo "172.30.0.2 dev br-fixture0001 src 172.30.0.1 uid 1000" > "$scratch/case/route-answer"
+}
+route_body='require_network_on_its_bridge 0123456789abcdef0123'
+
+new_route_case
+run_refusal_body "require_network_on_its_bridge passes a subnet routed through its bridge" \
+    "$route_body" 0 "ok: 172.30.0.0/16 is routed through br-fixture0001"
+grep -qxF 'route get 172.30.0.2' "$scratch/case/ip.log" \
+    || fail "require_network_on_its_bridge passes: the route was not asked for an address of the subnet no container holds: $(cat "$scratch/case/ip.log")"
+
+new_route_case
+echo "172.30.0.2 dev gpd0 src 10.1.2.3 uid 1000" > "$scratch/case/route-answer"
+run_refusal_body "require_network_on_its_bridge refuses a subnet a VPN interface routes" \
+    "$route_body" 1 "the subnet 172.30.0.0/16 of $network is routed through gpd0, not through its own bridge br-fixture0001"
+
+new_route_case
+echo "172.30.0.0/16 172.30.0.1 " > "$scratch/case/network-inspect"
+echo "172.30.0.2 dev br-0123456789ab src 172.30.0.1 uid 1000" > "$scratch/case/route-answer"
+run_refusal_body "require_network_on_its_bridge names the bridge from the id when the engine names none" \
+    "$route_body" 0 "ok: 172.30.0.0/16 is routed through br-0123456789ab"
+
+new_route_case
+touch "$scratch/case/route-fails"
+run_refusal_body "require_network_on_its_bridge refuses a route the host cannot answer" \
+    "$route_body" 1 "ip route get 172.30.0.2 failed"
+
+new_route_case
+touch "$scratch/case/inspect-fails"
+run_refusal_body "require_network_on_its_bridge refuses a network the engine cannot describe" \
+    "$route_body" 1 "the engine did not describe the network $network"
+
+new_route_case
+rm "$scratch/case/bin/ip"
+run_refusal_body "require_network_on_its_bridge refuses a host without ip" \
+    "$route_body" 1 "with ip, which is not on PATH"
 
 [ "$failures" = 0 ] || { echo "$failures case(s) failed" >&2; exit 1; }

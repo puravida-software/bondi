@@ -100,6 +100,24 @@ let test_reserved_covers_traefik_labels () =
         (List.mem name Bondi_common.Router_name.reserved))
     segments
 
+(* The dial timeout reaches the container Bondi creates as exactly this flag,
+   once: a dial to a backend that no longer answers is abandoned after 1 s and
+   the router's retry resends it, instead of waiting out Traefik's 30 s default
+   (feature 0041, NFR-1, Step A). *)
+let test_traefik_cmd_dial_timeout () =
+  let docker = Traefik.get_docker_config base_config in
+  match docker.container_config.cmd with
+  | None -> Alcotest.fail "traefik container_config declares no command"
+  | Some cmd ->
+      Alcotest.check
+        (Alcotest.list Alcotest.string)
+        "exactly one dialTimeout flag, of 1s"
+        [ "--serversTransport.forwardingTimeouts.dialTimeout=1s" ]
+        (List.filter
+           (String.starts_with
+              ~prefix:"--serversTransport.forwardingTimeouts.dialTimeout")
+           cmd)
+
 let () =
   Alcotest.run "Traefik config"
     [
@@ -121,5 +139,7 @@ let () =
             `Quick test_traefik_cmd_ca_server;
           Alcotest.test_case "no certificate server is no caServer flag" `Quick
             test_traefik_cmd_no_ca_server;
+          Alcotest.test_case "the dial timeout is one flag of 1s" `Quick
+            test_traefik_cmd_dial_timeout;
         ] );
     ]

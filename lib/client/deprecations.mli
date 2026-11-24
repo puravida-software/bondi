@@ -1,6 +1,9 @@
 (** What a run of the client owes an operator about configuration fields Bondi
     still parses and no longer acts on.
 
+    {!messages} answers for the [bondi_server] block and {!service_messages} for
+    the service.
+
     [bondi_server.bind_address] and [bondi_server.api_token] are read from
     [bondi.yaml] and change nothing the orchestrator does: it serves no HTTP, so
     there is no socket to bind and no request to authenticate. The fields stay
@@ -32,3 +35,17 @@ val messages : Config_file.bondi_server -> string list
 
     Pure: it reads nothing, prints nothing and can fail in no way a caller has
     to classify. *)
+
+val service_messages : Config_file.user_service -> string list
+(** [service_messages service] is one message per deprecated field [service]
+    declares: none when it declares none.
+
+    The one such field is [drain_grace_period]. A blue-green deploy stops the
+    old container while it is still attached to the network and waits for no
+    drain, so the value changes nothing. The field stays in the record because
+    parsing is strict, and the message names it and says to remove the line.
+
+    It takes the parsed record for the reason {!messages} does: a field added to
+    [Config_file.user_service] later is a compile error here.
+
+    Pure, like {!messages}. *)

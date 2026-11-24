@@ -190,11 +190,33 @@ type host_config = {
 }
 [@@deriving yojson { strict = false }]
 
+type attached_networks = string list
+(** The networks a container is attached to, by name: the keys of the Engine's
+    [NetworkSettings.Networks] object. The endpoint each key maps to is not
+    read. *)
+
+let attached_networks_to_yojson networks =
+  let entries = List.map (fun network -> (network, ())) networks in
+  assoc_of_list (fun () -> `Assoc []) entries
+
+let attached_networks_of_yojson json =
+  let* entries = list_of_assoc ~field:"Networks" (fun _ -> ()) json in
+  Ok (List.map fst entries)
+
+type network_settings = {
+  networks : attached_networks; [@key "Networks"] [@default []]
+}
+[@@deriving yojson { strict = false }]
+(** The part of an inspect's [NetworkSettings] Bondi reads: which networks the
+    container is on, which is what decides whether Traefik can route to it. *)
+
 type inspect_response = {
   created_at : string; [@key "Created"]
   restart_count : int; [@key "RestartCount"]
   state : inspect_state; [@key "State"]
   host_config : host_config option; [@key "HostConfig"] [@default None]
+  network_settings : network_settings option;
+      [@key "NetworkSettings"] [@default None]
 }
 [@@deriving yojson { strict = false }]
 
@@ -204,18 +226,29 @@ type networking_config = {
 }
 [@@deriving yojson]
 
+(** The networking a container Bondi creates is given: attached to the one
+    network Bondi manages. Workloads and the proxy both take it from here, so
+    the proxy's network and the workloads' cannot drift apart. *)
+let default_networking_config : networking_config =
+  let endpoint : endpoint_config = { aliases = None; ipv4_address = None } in
+  { endpoints_config = Some [ (Bondi_common.Defaults.network_name, endpoint) ] }
+
 type image_healthcheck = { test : string list [@key "Test"] }
 [@@deriving yojson { strict = false }]
 
-type image_container_config = {
+(* The image's own configuration, read from [Config]: the Engine sends it at
+   every API version. [ContainerConfig] is not read. It is null for an image
+   BuildKit built and absent from v1.45 on, so a health check read from it is
+   absent for every image [observed -- 2026-11-22, Docker Engine 29.10.0, the
+   captures under test/server/fixtures/image_inspect]. An image with no labels
+   reports [Labels] as null, which reads as [None]. *)
+type image_config = {
   healthcheck : image_healthcheck option; [@key "Healthcheck"] [@default None]
+  labels : string_map option; [@key "Labels"] [@default None]
 }
 [@@deriving yojson { strict = false }]
 
-type image_inspect_response = {
-  container_config : image_container_config option;
-      [@key "ContainerConfig"] [@default None]
-}
+type image_inspect_response = { config : image_config [@key "Config"] }
 [@@deriving yojson { strict = false }]
 
 (** One entry of [GET /images/json], read down to what image cleanup decides
@@ -510,20 +543,6 @@ let list_containers :
       parse_all [] values
   | _ -> Error "expected JSON array from /containers/json"
 
-let get_container_by_image_name :
-    t ->
-    net:_ Eio.Net.t ->
-    image_name:string ->
-    (container option, string) result =
- fun t ~net ~image_name ->
-  let* containers = list_containers t ~net ~all:true () in
-  Ok
-    (List.find_opt
-       (fun c ->
-         let image = (c : container).image in
-         Bondi_common.String_utils.contains ~needle:image_name image)
-       containers)
-
 let get_container_by_name :
     t ->
     net:_ Eio.Net.t ->
@@ -757,10 +776,14 @@ let wait_container :
 let inspect_image :
     t ->
     net:_ Eio.Net.t ->
+    clock:_ Eio.Time.clock ->
     image:string ->
     (image_inspect_response, string) result =
- fun t ~net ~image ->
-  let* json = call_json t ~net `GET ("/images/" ^ image ^ "/json") [] in
+ fun t ~net ~clock ~image ->
+  let* json =
+    with_request_bound ~clock ~what:("inspect of image " ^ image) (fun () ->
+        call_json t ~net `GET ("/images/" ^ image ^ "/json") [])
+  in
   image_inspect_response_of_yojson json
   |> Result.map_error (fun msg ->
       Printf.sprintf "failed to parse inspect response for image %s: %s" image
@@ -854,23 +877,5 @@ let remove_image :
   let* _ =
     with_request_bound ~clock ~what:("removal of image " ^ image_id) (fun () ->
         call t ~net `DELETE ("/images/" ^ image_id) remove_image_query)
-  in
-  Ok ()
-
-let disconnect_from_network :
-    t ->
-    net:_ Eio.Net.t ->
-    container_id:string ->
-    network_name:string ->
-    (unit, string) result =
- fun t ~net ~container_id ~network_name ->
-  let payload =
-    `Assoc [ ("Container", `String container_id); ("Force", `Bool true) ]
-  in
-  let headers, body = json_body payload in
-  let* _ =
-    call ~headers ~body t ~net `POST
-      ("/networks/" ^ network_name ^ "/disconnect")
-      []
   in
   Ok ()
