@@ -1595,95 +1595,47 @@ module Fake_engine = struct
           String.ends_with ~suffix:"0\r\n\r\n" s
         else String.length s - body_at >= content_length head
 
-  type conn = {
-    engine : t;
-    respond : string -> string -> int * string;
-    written : Buffer.t;
-    mutable answer : string option;
-    mutable sent : int;
-  }
-
-  module Conn = struct
-    type tag = [ `Generic ]
-    type nonrec t = conn
-
-    let rec answer t =
-      match t.answer with
-      | Some a -> a
-      | None ->
-          let request = Buffer.contents t.written in
-          if complete request then (
-            let line =
-              List.hd (String.split_on_char '\r' request) |> String.trim
-            in
-            let meth, target =
-              match String.split_on_char ' ' line with
-              | m :: target :: _ -> (m, target)
-              | _ -> ("?", "?")
-            in
-            t.engine.requests <- (meth, target) :: t.engine.requests;
-            let code, body = t.respond meth target in
-            let a =
-              Printf.sprintf
-                "HTTP/1.1 %d X\r\n\
-                 Content-Length: %d\r\n\
-                 Connection: close\r\n\
-                 \r\n\
-                 %s"
-                code (String.length body) body
-            in
-            t.answer <- Some a;
-            a)
-          else (
-            Eio.Fiber.yield ();
-            answer t)
-
-    let read_methods = []
-
-    let single_read t buf =
-      let a = answer t in
-      if t.sent >= String.length a then raise End_of_file
-      else
-        let n = min (Cstruct.length buf) (String.length a - t.sent) in
-        Cstruct.blit_from_string a t.sent buf 0 n;
-        t.sent <- t.sent + n;
-        n
-
-    let single_write t bufs =
-      List.iter
-        (fun b -> Buffer.add_string t.written (Cstruct.to_string b))
-        bufs;
-      Cstruct.lenv bufs
-
-    let copy t ~src =
-      let buf = Cstruct.create 4096 in
-      try
-        while true do
-          let n = Eio.Flow.single_read src buf in
-          Buffer.add_string t.written (Cstruct.to_string (Cstruct.sub buf 0 n))
-        done
-      with
-      | End_of_file -> ()
-
-    let shutdown _ _ = ()
-    let close _ = ()
-  end
+  (* The connection is an [Eio_mock.Flow], not a hand-written
+     [Eio.Net.Pi.stream_socket]: that interface gained members across eio
+     releases, and a fake that implements it breaks on the next one. The mock's
+     [pp] is called with every string written to it, in order, which is how the
+     request is recovered; its first read waits for the whole request and
+     answers it, and later reads fall back to the mock's default End_of_file. *)
+  let answer_for engine ~respond request =
+    let line = List.hd (String.split_on_char '\r' request) |> String.trim in
+    let meth, target =
+      match String.split_on_char ' ' line with
+      | m :: target :: _ -> (m, target)
+      | _ -> ("?", "?")
+    in
+    engine.requests <- (meth, target) :: engine.requests;
+    let code, body = respond meth target in
+    Printf.sprintf
+      "HTTP/1.1 %d X\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" code
+      (String.length body) body
 
   let make ~respond =
     let engine = { requests = [] } in
     let net = Eio_mock.Net.make "docker" in
     let socket () =
-      let conn =
-        {
-          engine;
-          respond;
-          written = Buffer.create 256;
-          answer = None;
-          sent = 0;
-        }
+      let written = Buffer.create 256 in
+      let answered = ref false in
+      let flow =
+        Eio_mock.Flow.make
+          ~pp:(fun _ s -> if not !answered then Buffer.add_string written s)
+          "docker-conn"
       in
-      (Eio.Resource.T (conn, Eio.Net.Pi.stream_socket (module Conn))
-        :> [ `Generic ] Eio.Net.stream_socket_ty Eio.Resource.t)
+      let rec read () =
+        let request = Buffer.contents written in
+        if complete request then (
+          answered := true;
+          answer_for engine ~respond request)
+        else (
+          Eio.Fiber.yield ();
+          read ())
+      in
+      Eio_mock.Flow.on_read flow [ `Run read ];
+      (flow :> _ Eio.Net.stream_socket)
     in
     Eio_mock.Net.on_connect net (List.init 400 (fun _ -> `Run socket));
     (engine, net)
