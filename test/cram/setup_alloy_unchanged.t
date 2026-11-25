@@ -11,7 +11,7 @@ The fixtures are removed first so the file is re-runnable in a directory a
 previous run has already written to.
 
   $ ROOT="$PWD"
-  $ rm -rf box ssh-argv.log first.log second.log third.log mode-config.log mode-env.log missing-config.log missing-env.log
+  $ rm -rf box ssh-argv.log first.log second.log third.log mode-config.log mode-env.log missing-config.log missing-env.log retry-changed.log retry-unchanged.log retry-before.alloy retry-after.alloy
 
 The box, as files the stub reads and writes, one set per container setup runs
 by name. `<name>.registry` is the image id the registry's tag names.
@@ -96,6 +96,8 @@ fixture chose.
   >   "docker pull '$ORCH_REF'") pull bondi-orchestrator ;;
   >   "docker pull '$ALLOY_REF'") pull bondi-alloy ;;
   >   'docker --version') echo 'Docker version 27.0.0, build deadbeef' ;;
+  >   *BONDI_ALLOY_CURL_PRESENT*) echo BONDI_ALLOY_CURL_PRESENT ;;
+  >   *BONDI_ALLOY_PORT_FREE*) echo "${ALLOY_PORT:-BONDI_ALLOY_PORT_FREE}" ;;
   >   *BONDI_ACME_PRESENT*) echo BONDI_ACME_PRESENT ;;
   >   'sudo chown root:root /etc/traefik/acme/acme.json'*) : ;;
   >   'docker network inspect'*) : ;;
@@ -144,6 +146,10 @@ fixture chose.
   >   # digest label setup stamped on it, and the image its tag names now.
   >   'docker run -d --name bondi-orchestrator'*)
   >     created bondi-orchestrator "$1"; echo 'f00dcafef00d' ;;
+  >   # The health wait that follows the run, answered as a running Alloy
+  >   # answers it. Without this arm the probe falls through to *) and answers
+  >   # nothing, which setup reads as no verdict and fails the run on.
+  >   *'http://127.0.0.1:12345/-/healthy'*) echo BONDI_ALLOY_HEALTHY ;;
   >   'docker run -d --name bondi-alloy'*)
   >     created bondi-alloy "$1"; echo 'd671990dc2318f4b' ;;
   >   'attempt=0; while'*) : ;;
@@ -327,3 +333,49 @@ so the River configuration's change touched only the container that reads it.
   $ grep -c -E -- 'docker (stop|rm --force) bondi-orchestrator|docker run -d --name bondi-orchestrator' ssh-argv.log
   0
   [1]
+
+The retry limit is part of the River configuration, so changing it is a change
+to the container: Alloy is replaced, after its image is pulled, and the
+configuration on the box carries the new limit.
+
+  $ cp -f "$BOX/config.alloy" retry-before.alloy
+  $ awk '{ print } /^    endpoint: / { print "    max_backoff_retries: 5" }' bondi.yaml > bondi.yaml.next && mv -f bondi.yaml.next bondi.yaml
+  $ grep -c -x -F -- '    max_backoff_retries: 5' bondi.yaml
+  1
+  $ : > "$SSH_ARGV_LOG"
+  $ bondi-client setup > retry-changed.log 2>&1
+  $ echo $?
+  0
+  $ grep -c -E -- 'docker (stop|rm) bondi-alloy|docker run -d --name bondi-alloy' ssh-argv.log
+  3
+  $ PULL_AT=$(grep -n -x -F -- "docker pull 'grafana/alloy:v1.8.0'" ssh-argv.log | cut -d: -f1)
+  $ STOP_AT=$(grep -n -x -F -- 'docker stop bondi-alloy' ssh-argv.log | cut -d: -f1)
+  $ test "$PULL_AT" -lt "$STOP_AT" && echo 'pulled before it was stopped'
+  pulled before it was stopped
+  $ grep -c -F -- 'max_backoff_retries = 5' "$BOX/config.alloy"
+  1
+  $ grep -c -F -- 'max_backoff_retries' retry-before.alloy
+  0
+  [1]
+
+The same limit on the next setup is no change: the digest this run computes
+from the manifest, afresh, equals the one the run above stamped on the
+container, so Alloy is pulled and left running, and nothing is written.
+
+  $ cp -f "$BOX/config.alloy" retry-after.alloy
+  $ : > "$SSH_ARGV_LOG"
+  $ bondi-client setup > retry-unchanged.log 2>&1
+  $ echo $?
+  0
+  $ grep -c -x -F -- "docker pull 'grafana/alloy:v1.8.0'" ssh-argv.log
+  1
+  $ grep -F -- 'bondi-alloy container is already running' retry-unchanged.log
+  bondi-alloy container is already running on server 127.0.0.1: grafana/alloy:v1.8.0, skipping...
+  $ grep -c -E -- 'docker (stop|rm) bondi-alloy|docker run -d --name bondi-alloy' ssh-argv.log
+  0
+  [1]
+  $ grep -c -E -- 'cat > [^&]*config[.]alloy|cat > [^&]*alloy/env' ssh-argv.log
+  0
+  [1]
+  $ cmp retry-after.alloy "$BOX/config.alloy" && echo 'the config on the box is the one the limit change wrote'
+  the config on the box is the one the limit change wrote

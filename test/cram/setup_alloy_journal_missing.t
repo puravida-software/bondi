@@ -33,6 +33,8 @@ answers absent every time it is asked, restart or not.
   >   "sudo mkdir -p '/var/log/journal'") : ;;
   >   "sudo systemd-tmpfiles --create --prefix '/var/log/journal'") : ;;
   >   'sudo systemctl restart systemd-journald') : ;;
+  >   *BONDI_ALLOY_CURL_PRESENT*) echo BONDI_ALLOY_CURL_PRESENT ;;
+  >   *BONDI_ALLOY_PORT_FREE*) echo "${ALLOY_PORT:-BONDI_ALLOY_PORT_FREE}" ;;
   >   *BONDI_ACME_PRESENT*) echo BONDI_ACME_PRESENT ;;
   >   'docker --version') echo 'Docker version 27.0.0, build deadbeef' ;;
   >   # The orchestrator this file's box already runs, carrying the digest setup
@@ -52,6 +54,10 @@ answers absent every time it is asked, restart or not.
   >   *BONDI_ALLOY_MODE_ABSENT*) echo 0640 ;;
   >   *'sudo stat -c %04a'*) echo 0640 ;;
   >   *'cat > '*'/etc/bondi/alloy/env'*) : ;;
+  >   # The health wait that follows the run, answered as a running Alloy
+  >   # answers it. Without this arm the probe falls through to *) and answers
+  >   # nothing, which setup reads as no verdict and fails the run on.
+  >   *'http://127.0.0.1:12345/-/healthy'*) echo BONDI_ALLOY_HEALTHY ;;
   >   *'--name bondi-alloy'*) echo 'd671990dc2318f4b' ;;
   >   *'/var/spool/cron/crontabs/root'*) echo BONDI_CRONTAB_ABSENT ;;
   >   *BONDI_CRON_PAYLOAD_LISTED*)

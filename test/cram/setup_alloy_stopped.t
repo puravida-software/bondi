@@ -25,6 +25,8 @@ the declared version, so the run reduces to the alloy phase.
   >     printf '%s: Pulling from %s\n' "${ref##*:}" "${ref%:*}"
   >     printf 'Digest: sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4\n'
   >     printf 'Status: Image is up to date for %s\n%s\n' "$ref" "$ref" ;;
+  >   *BONDI_ALLOY_CURL_PRESENT*) echo BONDI_ALLOY_CURL_PRESENT ;;
+  >   *BONDI_ALLOY_PORT_FREE*) echo "${ALLOY_PORT:-BONDI_ALLOY_PORT_FREE}" ;;
   >   *BONDI_ACME_PRESENT*) echo BONDI_ACME_PRESENT ;;
   >   # The journal probe, answered present: this box's journald already stores
   >   # under /var/log/journal, so the alloy phase reads it once and goes on.
@@ -76,6 +78,10 @@ the declared version, so the run reduces to the alloy phase.
   >   # swallow it -- case takes the first match -- and the container id would
   >   # come back empty from an arm that reads as deliberate.
   >   *'cat > '*'/etc/bondi/alloy/env'*) : ;;
+  >   # The health wait that follows the run, answered as a running Alloy
+  >   # answers it. Without this arm the probe falls through to *) and answers
+  >   # nothing, which setup reads as no verdict and fails the run on.
+  >   *'http://127.0.0.1:12345/-/healthy'*) echo BONDI_ALLOY_HEALTHY ;;
   >   *'--name bondi-alloy'*) echo 'd671990dc2318f4b' ;;
   >   *'/var/spool/cron/crontabs/root'*) echo BONDI_CRONTAB_ABSENT ;;
   >   # The payload directory the crontab section is compared against. Without
@@ -188,12 +194,12 @@ wrote leaves the status this line asserts belonging to `bondi-client`.
   Pulled mlopez1506/bondi-server:0.25.0 on server 127.0.0.1
   bondi-orchestrator container is already running on server 127.0.0.1: 0.25.0, skipping...
   Pulled grafana/alloy:v1.8.0 on server 127.0.0.1
+  curl on server 127.0.0.1 can ask Alloy on port 12345
   Journal on server 127.0.0.1 is stored persistently under /var/log/journal
+  port 12345 on server 127.0.0.1 is free for Alloy
   Stopped bondi-alloy container on server 127.0.0.1
   Removed bondi-alloy container and config on server 127.0.0.1
   Alloy config written on server 127.0.0.1: /etc/bondi/alloy/config.alloy
-  Wrote Alloy credentials file on server 127.0.0.1: /etc/bondi/alloy/env
-  bondi-alloy container started on server 127.0.0.1: d671990dc2318f4b
 
 The removal is what the incident needed a human for.
 
@@ -249,8 +255,24 @@ read position there.
 the image and ahead of the config path. Before the image, Docker would read it
 as its own option and refuse the run.
 
-  $ grep -c -F -- "' run '--storage.path=/var/lib/bondi/alloy' /etc/bondi/alloy/config.alloy" ssh-argv.log
+  $ grep -c -F -- "' run '--storage.path=/var/lib/bondi/alloy' '--server.http.listen-addr=127.0.0.1:12345' /etc/bondi/alloy/config.alloy" ssh-argv.log
   1
+
+Alloy's HTTP server, which serves the counters an operator reads to see what
+it dropped and what it sent, is reachable from the box itself and from nowhere
+else. The container shares the host's network and listens on the host's
+loopback only. Publishing a port instead would need a wildcard listen address
+inside the container, which every container on the default bridge can reach,
+so the run line carries neither. The network is a `docker run` option and sits
+before the image; the listen address is Alloy's own and sits after `run`.
+
+  $ grep -c -F -- "'--network' 'host' --label bondi.managed=true" ssh-argv.log
+  1
+  $ grep -c -F -- "'--server.http.listen-addr=127.0.0.1:12345'" ssh-argv.log
+  1
+  $ grep -F -- 'docker run -d --name bondi-alloy' ssh-argv.log | grep -c -E -- '0[.]0[.]0[.]0| -p |--publish'
+  0
+  [1]
 
 `--mount` refuses a source that does not exist, so the state directory is
 created before the run, and on every run: a box set up by an earlier release

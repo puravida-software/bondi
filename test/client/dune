@@ -21,6 +21,8 @@
   test_orchestrator_bind
   test_alloy_commands
   test_alloy_run_args
+  test_alloy_health
+  test_alloy_preflight
   test_ssh_multiplex
   test_remote_exec
   test_private_key

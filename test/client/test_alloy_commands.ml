@@ -18,6 +18,7 @@ let river =
     collect = Bondi_common.Alloy_river.All;
     labels = [];
     excluded_containers = [];
+    max_backoff_retries = None;
   }
 
 (* The River config file's mode used to be whatever umask the remote login shell

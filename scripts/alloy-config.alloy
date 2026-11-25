@@ -1,0 +1,100 @@
+discovery.docker "containers" {
+	host = "unix:///var/run/docker.sock"
+
+	refresh_interval = "5s"
+
+	filter {
+		name   = "label"
+		values = ["bondi.managed=true"]
+	}
+}
+
+discovery.relabel "bondi" {
+	targets = discovery.docker.containers.targets
+
+	rule {
+		source_labels = ["__meta_docker_container_label_bondi_type"]
+		regex         = "cron"
+		action        = "drop"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_label_bondi_logs"]
+		regex         = "false"
+		action        = "drop"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_name"]
+		regex         = "/(.*)"
+		target_label  = "container"
+		replacement   = "$1"
+		action        = "replace"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_label_bondi_name"]
+		regex         = "(.+)"
+		target_label  = "container"
+		replacement   = "$1"
+		action        = "replace"
+	}
+}
+
+loki.source.docker "bondi" {
+	host       = "unix:///var/run/docker.sock"
+	targets    = discovery.relabel.bondi.output
+	forward_to = [loki.write.grafana_cloud.receiver]
+}
+
+loki.relabel "bondi_cron" {
+	forward_to = []
+
+	rule {
+		source_labels = ["__journal_bondi_logs"]
+		regex         = "false"
+		action        = "drop"
+	}
+
+	rule {
+		source_labels = ["__journal_container_name"]
+		regex         = "(.+)"
+		target_label  = "container"
+		replacement   = "$1"
+		action        = "replace"
+	}
+
+	rule {
+		source_labels = ["__journal_bondi_name"]
+		regex         = "(.+)"
+		target_label  = "container"
+		replacement   = "$1"
+		action        = "replace"
+	}
+
+	rule {
+		regex  = "job"
+		action = "labeldrop"
+	}
+}
+
+loki.source.journal "bondi_cron" {
+	path          = "/var/log/journal"
+	matches       = "BONDI_MANAGED=true BONDI_TYPE=cron"
+	relabel_rules = loki.relabel.bondi_cron.rules
+	forward_to    = [loki.write.grafana_cloud.receiver]
+}
+
+loki.write "grafana_cloud" {
+	endpoint {
+		url = "http://127.0.0.1:3100/loki/api/v1/push"
+
+		basic_auth {
+			username = sys.env("GRAFANA_CLOUD_INSTANCE_ID")
+			password = sys.env("GRAFANA_CLOUD_API_KEY")
+		}
+	}
+	external_labels = {
+		project = "bondi-alloy-test",
+	}
+}

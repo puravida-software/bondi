@@ -13,7 +13,12 @@
    run line, one argument per line, so the script runs Alloy with the
    arguments that ship. Only the host state directory is the script's: it is
    passed in, not edited into the output. The journal path is printed from the
-   same module for the script's check that the host keeps a journal. *)
+   same module for the script's check that the host keeps a journal.
+
+   The network and listen address that put Alloy's HTTP server on the host's
+   loopback are printed from the same module, so the script's loopback Alloy
+   runs with the arguments setup's run line carries. Only the port is the
+   script's: several of its Alloys share one host. *)
 
 module R = Bondi_common.Alloy_river
 module A = Bondi_client.Alloy_run_args
@@ -24,6 +29,7 @@ let usage =
   \       emit_config.exe loki-image\n\
   \       emit_config.exe config (all|services_only) ENDPOINT [EXCLUDED_NAME...]\n\
   \       emit_config.exe alloy-run-args (docker|alloy) HOST_STATE_DIR\n\
+  \       emit_config.exe alloy-run-args (http-docker|http-alloy) PORT\n\
   \       emit_config.exe journal-path\n\
   \       emit_config.exe cron-log-args JOB\n"
 
@@ -49,6 +55,7 @@ let config_of collect endpoint excluded_containers : R.config =
     collect;
     labels = [ project_label ];
     excluded_containers;
+    max_backoff_retries = None;
   }
 
 let fail message =
@@ -70,6 +77,16 @@ let () =
       List.iter print_endline (A.journal ~host_state_dir).docker_options
   | [ _; "alloy-run-args"; "alloy"; host_state_dir ] ->
       List.iter print_endline (A.journal ~host_state_dir).alloy_options
+  | [ _; "alloy-run-args"; "http-docker"; port ] -> (
+      match int_of_string_opt port with
+      | Some listen_port ->
+          List.iter print_endline (A.http ~listen_port).docker_options
+      | None -> fail usage)
+  | [ _; "alloy-run-args"; "http-alloy"; port ] -> (
+      match int_of_string_opt port with
+      | Some listen_port ->
+          List.iter print_endline (A.http ~listen_port).alloy_options
+      | None -> fail usage)
   | [ _; "cron-log-args"; job ] ->
       (* The labels are the four a cron container carries; only their names
          reach the log config. *)

@@ -31,3 +31,16 @@
  (deps
   (glob_files ../client/fixtures/docker_cli/*.out)
   (glob_files ../client/fixtures/docker_cli/*.err)))
+
+; The health probe's shell is run by this file against stand-in curl scripts,
+; so the markers it prints are the markers the shell prints, not the ones a
+; unit test's fixture says it prints.
+
+(executable
+ (name alloy_health_probe)
+ (modules alloy_health_probe)
+ (libraries bondi.client))
+
+(cram
+ (applies_to alloy_health_shell)
+ (deps %{exe:alloy_health_probe.exe}))

@@ -9,6 +9,7 @@ let base_config : R.config =
     collect = All;
     labels = [];
     excluded_containers = [];
+    max_backoff_retries = None;
   }
 
 let contains = Test_helpers.contains
@@ -44,18 +45,20 @@ let test_collect_mode_invalid () =
 
 let both_modes = [ R.All; R.Services_only ]
 
-(* The text of one top-level block, from its header to the brace that closes
-   it at the start of a line, so an assertion about one component cannot be met
-   by the text of another. *)
-let block ~header river =
+(* The text from [header] to the first [close] after it, [close] included. *)
+let span ~header ~close river =
   match Bondi_common.String_utils.index_of ~needle:header river with
   | None -> fail ("no block " ^ header)
   | Some start -> (
       let rest = String.sub river start (String.length river - start) in
-      match Bondi_common.String_utils.index_of ~needle:"\n}\n" rest with
+      match Bondi_common.String_utils.index_of ~needle:close rest with
       | None -> fail ("block " ^ header ^ " is never closed")
-      | Some stop -> String.sub rest 0 (stop + 3))
+      | Some stop -> String.sub rest 0 (stop + String.length close))
 
+(* The text of one top-level block, from its header to the brace that closes
+   it at the start of a line, so an assertion about one component cannot be met
+   by the text of another. *)
+let block ~header river = span ~header ~close:"\n}\n" river
 let docker_relabel river = block ~header:"discovery.relabel \"bondi\" {" river
 let journal_relabel river = block ~header:"loki.relabel \"bondi_cron\" {" river
 
@@ -168,7 +171,9 @@ let test_journal_container_rule_order () =
   match (index journal_container_name_rule, index journal_bondi_name_rule) with
   | Some fallback, Some override ->
       check bool "container name precedes bondi.name" true (fallback < override)
-  | _ -> fail "journal container rules missing"
+  | None, _
+  | Some _, None ->
+      fail "journal container rules missing"
 
 let test_journal_relabel_drops_job_label () =
   check bool "job label dropped" true
@@ -221,7 +226,23 @@ let test_relabel_container_name_precedes_bondi_name () =
   in
   match (fallback, override) with
   | Some f, Some o -> check bool "fallback precedes override" true (f < o)
-  | _ -> fail "container rules missing"
+  | None, _
+  | Some _, None ->
+      fail "container rules missing"
+
+(* --- generate: discovery --- *)
+
+(* [refresh_interval] is the argument name Alloy's [discovery.docker] reference
+   gives for how often it lists containers; its default is [1m]. One tab deep,
+   so the line is the block's own argument and not one of its [filter]'s. *)
+let test_discovery_refresh_interval_5s () =
+  List.iter
+    (fun collect ->
+      check bool "discovery.docker lists containers every 5s" true
+        (contains ~needle:"\n\trefresh_interval = \"5s\"\n"
+           (block ~header:"discovery.docker \"containers\" {"
+              (R.generate { base_config with collect }))))
+    both_modes
 
 (* --- generate: escaping --- *)
 
@@ -267,6 +288,160 @@ let test_generate_escapes_excluded_regex () =
   let river = R.generate config in
   check bool "regex dot escaped" true
     (contains ~needle:"my\\.service\\+name" river)
+
+(* --- generate: retry limit --- *)
+
+(* The writer's endpoint block, from its opening line to the brace that closes
+   it, so a retry line written anywhere else in the writer does not meet the
+   assertion. *)
+let endpoint_block river =
+  span ~header:"\tendpoint {\n" ~close:"\n\t}\n"
+    (block ~header:"loki.write \"grafana_cloud\" {" river)
+
+let retry_limit n =
+  match R.Max_backoff_retries.of_int n with
+  | Ok limit -> limit
+  | Error msg -> fail (Printf.sprintf "of_int %d refused: %s" n msg)
+
+(* 0 is in the list because it is the value most likely to be mistaken for
+   "unset": Alloy reads it as retry indefinitely, so it must be written. *)
+let test_max_backoff_retries_written_when_set () =
+  List.iter
+    (fun n ->
+      let river =
+        R.generate
+          { base_config with max_backoff_retries = Some (retry_limit n) }
+      in
+      check bool
+        (Printf.sprintf "endpoint block carries max_backoff_retries = %d" n)
+        true
+        (contains
+           ~needle:(Printf.sprintf "\t\tmax_backoff_retries = %d\n" n)
+           (endpoint_block river)))
+    [ 5; 0 ]
+
+(* What [generate] wrote for [base_config] before the retry limit existed,
+   captured from that generator's output, plus the discovery interval written
+   since. With no limit set the config must be this text byte for byte, so
+   Alloy's own default is what applies. *)
+let river_without_retry_limit =
+  {|discovery.docker "containers" {
+	host = "unix:///var/run/docker.sock"
+
+	refresh_interval = "5s"
+
+	filter {
+		name   = "label"
+		values = ["bondi.managed=true"]
+	}
+}
+
+discovery.relabel "bondi" {
+	targets = discovery.docker.containers.targets
+
+	rule {
+		source_labels = ["__meta_docker_container_label_bondi_type"]
+		regex         = "cron"
+		action        = "drop"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_label_bondi_logs"]
+		regex         = "false"
+		action        = "drop"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_name"]
+		regex         = "/(.*)"
+		target_label  = "container"
+		replacement   = "$1"
+		action        = "replace"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_label_bondi_name"]
+		regex         = "(.+)"
+		target_label  = "container"
+		replacement   = "$1"
+		action        = "replace"
+	}
+}
+
+loki.source.docker "bondi" {
+	host       = "unix:///var/run/docker.sock"
+	targets    = discovery.relabel.bondi.output
+	forward_to = [loki.write.grafana_cloud.receiver]
+}
+
+loki.relabel "bondi_cron" {
+	forward_to = []
+
+	rule {
+		source_labels = ["__journal_bondi_logs"]
+		regex         = "false"
+		action        = "drop"
+	}
+
+	rule {
+		source_labels = ["__journal_container_name"]
+		regex         = "(.+)"
+		target_label  = "container"
+		replacement   = "$1"
+		action        = "replace"
+	}
+
+	rule {
+		source_labels = ["__journal_bondi_name"]
+		regex         = "(.+)"
+		target_label  = "container"
+		replacement   = "$1"
+		action        = "replace"
+	}
+
+	rule {
+		regex  = "job"
+		action = "labeldrop"
+	}
+}
+
+loki.source.journal "bondi_cron" {
+	path          = "/var/log/journal"
+	matches       = "BONDI_MANAGED=true BONDI_TYPE=cron"
+	relabel_rules = loki.relabel.bondi_cron.rules
+	forward_to    = [loki.write.grafana_cloud.receiver]
+}
+
+loki.write "grafana_cloud" {
+	endpoint {
+		url = "https://logs-prod.grafana.net/loki/api/v1/push"
+
+		basic_auth {
+			username = sys.env("GRAFANA_CLOUD_INSTANCE_ID")
+			password = sys.env("GRAFANA_CLOUD_API_KEY")
+		}
+	}
+}
+|}
+
+let test_max_backoff_retries_absent_writes_no_line () =
+  let river = R.generate base_config in
+  check bool "no max_backoff_retries line anywhere" false
+    (contains ~needle:"max_backoff_retries" river);
+  check string "the config generated with no retry setting"
+    river_without_retry_limit river
+
+let test_max_backoff_retries_of_int () =
+  check bool "-1 is refused" true
+    (Result.is_error (R.Max_backoff_retries.of_int (-1)));
+  List.iter
+    (fun n ->
+      check (result int string)
+        (Printf.sprintf "%d round-trips" n)
+        (Ok n)
+        (Result.map R.Max_backoff_retries.to_int
+           (R.Max_backoff_retries.of_int n)))
+    [ 0; 10 ]
 
 (* --- env_file_contents --- *)
 
@@ -324,6 +499,7 @@ let credential_config : R.config =
     collect = All;
     labels = [];
     excluded_containers = [];
+    max_backoff_retries = None;
   }
 
 let test_env_file_contents_supplies_every_referenced_variable () =
@@ -433,6 +609,16 @@ let test_alloy_fmt_validates_services_only () =
     | Ok () -> ()
     | Error msg -> Alcotest.fail msg
 
+let test_alloy_fmt_validates_retry_limit () =
+  if not docker_available then Alcotest.skip ()
+  else
+    let river =
+      R.generate { base_config with max_backoff_retries = Some (retry_limit 5) }
+    in
+    match run_alloy_fmt river with
+    | Ok () -> ()
+    | Error msg -> Alcotest.fail msg
+
 let () =
   run "Alloy_river"
     [
@@ -475,6 +661,20 @@ let () =
           test_case "container name precedes bondi.name" `Quick
             test_relabel_container_name_precedes_bondi_name;
         ] );
+      ( "discovery",
+        [
+          test_case "lists containers every 5s in both modes" `Quick
+            test_discovery_refresh_interval_5s;
+        ] );
+      ( "retry limit",
+        [
+          test_case "written when set" `Quick
+            test_max_backoff_retries_written_when_set;
+          test_case "absent writes no line" `Quick
+            test_max_backoff_retries_absent_writes_no_line;
+          test_case "of_int refuses a negative" `Quick
+            test_max_backoff_retries_of_int;
+        ] );
       ( "env_file_contents",
         [
           test_case "supplies every variable the config references" `Quick
@@ -490,5 +690,7 @@ let () =
             test_alloy_fmt_validates_all_mode;
           test_case "services_only with labels passes alloy fmt" `Slow
             test_alloy_fmt_validates_services_only;
+          test_case "retry limit set passes alloy fmt" `Slow
+            test_alloy_fmt_validates_retry_limit;
         ] );
     ]
