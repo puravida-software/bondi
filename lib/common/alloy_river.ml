@@ -1,5 +1,18 @@
 type collect_mode = All | Services_only
 
+module Max_backoff_retries = struct
+  type t = int
+
+  let of_int n =
+    if n < 0 then
+      Error
+        (Printf.sprintf
+           "%d is negative; a retry limit is 0 (retry indefinitely) or more" n)
+    else Ok n
+
+  let to_int t = t
+end
+
 type config = {
   grafana_cloud_endpoint : string;
   grafana_cloud_instance_id : string;
@@ -7,6 +20,7 @@ type config = {
   collect : collect_mode;
   labels : (string * string) list;
   excluded_containers : string list;
+  max_backoff_retries : Max_backoff_retries.t option;
 }
 
 let collect_mode_of_string = function
@@ -79,6 +93,14 @@ let generate (config : config) : string =
   (* Docker discovery *)
   add "discovery.docker \"containers\" {\n";
   add "\thost = \"unix:///var/run/docker.sock\"\n";
+  add "\n";
+  (* Its own paragraph, so [host] keeps the alignment it had before the
+     interval was written. Every 5s rather than Alloy's [1m], so a container
+     that runs past about 15 s is read even if it's gone within a minute; one
+     that exits sooner may still be missed. Alloy v1.8.0 began reading a new
+     container 11 to 15 s after it started [observed -- 2026-11-24, Docker
+     Engine 29.10.0, five starts]. *)
+  add "\trefresh_interval = \"5s\"\n";
   add "\n";
   add "\tfilter {\n";
   add "\t\tname   = \"label\"\n";
@@ -210,6 +232,15 @@ let generate (config : config) : string =
   add "\tendpoint {\n";
   add (Printf.sprintf "\t\turl = \"%s\"\n" (esc config.grafana_cloud_endpoint));
   add "\n";
+  (* Its own paragraph, so [url] keeps the alignment it has without it and an
+     unset limit leaves the config exactly as it was. *)
+  (match config.max_backoff_retries with
+  | None -> ()
+  | Some limit ->
+      add
+        (Printf.sprintf "\t\tmax_backoff_retries = %d\n"
+           (Max_backoff_retries.to_int limit));
+      add "\n");
   add "\t\tbasic_auth {\n";
   add "\t\t\tusername = sys.env(\"GRAFANA_CLOUD_INSTANCE_ID\")\n";
   add "\t\t\tpassword = sys.env(\"GRAFANA_CLOUD_API_KEY\")\n";

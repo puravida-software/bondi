@@ -10,9 +10,9 @@
 # because a subcommand that works under `dune exec` and not in the image is a
 # subcommand nobody can call.
 #
-# Twenty-one assertions. The first seven are reached with `docker exec` into a
+# Twenty-two assertions. The first seven are reached with `docker exec` into a
 # container started from the image passed in by the exact command the client
-# produces; 7a and the eighth to thirteenth, with 9a, 9b, 11a, 12a, 12b and 13a, are deploys
+# produces; 7a and the eighth to thirteenth, with 9a, 9b, 9c, 11a, 12a, 12b and 13a, are deploys
 # sent through that same container and judged from outside it, by container id;
 # the fourteenth is asked from outside,
 # because stopping a container is not a thing the container can be asked to do
@@ -64,6 +64,12 @@
 #      `arm_blue_green_new_fails`: it exits 1, the container it started beside
 #      the serving one is gone, and the serving one, by id, still runs and
 #      still answers.
+#  9c. the same failed replacement, `arm_blue_green_new_fails_logs`, with a Loki
+#      and an Alloy started just before it, the Alloy running over the config
+#      the generator writes (committed beside this script as
+#      `alloy-config.alloy`): the line the failing image prints at start reaches
+#      Loki under the service's `container` label, though the candidate ran
+#      under the temporary name and was gone within a minute of Alloy starting.
 #  10. two `simple` deploys side by side, `arm_two_services`: two services with
 #      different names and hosts on the one Traefik, each host's request
 #      answered by its own service's container, asked by container id.

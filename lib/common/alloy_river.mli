@@ -9,6 +9,37 @@
     are collected from the journal under either mode. *)
 type collect_mode = All | Services_only
 
+(** The number of times [loki.write] retries a failed push before it drops the
+    batch.
+
+    Every claim here about what Alloy does with the value is
+    [assumed from Alloy v1.8.0's loki.write source]; none was observed in a run.
+    The source cited: the field's comment reads "zero means infinite retries",
+    and the value is passed straight to dskit's backoff, which keeps retrying
+    while [MaxRetries == 0]. A negative value is not rejected by Alloy; read in
+    the same source, it means one send and no retries.
+
+    The "about 8.5 minutes" a default-configured Alloy tolerates is
+    [assumed from the same source's defaults]: [min_backoff_period] 500 ms,
+    doubling on each retry, [max_backoff_period] 5 m, [max_backoff_retries] 10.
+    The ten waits are 0.5 + 1 + 2 + 4 + 8 + 16 + 32 + 64 + 128 + 256 = 511.5 s,
+    before jitter; none reaches the 300 s cap, so the cap does not shorten the
+    sum. 511.5 s is 8.525 minutes. It is the time until the last retry is sent,
+    ignoring the time each attempt itself takes. *)
+module Max_backoff_retries : sig
+  type t
+  (** A retry limit Alloy reads as meant: non-negative. [0] retries indefinitely
+      [assumed from Alloy v1.8.0's loki.write source: "zero means infinite
+       retries"]. *)
+
+  val of_int : int -> (t, string) result
+  (** Refuses a negative value. The message is the caller's to frame with the
+      field name. *)
+
+  val to_int : t -> int
+  (** The limit as the integer Alloy is given. *)
+end
+
 type config = {
   grafana_cloud_endpoint : string;
   grafana_cloud_instance_id : string;
@@ -16,6 +47,8 @@ type config = {
   collect : collect_mode;
   labels : (string * string) list;
   excluded_containers : string list;
+  max_backoff_retries : Max_backoff_retries.t option;
+      (** [None]: no line is written, and Alloy's default applies. *)
 }
 (** Inputs for River config generation. *)
 
@@ -28,7 +61,9 @@ val generate : config -> string
     function — returns the config file content as a string.
 
     The generated config reads from two sources. The Docker source:
-    - Discovers containers via Docker socket with [bondi.managed=true]
+    - Discovers containers via Docker socket with [bondi.managed=true], listing
+      them every 5s, so a container that runs past about 15 s is read even if
+      it's gone within a minute; one that exits sooner may still be missed
     - Drops [bondi.type] [cron], under either mode
     - Keeps only [bondi.type] [service] when [Services_only]
     - Drops containers with [bondi.logs=false] label, under either mode
@@ -55,6 +90,8 @@ val generate : config -> string
       [sys.env("GRAFANA_CLOUD_API_KEY")] — credentials are not baked into the
       config file; they must be provided as environment variables to the Alloy
       container
+    - Writes [max_backoff_retries] in the writer's [endpoint] block when
+      [max_backoff_retries] is set, and no retry line at all when it is [None]
 
     The rules read container labels by the names Alloy's Docker discovery gives
     them, never by their Docker spelling: a label [bondi.x] reaches a target as
@@ -63,11 +100,11 @@ val generate : config -> string
     nothing.
 
     Cron containers are read from the journal because a pass can exit before
-    discovery, which lists running containers once a minute, ever sees it. Most
-    passes would ship nothing, and a pass discovery did list would ship twice if
-    the Docker source kept it too. A cron container logs through Docker's
-    [journald] driver, which writes each [bondi.*] label it is told to copy as a
-    journal field of its own.
+    discovery, which lists running containers every 5s, ever sees it: a pass can
+    live under a second. Such a pass would ship nothing, and a pass discovery
+    did list would ship twice if the Docker source kept it too. A cron container
+    logs through Docker's [journald] driver, which writes each [bondi.*] label
+    it is told to copy as a journal field of its own.
 
     The journal rules follow the same rule as the Docker ones, under the names
     the journal source gives: a label [bondi.x] is written as the field

@@ -15,3 +15,12 @@ let journal ~host_state_dir =
       ];
     alloy_options = [ "--storage.path=" ^ state_dir ];
   }
+
+let http_listen_port = 12345
+
+let http ~listen_port =
+  {
+    docker_options = [ "--network"; "host" ];
+    alloy_options =
+      [ Printf.sprintf "--server.http.listen-addr=127.0.0.1:%d" listen_port ];
+  }

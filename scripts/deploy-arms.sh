@@ -45,6 +45,10 @@ pebble_image="ghcr.io/letsencrypt/pebble@sha256:0c81f05db371f436c97fb894bd6d2ab8
 # digest is the index Docker Hub served for `python:3-alpine` (Python 3.14.7) on
 # 2026-11-22 [observed, Docker Engine 29.10.0].
 python_image="python@sha256:c6ead215bfd31f1e433d968853b7a769989117115b728874824e6c0a27cb96fc"
+# Loki, which the failed-candidate logs arm reads to see what its Alloy delivered.
+# The digest is the index Docker Hub served for `grafana/loki:3.7.9`, the Loki the
+# real-Alloy suite runs, on 2026-11-24 [observed, Docker Engine 29.10.0].
+loki_image="grafana/loki@sha256:0db216b630ae1f348a1584c67f3cead8b4c1fc839169a39501db664744158e28"
 
 # The host port the registry is published on, and so the port every workload
 # reference names: a deploy carries `localhost:<port>/<name>:<tag>`, which is the
@@ -91,6 +95,16 @@ spelling_of() {
 
 fixture_network="$(spelling_of "$here/../lib/common/defaults.ml" network_name)"
 fixture_traefik="$(spelling_of "$here/../lib/common/builtin_container.ml" traefik)"
+# The Alloy setup runs on a box, by the tag setup names it with. It is the one
+# public image here not pinned by digest, because it is not the fixture's: it is
+# half of what the failed-candidate logs arm checks, with the config below, and a
+# digest here would be a second spelling of the version setup ships.
+alloy_image="$(spelling_of "$here/../lib/common/defaults.ml" alloy_image)"
+# The config that Alloy runs over: the generator's output, committed beside this
+# script and kept equal to the generator by a dune diff, because the gate runs
+# where there is no OCaml toolchain. Its endpoint is `127.0.0.1:3100`, the Loki
+# whose network namespace the arm runs Alloy in.
+alloy_config="$here/alloy-config.alloy"
 
 # The host path a Traefik the server creates binds its certificate store from,
 # taken from the server's bind list for the reason the names above are: a file the
@@ -151,7 +165,8 @@ acme_rel_dirs=("${acme_rel%/*}" "${acme_rel%/*/*}")
 # defines its routers from container labels alone: the retry middleware they
 # depend on is the one every deploy labels its router with.
 deploy_arms=(arm_simple arm_blue_green arm_blue_green_first_fails
-    arm_blue_green_new_fails arm_two_services arm_pull_stream_fails
+    arm_blue_green_new_fails arm_blue_green_new_fails_logs arm_two_services
+    arm_pull_stream_fails
     arm_registry_credentials arm_traefik_pull_fails arm_blue_green_swap
     arm_blue_green_upload arm_traefik_replaced arm_blue_green_traefik_replaced)
 
@@ -334,8 +349,12 @@ registry_certs=""
 workload_repo="localhost:$registry_port/bondi-check-workload"
 healthcheck_repo="localhost:$registry_port/bondi-check-workload-healthcheck"
 # A third repository, pushed at one tag, whose health check never passes though
-# it serves as the others do: the failed blue-green arms deploy it.
+# it serves as the others do: the failed blue-green arms deploy it. It prints the
+# marker below as its first line, which no other workload prints, so a line
+# carrying it in Loki came from a container of this image. The pid makes it this
+# run's.
 unhealthy_repo="localhost:$registry_port/bondi-check-workload-unhealthy"
+unhealthy_marker="bondi-check-unhealthy-started-$$"
 workload_tags=(v1 v2)
 workload_port=8080
 # The drain workload, pushed at the same two tags, which the swap and upload arms
@@ -699,10 +718,12 @@ await_registry() {
 # 29.9.3, a container run from this image by hand].
 push_workload() {
     local repository tag healthcheck docker_config reference dockerfile push_command
+    local first_line
     repository="$1"
     tag="$2"
     healthcheck="$3"
     docker_config="${4:-}"
+    first_line=""
     push_command=(docker)
     if [ -n "$docker_config" ]; then
         push_command+=(--config "$docker_config")
@@ -717,7 +738,17 @@ push_workload() {
                 printf 'HEALTHCHECK --interval=1s --timeout=2s --retries=3 CMD wget -q -O /dev/null http://127.0.0.1:%s/ || exit 1\n' "$workload_port"
                 ;;
             unhealthy)
-                printf 'HEALTHCHECK --interval=1s --timeout=2s --retries=3 CMD false\n'
+                # Failures in the start period do not count, so the server
+                # reads it unhealthy about 18 s after it starts, inside the 30 s
+                # the failed arms wait. That keeps it running long enough for
+                # Alloy to tail it: see `arm_blue_green_new_fails_logs`.
+                # The cost is that every arm deploying this workload waits the
+                # start period out: arm_blue_green_first_fails,
+                # arm_blue_green_new_fails and the logs arm each take roughly
+                # 15 s longer. That leaves about 12 s of the 30 s
+                # health_timeout as margin.
+                printf 'HEALTHCHECK --interval=1s --timeout=2s --retries=3 --start-period=15s CMD false\n'
+                first_line="echo $unhealthy_marker && "
                 ;;
             no-healthcheck) : ;;
             *)
@@ -725,7 +756,7 @@ push_workload() {
                 return 1
                 ;;
         esac
-        printf 'CMD ["sh", "-c", "mkdir -p /www && hostname > /www/index.html && exec httpd -f -p %s -h /www"]\n' "$workload_port"
+        printf 'CMD ["sh", "-c", "%smkdir -p /www && hostname > /www/index.html && exec httpd -f -p %s -h /www"]\n' "$first_line" "$workload_port"
     } > "$dockerfile"
     mkdir -p "$work/workload-context"
     # Recorded before it exists, so a build that fails half way is still removed.
@@ -897,6 +928,8 @@ deploy_fixture_up() {
     pull_pinned "$busybox_image"
     pull_pinned "$pebble_image"
     pull_pinned "$python_image"
+    pull_pinned "$loki_image"
+    pull_pinned "$alloy_image"
     create_acme_json
     start_registry
     start_auth_registry
@@ -1367,6 +1400,166 @@ arm_blue_green_new_fails() {
     expect_running_at "$v1_id" "$v1"
     expect_served_by "$new_fails_host" "$v1_id"
     expect_no_container_named "$new_fails_service-new"
+}
+
+# The Loki and the Alloy the failed-candidate logs arm starts. Their names carry
+# this run's pid, as the registry's does, and every port they publish is one the
+# engine picks on loopback, so neither can be taken by anything already on the
+# engine and the preconditions have nothing to refuse for them. Both carry the
+# fixture's label, so teardown removes them with the rest.
+log_sink_loki="bondi-check-loki-$$"
+log_sink_alloy="bondi-check-alloy-$$"
+# Loki's published address, and the value of `SECONDS` just before Alloy was
+# started, both set by `start_log_sink`.
+loki_address=""
+alloy_started_at=""
+# How long Loki, then Alloy, is given to answer ready, and the marker to arrive:
+# the bound the real-Alloy suite gives its Loki, which is room for a loaded
+# engine.
+log_sink_bound=120
+# Alloy first lists containers no earlier than `alloy_started_at`, so a refresh
+# of Alloy's one-minute default lists them next no earlier than a minute after
+# it. A candidate removed within this many seconds of the start is one that
+# default never lists, and the arm tells the two apart. The bound is under a
+# minute by the margin of whole-second clocks, as the suite's is.
+log_sink_window=55
+
+# A Loki on loopback, then an Alloy in its network namespace over the committed
+# config, which pushes to that Loki at 127.0.0.1:3100. Alloy's HTTP port is
+# published by the Loki, since a container in another's namespace publishes
+# nothing. The config goes in with `docker cp`, as the registry's certificate
+# does, so nothing depends on the engine sharing this shell's filesystem. The
+# config reads the journal at /var/log/journal, and Alloy refuses to load it
+# where that path is missing, so an empty tmpfs is mounted there: it gives the
+# journal source nothing to read, and the arm needs nothing from the host.
+start_log_sink() {
+    local deadline alloy_id alloy_address
+    docker run --detach --name "$log_sink_loki" --label "$fixture_label" \
+        --publish 127.0.0.1::3100 --publish 127.0.0.1::12345 \
+        "$loki_image" -config.file=/etc/loki/local-config.yaml -auth.enabled=false > /dev/null
+    loki_address="$(docker port "$log_sink_loki" 3100/tcp | head -n 1)"
+    alloy_address="$(docker port "$log_sink_loki" 12345/tcp | head -n 1)"
+    if [ -z "$loki_address" ] || [ -z "$alloy_address" ]; then
+        echo "error: $log_sink_loki published no address for Loki or for Alloy" >&2
+        return 1
+    fi
+    # Alloy backs off between refused pushes, so it is started only once Loki
+    # answers, and a slow Loki cannot read as a line that was not delivered.
+    deadline=$((SECONDS + log_sink_bound))
+    until curl --silent --fail --max-time 5 --output /dev/null "http://$loki_address/ready"; do
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "error: $log_sink_loki did not answer ready on $loki_address within ${log_sink_bound}s" >&2
+            docker logs "$log_sink_loki" 2>&1 | tail -n 40 >&2 || true
+            return 1
+        fi
+        sleep 1
+    done
+    echo "ok: $log_sink_loki answers ready on $loki_address"
+
+    alloy_id="$(docker create --name "$log_sink_alloy" --label "$fixture_label" \
+        --network "container:$log_sink_loki" \
+        --volume /var/run/docker.sock:/var/run/docker.sock:ro \
+        --tmpfs /var/log/journal \
+        "$alloy_image" run --server.http.listen-addr=0.0.0.0:12345 /etc/alloy/config.alloy)"
+    docker cp "$alloy_config" "$alloy_id:/etc/alloy/config.alloy" > /dev/null
+    alloy_started_at=$SECONDS
+    docker start "$alloy_id" > /dev/null
+    deadline=$((SECONDS + log_sink_bound))
+    until curl --silent --fail --max-time 5 --output /dev/null "http://$alloy_address/-/ready"; do
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "error: $log_sink_alloy did not answer ready on $alloy_address within ${log_sink_bound}s" >&2
+            docker logs "$alloy_id" 2>&1 | tail -n 40 >&2 || true
+            return 1
+        fi
+        sleep 1
+    done
+    echo "ok: $log_sink_alloy ($alloy_image) answers ready on $alloy_address, over $alloy_config"
+}
+
+# A line holding the marker is in Loki under the stream whose `container` label
+# is the one given. The label is in the selector, so a line that arrived under
+# any other `container`, the candidate's temporary name included, is not an
+# answer. Asked again until the bound, because the line reaches Loki on Alloy's
+# schedule, and each request is capped so one that hangs cannot hold the poll
+# past it.
+expect_logged_under() {
+    local container_label marker deadline answer
+    container_label="$1"
+    marker="$2"
+    deadline=$((SECONDS + log_sink_bound))
+    answer=""
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if answer="$(curl --silent --fail --max-time 5 --get "http://$loki_address/loki/api/v1/query_range" \
+            --data-urlencode "query={container=\"$container_label\"} |= \"$marker\"" \
+            --data-urlencode limit=10)" && grep -qF -- "$marker" <<< "$answer"; then
+            echo "ok: Loki holds '$marker' under container=$container_label"
+            return 0
+        fi
+        sleep 2
+    done
+    {
+        echo "error: expected Loki to hold '$marker' under container=$container_label within ${log_sink_bound}s"
+        echo "  last answer: ${answer:-none}"
+        echo "--- alloy logs ---"
+        docker logs "$log_sink_alloy" 2>&1 | tail -n 40 || true
+    } >&2
+    return 1
+}
+
+# The service the failed-candidate logs arm deploys, named and hosted apart from
+# the other arms' for the reasons the `simple` arm's are.
+new_fails_logs_service="bondi-check-new-fails-logs-$$"
+new_fails_logs_host="new-fails-logs.check-server-image.invalid"
+
+# A blue-green candidate that fails its health check beside a serving container
+# has its lines delivered, under the service's name. The candidate runs under the
+# temporary name, so its `container` label is the service's only if the config
+# reads `bondi.name`. It is alive for its health wait, about 18 s [assumed: the
+# 15 s start period and three one-second failures, not timed], then for the
+# 10 s the server's stop waits, since busybox `httpd` as PID 1 does not answer
+# SIGTERM [observed -- 2026-11-24, Docker Engine 29.10.0: a stop of this image's
+# command took 10 s]. Under a 5 s refresh the Docker source began tailing a new
+# container 11 to 15 s after it started, and never tailed one removed after 10 s
+# [observed in the real-Alloy suite -- 2026-11-24, Alloy v1.8.0], so the
+# candidate's 28 s or so leave room past that.
+#
+# Loki and Alloy start here rather than with the fixture, so the arm knows when
+# Alloy first listed containers. The candidate is gone well inside a minute of
+# that, which is what lets the arm tell a 5 s refresh from Alloy's one-minute
+# default: under the default, nothing lists the candidate, and its marker never
+# arrives. A run slow enough that the candidate outlived the window could have
+# been listed either way, so it fails rather than passes.
+arm_blue_green_new_fails_logs() {
+    local v1 failing v1_id elapsed
+    v1="$healthcheck_repo:v1"
+    failing="$unhealthy_repo:v1"
+
+    echo "==> $image: a blue-green deploy of $v1, then of $failing, whose health check never passes"
+    deploy_service "$new_fails_logs_service" "$v1" "$new_fails_logs_host" blue-green "${blue_green_settings[@]}"
+    expect_code "deploy $v1" 0
+    v1_id="$(container_id_of "$new_fails_logs_service")"
+    expect_running_at "$v1_id" "$v1"
+    # Started only now, so the window measures the candidate's lifetime and not
+    # v1's whole deploy.
+    echo "==> $image: a Loki and an Alloy over the generated config, for a failed candidate's logs"
+    start_log_sink
+    deploy_service "$new_fails_logs_service" "$failing" "$new_fails_logs_host" blue-green "${blue_green_settings[@]}"
+    expect_code "deploy $failing" 1
+    expect_stream_contains "deploy $failing" stderr "container $new_fails_logs_service-new is unhealthy"
+    expect_no_container_named "$new_fails_logs_service-new"
+    elapsed=$((SECONDS - alloy_started_at))
+    if [ "$elapsed" -gt "$log_sink_window" ]; then
+        {
+            echo "error: the failed candidate was removed ${elapsed}s after Alloy started, past the ${log_sink_window}s"
+            echo "inside which a one-minute refresh could not have listed it. Its marker would arrive"
+            echo "whichever refresh the config carries, so this run cannot tell them apart."
+        } >&2
+        return 1
+    fi
+    echo "ok: the failed candidate was removed ${elapsed}s after Alloy started"
+    expect_logged_under "$new_fails_logs_service" "$unhealthy_marker"
+    # Not left running until teardown; teardown by label still covers an abort.
+    docker rm -f "$log_sink_alloy" "$log_sink_loki" >/dev/null
 }
 
 # The two services the side-by-side arm deploys, named and hosted apart from each

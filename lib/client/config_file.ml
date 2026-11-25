@@ -233,10 +233,35 @@ type cron_job = {
 }
 [@@deriving yojson]
 
+(* The retry limit is refined once, at decode, so a [Max_backoff_retries.t]
+   is the only thing that ever leaves this module and the refusal can name the
+   field as the manifest spells it. Any JSON value that is not an integer
+   (a string, a float, a bool, null inside a list) is refused with the same
+   words, so the operator is told what to write, not what the decoder saw.
+
+   A negative limit is refused because Alloy would take it and, [assumed from
+   Alloy v1.8.0's loki.write source], send once and never retry, with no
+   complaint. *)
+type max_backoff_retries = Bondi_common.Alloy_river.Max_backoff_retries.t
+
+let max_backoff_retries_to_yojson limit : Yojson.Safe.t =
+  `Int (Bondi_common.Alloy_river.Max_backoff_retries.to_int limit)
+
+let max_backoff_retries_of_yojson (json : Yojson.Safe.t) :
+    (max_backoff_retries, string) result =
+  let field = "alloy.grafana_cloud.max_backoff_retries: " in
+  match json with
+  | `Int n -> (
+      match Bondi_common.Alloy_river.Max_backoff_retries.of_int n with
+      | Ok limit -> Ok limit
+      | Error reason -> Error (field ^ reason))
+  | _ -> Error (field ^ "expected a whole number")
+
 type alloy_grafana_cloud = {
   instance_id : string;
   api_key : string;
   endpoint : string;
+  max_backoff_retries : max_backoff_retries option; [@default None]
 }
 [@@deriving yojson]
 
