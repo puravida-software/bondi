@@ -39,6 +39,8 @@ probe on its own would pass against a run that never restarted anything.
   >   "sudo systemd-tmpfiles --create --prefix '/var/log/journal'") : ;;
   >   'sudo systemctl restart systemd-journald')
   >     printf '%s\n' "$JOURNAL_AFTER_RESTART" > "$JOURNAL_FILE" ;;
+  >   *BONDI_ALLOY_CURL_PRESENT*) echo BONDI_ALLOY_CURL_PRESENT ;;
+  >   *BONDI_ALLOY_PORT_FREE*) echo "${ALLOY_PORT:-BONDI_ALLOY_PORT_FREE}" ;;
   >   *BONDI_ACME_PRESENT*) echo BONDI_ACME_PRESENT ;;
   >   'docker --version') echo 'Docker version 27.0.0, build deadbeef' ;;
   >   # The orchestrator this file's box already runs, carrying the digest setup
@@ -61,6 +63,10 @@ probe on its own would pass against a run that never restarted anything.
   >   *BONDI_ALLOY_MODE_ABSENT*) echo 0640 ;;
   >   *'sudo stat -c %04a'*) echo 0640 ;;
   >   *'cat > '*'/etc/bondi/alloy/env'*) : ;;
+  >   # The health wait that follows the run, answered as a running Alloy
+  >   # answers it. Without this arm the probe falls through to *) and answers
+  >   # nothing, which setup reads as no verdict and fails the run on.
+  >   *'http://127.0.0.1:12345/-/healthy'*) echo BONDI_ALLOY_HEALTHY ;;
   >   *'--name bondi-alloy'*) echo 'd671990dc2318f4b' ;;
   >   *'/var/spool/cron/crontabs/root'*) echo BONDI_CRONTAB_ABSENT ;;
   >   *BONDI_CRON_PAYLOAD_LISTED*)
@@ -113,12 +119,12 @@ journal, says so as it goes, and goes on to replace Alloy.
   Pulled mlopez1506/bondi-server:0.25.0 on server 127.0.0.1
   bondi-orchestrator container is already running on server 127.0.0.1: 0.25.0, skipping...
   Pulled grafana/alloy:v1.8.0 on server 127.0.0.1
+  curl on server 127.0.0.1 can ask Alloy on port 12345
   Provisioned persistent journal storage on server 127.0.0.1: /var/log/journal
+  port 12345 on server 127.0.0.1 is free for Alloy
   Stopped bondi-alloy container on server 127.0.0.1
   Removed bondi-alloy container and config on server 127.0.0.1
   Alloy config written on server 127.0.0.1: /etc/bondi/alloy/config.alloy
-  Wrote Alloy credentials file on server 127.0.0.1: /etc/bondi/alloy/env
-  bondi-alloy container started on server 127.0.0.1: d671990dc2318f4b
 
 What it changed is a line of the run's account, worded the way every other
 correction is: what the box had, then what the run applied. The run that

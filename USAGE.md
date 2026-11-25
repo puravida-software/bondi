@@ -43,7 +43,7 @@ Before you start, you need:
   - **`bondi-server` 0.16.0 or later must already be running on it.** The crontab line Bondi writes is a `docker exec` into the orchestrator that runs the server binary's `run` subcommand. That subcommand arrived in 0.15.0, but 0.15.0's own crontab writer still emits the older `curl` line and writes no run file — and the deploy that rewrites a box's crontab runs on the box, so an orchestrator below 0.16.0 answers a cron deploy with success and changes nothing. `bondi deploy` reads the orchestrator's version off the box and refuses a cron-declaring deploy against an older one, naming both versions. Run `bondi setup` first, with the version you want pinned under `bondi_server:`.
   - **`docker` must be on the `PATH` cron runs jobs with** — `/usr/bin:/bin` on Debian and Ubuntu. The line invokes `docker exec` by name, and cron gives a job a minimal environment rather than a login one, so a Docker installed under `/usr/local/bin` answers over SSH and still fails every scheduled run. `bondi setup` asks the server what an empty environment resolves and stops if the answer is nothing. The apt install `get.docker.com` performs — which is what Bondi installs — puts it at `/usr/bin/docker`.
   - **`curl` 7.76 or later**, only if the server still holds cron lines written by an older Bondi. Those lines are `curl` invocations using `--fail-with-body`, which an older curl rejects as an unknown option, and they keep firing on their schedule until each job is deployed again. What they can no longer do is succeed: a current image serves nothing, and no orchestrator `bondi setup` creates publishes a port, so on a box running a current orchestrator every such line fails at the connection whatever curl the host has. `bondi setup` still checks the version and stops with what it found; the fix that actually retires those lines is to deploy each cron job once. Debian 12 and Ubuntu 22.04 or later are fine; Debian 11 and Ubuntu 20.04 are not.
-- **If you ship logs with [Alloy](#4-alloy-grafana-cloud-logs)**, the server must run systemd's journald, because cron jobs' lines are read from its journal. `bondi setup` makes the journal persistent if it is not. See [The server's journal must be persistent](#the-servers-journal-must-be-persistent).
+- **If you ship logs with [Alloy](#4-alloy-grafana-cloud-logs)**, the server must run systemd's journald, because cron jobs' lines are read from its journal. `bondi setup` makes the journal persistent if it is not. See [The server's journal must be persistent](#the-servers-journal-must-be-persistent). The server also needs `curl`, and port `12345` on its loopback must be free: after starting Alloy, setup asks it for its health there with the server's `curl`. See [Reading Alloy's counters](#reading-alloys-counters).
 
 Install the CLI:
 
@@ -726,7 +726,7 @@ Both fields ride in the job's run payload alongside `env_vars` — the file the 
 
 ## 4. Alloy (Grafana Cloud Logs)
 
-Bondi can ship container logs to Grafana Cloud using [Grafana Alloy](https://grafana.com/docs/alloy/latest/). Alloy runs as a sidecar container on the server, discovers Bondi-managed containers via the Docker socket, and forwards their logs to Loki. Cron job containers are the exception: their lines are read from the server's systemd journal instead, so a run that lasts under a second still ships. See [Cron job logs come from the host journal](#cron-job-logs-come-from-the-host-journal).
+Bondi can ship container logs to Grafana Cloud using [Grafana Alloy](https://grafana.com/docs/alloy/latest/). Alloy runs as a sidecar container on the server, discovers Bondi-managed containers via the Docker socket, and forwards their logs to Loki. It lists containers every 5 s, so a container that runs past about 15 s is read even if it's gone within a minute; one that exits sooner may still be missed. Cron job containers are the exception: their lines are read from the server's systemd journal instead, so a run that lasts under a second still ships. See [Cron job logs come from the host journal](#cron-job-logs-come-from-the-host-journal).
 
 Add an `alloy` section to your `bondi.yaml`:
 
@@ -763,6 +763,7 @@ alloy:
     instance_id: "{{GRAFANA_INSTANCE_ID}}"
     api_key: "{{GRAFANA_API_KEY}}"
     endpoint: "https://logs-prod-us-central1.grafana.net/loki/api/v1/push"
+    max_backoff_retries: 0        # retries per batch; 0 retries indefinitely (default: Alloy's, 10)
   image: grafana/alloy:v1.8.0    # pin a specific version (default: grafana/alloy:v1.8.0)
   collect: all                    # "all" or "services_only" (default: all)
   labels:                         # extra labels attached to every log line
@@ -772,6 +773,7 @@ alloy:
 
 | Field | Default | Description |
 |---|---|---|
+| `grafana_cloud.max_backoff_retries` | _(Alloy's, 10)_ | How many times Alloy retries a batch Loki did not accept before it drops the batch's lines. With Alloy's default of 10, a Loki or network outage longer than about 8.5 minutes loses lines. `0` retries indefinitely. A negative value, or anything that is not a whole number, is refused when `bondi.yaml` is read. Changing it changes Alloy's configuration, so the next `bondi setup` restarts Alloy. |
 | `image` | `grafana/alloy:v1.8.0` | Alloy Docker image. Override to pin or upgrade. |
 | `collect` | `all` | `all` collects logs from every Bondi-managed container (service, cron, managed containers, infrastructure) that is not opted out. `services_only` restricts to service and cron containers, excluding managed containers and infrastructure like the orchestrator and Traefik. Before `0.24.1`, `services_only` shipped nothing at all; see [Upgrading to 0.24.1](#upgrading-to-0241). From `0.25.0`, cron containers ship from the systemd journal; see [Upgrading to 0.25.0](#upgrading-to-0250). |
 | `labels` | _(none)_ | Key-value pairs added as external labels on every log line sent to Grafana Cloud. Useful for filtering in Loki by environment, team, etc. |
@@ -812,7 +814,7 @@ The value stays the same from one run to the next, so one workload is one stream
 
 ### Cron job logs come from the host journal
 
-A cron job's container can finish in under a second. Alloy's Docker discovery lists only running containers, about once a minute, so it can miss a short run entirely. So the orchestrator starts every cron job container with Docker's `journald` logging driver, and Alloy reads cron lines from the server's systemd journal. Service, managed and infrastructure containers are still read through the Docker socket, exactly as before.
+A cron job's container can finish in under a second. Alloy's Docker discovery lists only running containers, every 5 s, so a container that runs past about 15 s is read even if it's gone within a minute; one that exits sooner may still be missed, so a short cron run could be missed entirely. So the orchestrator starts every cron job container with Docker's `journald` logging driver, and Alloy reads cron lines from the server's systemd journal. Service, managed and infrastructure containers are still read through the Docker socket, exactly as before.
 
 - **Every line a cron run writes reaches Loki once**, however short the run. Alloy's Docker discovery skips cron containers under both `collect` modes, so a run it happens to list is not shipped a second time.
 - **A cron stream carries the same labels as before:** `container` (the job's name, as in the table above), the `service_name` Loki derives from it, and the `labels` you declare. Queries such as `{container="daily-backup"}` keep working.
@@ -865,6 +867,26 @@ The Alloy configuration is written by `bondi setup`, not by `bondi deploy`, so a
 3. Run `bondi setup`. It rewrites `/etc/bondi/alloy/config.alloy` and replaces the `bondi-alloy` container.
 
 Your service needs no redeploy for its logs to start shipping or to carry `container`.
+
+### Reading Alloy's counters
+
+Alloy's HTTP server listens on the server's `127.0.0.1:12345` only. The `bondi-alloy` container shares the host's network, so nothing outside the server reaches that address, and neither do containers on Docker's bridge networks: each one's `127.0.0.1` is its own (a host-networked container shares the box's loopback). Read how many lines Alloy has sent and how many it has dropped from your machine, without entering the container:
+
+```bash
+ssh root@203.0.113.10 curl -s 127.0.0.1:12345/metrics | grep -E 'loki_write_(dropped|sent)_entries_total'
+```
+
+`loki_write_sent_entries_total` counts the lines Alloy sent to Loki. `loki_write_dropped_entries_total` counts the lines it dropped because they still failed after its last retry; see `max_backoff_retries` under [Optional settings](#optional-settings). Both count from when that Alloy container started, so a restart resets them.
+
+Alloy's HTTP server also serves its reload endpoint and component API. Anyone with a shell on the server can reach them, as they can already reach the Docker socket.
+
+After starting Alloy, `bondi setup` waits up to 30 s for it to answer healthy at that address. If it does not, setup fails:
+
+```
+Error: Alloy did not answer healthy at http://127.0.0.1:12345/-/healthy before setup gave up waiting. It may have exited at start: another process on the box may hold port 12345.
+```
+
+Alloy exits at start when it cannot listen on its port. Free port `12345` on the server and run `bondi setup` again. A server without `curl` fails the same step with a message that says so, because setup asks with the server's `curl`.
 
 ### Removing Alloy
 

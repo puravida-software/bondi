@@ -116,12 +116,15 @@ type action =
   | RunServer
   | EnsureJournalStorage
   | EnsureAlloyState
+  | RequireAlloyCurl
+  | RequireAlloyPort
   | PullAlloy
   | CheckAlloyImage of image_check
   | CorrectAlloyConfigMode
   | EnsureAlloyConfig
   | WriteAlloyEnv
   | RunAlloy
+  | AwaitAlloyHealthy
   | StopAlloy
   | RemoveAlloy
   | CleanAlloyConfig
@@ -160,12 +163,15 @@ let phase_of_action : action -> Setup_phases.phase = function
       Setup_phases.Orchestrator
   | EnsureJournalStorage
   | EnsureAlloyState
+  | RequireAlloyCurl
+  | RequireAlloyPort
   | PullAlloy
   | CheckAlloyImage _
   | CorrectAlloyConfigMode
   | EnsureAlloyConfig
   | WriteAlloyEnv
   | RunAlloy
+  | AwaitAlloyHealthy
   | StopAlloy
   | RemoveAlloy
   | CleanAlloyConfig ->
@@ -849,27 +855,31 @@ let alloy_state_dir_command =
    run command pointing at a path nothing wrote starts a sidecar that ships
    nothing while every half of the pair still looks right on its own.
 
-   The journal mount, the state bind and --storage.path come from
-   [Alloy_run_args] and are spelled nowhere here. The behavioural test runs the
-   real image with the arguments that module prints, so a path written a second
-   time in this command would let that test pass on a run line that does not
-   ship. The Docker options go before the image and the Alloy option after
-   `run`, because each program refuses the other's. *)
+   The journal mount, the state bind, --storage.path, the host network and the
+   HTTP listen address come from [Alloy_run_args] and are spelled nowhere here.
+   The behavioural test runs the real image with the arguments that module
+   prints, so an argument written a second time in this command would let that
+   test pass on a run line that does not ship. The Docker options go before the
+   image and the Alloy options after `run`, because each program refuses the
+   other's. *)
 let quoted_join options = String.concat " " (List.map Filename.quote options)
 
 let render_alloy_run ~restart ~spec_label ~image =
   let journal =
     Alloy_run_args.journal ~host_state_dir:Alloy_run_args.state_dir
   in
+  let http = Alloy_run_args.http ~listen_port:Alloy_run_args.http_listen_port in
   Printf.sprintf
     "docker run -d --name %s%s -v /var/run/docker.sock:/var/run/docker.sock:ro \
-     -v %s:%s:ro %s --label bondi.managed=true --label \
+     -v %s:%s:ro %s %s --label bondi.managed=true --label \
      bondi.type=infrastructure --label bondi.logs=false%s --env-file %s %s run \
-     %s %s"
+     %s %s %s"
     Builtin_container.alloy restart alloy_config_path alloy_config_path
     (quoted_join journal.docker_options)
+    (quoted_join http.docker_options)
     spec_label alloy_env_path (Filename.quote image)
     (quoted_join journal.alloy_options)
+    (quoted_join http.alloy_options)
     alloy_config_path
 
 (* The same rule as the orchestrator's, plus the two files Alloy reads at start.
@@ -1222,6 +1232,7 @@ let alloy_river_config (config : Config_file.t) (alloy : Config_file.alloy) :
     collect;
     labels;
     excluded_containers = excluded_containers_from_config config;
+    max_backoff_retries = alloy.grafana_cloud.max_backoff_retries;
   }
 
 (* ------------------------------------------------------------------------- *)
@@ -1380,12 +1391,26 @@ let alloy_image (alloy : Config_file.alloy) =
   Bondi_common.Image_reference.to_string
     (Builtin_image.alloy ~declared:alloy.image)
 
+(* Alloy created: its files, the run that reads them, and the wait for it to
+   answer healthy. [docker run -d] succeeds once the container exists, and an
+   Alloy that cannot bind its HTTP port exits after that, so the run alone says
+   nothing about whether Alloy came up. The wait sits right after the run, in
+   the one list every path that starts Alloy uses, so no such path can start one
+   without asking. *)
+let alloy_start =
+  [ EnsureAlloyConfig; WriteAlloyEnv; RunAlloy; AwaitAlloyHealthy ]
+
 (* Alloy torn down and created again. [RemoveAlloy] deletes the config
    directory, so the River configuration and the credentials file are written
    after it and before the run that reads them. One list for both routes to a
-   replacement, for the reason [orchestrator_replacement] gives. *)
+   replacement, for the reason [orchestrator_replacement] gives.
+
+   The port check is the first action, ahead of the stop, on every path to a
+   replacement: a box whose port something else holds would lose the Alloy it
+   had and fail to start the next. A first install, which stops nothing, carries
+   it too, ahead of its run. *)
 let alloy_replacement =
-  [ StopAlloy; RemoveAlloy; EnsureAlloyConfig; WriteAlloyEnv; RunAlloy ]
+  RequireAlloyPort :: StopAlloy :: RemoveAlloy :: alloy_start
 
 (* Whether the running alloy was created with the command, River configuration
    and credentials this setup would write: all three are in its digest. *)
@@ -1461,9 +1486,25 @@ let plan (config : Config_file.t) ~(specs : Managed_container.t list)
      River configuration and its credentials file -- is checked after the pull
      rather than replaced, for the reason the orchestrator is. The journal and
      the state directory are still ensured ahead of the check: neither touches
-     the running container, and a replacement the check calls for needs both. *)
+     the running container, and a replacement the check calls for needs both.
+
+     A kept alloy is waited on as well. The listing names a container as
+     running for as long as Docker holds it so, and a crash-looping Alloy is
+     [running] between its restarts, so a listing that said running proved
+     nothing about its answering. The wait follows the mode correction because
+     a mode the container cannot read is a cause the correction removes. When
+     the correction instead finds a file missing it plans the replacement, which
+     waits for itself, and this second wait then answers at once.
+
+     [RequireAlloyCurl] follows the pull in [prepare], so it is on the kept path
+     too: the kept path's wait asks with the host's curl, and a refusal is
+     cheapest before the journal and state directory, not at the wait. [RequireAlloyPort] is
+     not on the kept path: the port is the kept container's own, and the wait is
+     what proves it answers. *)
   let alloy =
-    let prepare = [ PullAlloy; EnsureJournalStorage; EnsureAlloyState ] in
+    let prepare =
+      [ PullAlloy; RequireAlloyCurl; EnsureJournalStorage; EnsureAlloyState ]
+    in
     match (config.alloy, ctx.alloy_state) with
     | Some alloy, Alloy_running { spec_hash } ->
         if alloy_spec_matches config alloy ~spec_hash then
@@ -1471,14 +1512,13 @@ let plan (config : Config_file.t) ~(specs : Managed_container.t list)
           @ [
               CheckAlloyImage
                 {
-                  kept = [ CorrectAlloyConfigMode ];
+                  kept = [ CorrectAlloyConfigMode; AwaitAlloyHealthy ];
                   replacement = alloy_replacement;
                 };
             ]
         else prepare @ alloy_replacement
     | Some _, Alloy_not_running -> prepare @ alloy_replacement
-    | Some _, Alloy_absent ->
-        prepare @ [ EnsureAlloyConfig; WriteAlloyEnv; RunAlloy ]
+    | Some _, Alloy_absent -> prepare @ (RequireAlloyPort :: alloy_start)
     (* Withdrawn from configuration. A stopped container has to go too, or the
        name stays taken and the wedge outlives the withdrawal. *)
     | None, (Alloy_not_running | Alloy_running _) -> [ StopAlloy; RemoveAlloy ]
@@ -2216,6 +2256,64 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
               (Printf.sprintf "%s container started on server %s: %s"
                  Builtin_container.alloy ip_address (String.trim output));
             Ok [])
+    | RequireAlloyCurl ->
+        (* What counts as the host having answered, and what each answer means,
+           is [Alloy_preflight]'s; this arm obtains the reply and carries the
+           verdict out. It runs ahead of every stop, so the refusal leaves the
+           Alloy the box had. *)
+        let port = Alloy_run_args.http_listen_port in
+        let* output =
+          Remote_exec.command_output_text ?session
+            ~timeout_seconds:host_command_seconds
+            ~command:Alloy_preflight.curl_probe_command server
+        in
+        let* () =
+          Alloy_preflight.require_curl ~port
+            (Alloy_preflight.curl_verdict_of_probe
+               (Host_answer.of_host_output output))
+        in
+        print_endline
+          (Printf.sprintf "curl on server %s can ask Alloy on port %d"
+             ip_address port);
+        Ok []
+    | RequireAlloyPort ->
+        let port = Alloy_run_args.http_listen_port in
+        let* output =
+          Remote_exec.command_output_text ?session
+            ~timeout_seconds:host_command_seconds
+            ~command:(Alloy_preflight.port_probe_command ~port)
+            server
+        in
+        let* () =
+          Alloy_preflight.require_port_available
+            (Alloy_preflight.port_verdict_of_probe ~port
+               (Host_answer.of_host_output output))
+        in
+        print_endline
+          (Printf.sprintf "port %d on server %s is free for Alloy" port
+             ip_address);
+        Ok []
+    | AwaitAlloyHealthy ->
+        (* What the answer means is [Alloy_health]'s decision; this arm only
+           obtains it and carries the verdict out. *)
+        let port = Alloy_run_args.http_listen_port in
+        let* output =
+          Remote_exec.command_output_text ?session
+            ~timeout_seconds:host_command_seconds
+            ~command:
+              (Alloy_health.probe_command ~port
+                 ~timeout_s:Alloy_health.wait_seconds)
+            server
+        in
+        let* () =
+          Alloy_health.require_healthy
+            (Alloy_health.verdict_of_probe ~port
+               (Host_answer.of_host_output output))
+        in
+        print_endline
+          (Printf.sprintf "%s answered healthy on server %s, port %d"
+             Builtin_container.alloy ip_address port);
+        Ok []
     | StopAlloy ->
         let* _ =
           Remote_exec.docker_command_output_text ?session
@@ -2450,6 +2548,9 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
     | EnsureAlloyConfig
     | WriteAlloyEnv
     | RunAlloy
+    | AwaitAlloyHealthy
+    | RequireAlloyCurl
+    | RequireAlloyPort
     | StopAlloy
     | RemoveAlloy
     | CleanAlloyConfig

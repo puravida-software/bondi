@@ -712,6 +712,111 @@ let test_alloy_credential_equals_sign_accepted () =
               check string "api key kept verbatim" "glc_eyJvIjoiMT=="
                 alloy.grafana_cloud.api_key))
 
+(* [retries] is spliced verbatim under [grafana_cloud], so a caller chooses
+   the YAML spelling: a bare [5] is a number, a quoted ["5"] a string. *)
+let alloy_retries_yaml retries =
+  Printf.sprintf
+    {|bondi_server:
+  version: 0.1.0
+
+alloy:
+  grafana_cloud:
+    instance_id: "123"
+    api_key: "abc"
+    endpoint: https://logs.example.com/push
+    max_backoff_retries: %s
+|}
+    retries
+
+let read_alloy_retries yaml =
+  Unix.putenv "SSH_PRIVATE_KEY_CONTENTS" "ssh-key";
+  Unix.putenv "SSH_PRIVATE_KEY_PASS" "ssh-pass";
+  with_temp_config yaml (fun () ->
+      match Config_file.read () with
+      | Error message -> Error message
+      | Ok config -> (
+          match config.alloy with
+          | None -> Error "expected alloy config"
+          | Some alloy -> Ok (config, alloy)))
+
+let retries_as_int (alloy : Config_file.alloy) =
+  Option.map Bondi_common.Alloy_river.Max_backoff_retries.to_int
+    alloy.grafana_cloud.max_backoff_retries
+
+let test_alloy_max_backoff_retries_absent () =
+  match
+    read_alloy_retries
+      {|bondi_server:
+  version: 0.1.0
+
+alloy:
+  grafana_cloud:
+    instance_id: "123"
+    api_key: "abc"
+    endpoint: https://logs.example.com/push
+|}
+  with
+  | Error message -> fail message
+  | Ok (_, alloy) ->
+      check (option int) "absent decodes to None" None (retries_as_int alloy)
+
+(* [0] is the value Alloy reads as "retry indefinitely", so it is a value to
+   keep, not an absence to drop. *)
+let test_alloy_max_backoff_retries_zero_and_positive () =
+  List.iter
+    (fun n ->
+      match read_alloy_retries (alloy_retries_yaml (string_of_int n)) with
+      | Error message -> fail message
+      | Ok (_, alloy) ->
+          check (option int)
+            (Printf.sprintf "%d decodes to itself" n)
+            (Some n) (retries_as_int alloy))
+    [ 0; 5 ]
+
+let test_alloy_max_backoff_retries_negative_refused () =
+  match read_alloy_retries (alloy_retries_yaml "-1") with
+  | Ok _ -> fail "expected a negative retry limit to be refused"
+  | Error message ->
+      check bool
+        (Printf.sprintf "error names the field, got: %s" message)
+        true
+        (Bondi_common.String_utils.contains
+           ~needle:"alloy.grafana_cloud.max_backoff_retries" message)
+
+(* Every non-integer is refused with the same words, whatever its JSON type. *)
+let test_alloy_max_backoff_retries_non_integer_refused () =
+  List.iter
+    (fun (label, spelling) ->
+      match read_alloy_retries (alloy_retries_yaml spelling) with
+      | Ok _ -> fail (label ^ ": expected the retry limit to be refused")
+      | Error message ->
+          check bool
+            (Printf.sprintf "%s: refusal says what to write, got: %s" label
+               message)
+            true
+            (Bondi_common.String_utils.contains
+               ~needle:
+                 "alloy.grafana_cloud.max_backoff_retries: expected a whole \
+                  number"
+               message))
+    [ ("string", {|"5"|}); ("float", "5.5"); ("bool", "true"); ("list", "[5]") ]
+
+(* The field is read for one consumer, the River config setup ships, so the
+   chain is followed from the manifest to the line Alloy reads. *)
+let test_alloy_max_backoff_retries_reaches_river () =
+  match read_alloy_retries (alloy_retries_yaml "7") with
+  | Error message -> fail message
+  | Ok (config, alloy) ->
+      let river =
+        Bondi_client.Cmd.Setup.alloy_river_config config alloy
+        |> Bondi_common.Alloy_river.generate
+      in
+      check bool
+        (Printf.sprintf "river carries the declared limit, got:\n%s" river)
+        true
+        (Bondi_common.String_utils.contains ~needle:"max_backoff_retries = 7"
+           river)
+
 let managed_yaml body =
   {|bondi_server:
   version: 0.1.0
@@ -1539,6 +1644,16 @@ let () =
             test_alloy_instance_id_newline_rejected;
           test_case "alloy api key with an equals sign" `Quick
             test_alloy_credential_equals_sign_accepted;
+          test_case "alloy max_backoff_retries absent" `Quick
+            test_alloy_max_backoff_retries_absent;
+          test_case "alloy max_backoff_retries zero and positive" `Quick
+            test_alloy_max_backoff_retries_zero_and_positive;
+          test_case "alloy max_backoff_retries negative refused" `Quick
+            test_alloy_max_backoff_retries_negative_refused;
+          test_case "alloy max_backoff_retries non-integer refused" `Quick
+            test_alloy_max_backoff_retries_non_integer_refused;
+          test_case "alloy max_backoff_retries reaches the river config" `Quick
+            test_alloy_max_backoff_retries_reaches_river;
         ] );
       ( "managed_containers",
         [

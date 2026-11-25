@@ -59,6 +59,9 @@ let test_phase_of_each_action_is_named () =
       (Setup.EnsureAlloyConfig, "Alloy");
       (Setup.WriteAlloyEnv, "Alloy");
       (Setup.RunAlloy, "Alloy");
+      (Setup.AwaitAlloyHealthy, "Alloy");
+      (Setup.RequireAlloyCurl, "Alloy");
+      (Setup.RequireAlloyPort, "Alloy");
       (Setup.StopAlloy, "Alloy");
       (Setup.RemoveAlloy, "Alloy");
       (Setup.CleanAlloyConfig, "Alloy");

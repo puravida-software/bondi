@@ -25,6 +25,8 @@ succeeds, so the failure is genuinely mid-plan.
   >     printf '%s: Pulling from %s\n' "${ref##*:}" "${ref%:*}"
   >     printf 'Digest: sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4\n'
   >     printf 'Status: Image is up to date for %s\n%s\n' "$ref" "$ref" ;;
+  >   *BONDI_ALLOY_CURL_PRESENT*) echo BONDI_ALLOY_CURL_PRESENT ;;
+  >   *BONDI_ALLOY_PORT_FREE*) echo "${ALLOY_PORT:-BONDI_ALLOY_PORT_FREE}" ;;
   >   *BONDI_ACME_PRESENT*) echo BONDI_ACME_PRESENT ;;
   >   # The journal probe, answered present: this box's journald already stores
   >   # under /var/log/journal, so the alloy phase reads it once and goes on.
@@ -74,6 +76,10 @@ succeeds, so the failure is genuinely mid-plan.
   >   # swallow it -- case takes the first match -- and this file's conflict
   >   # would never be raised at all.
   >   *'cat > '*'/etc/bondi/alloy/env'*) : ;;
+  >   # The health wait that follows the run, answered as a running Alloy
+  >   # answers it. Without this arm the probe falls through to *) and answers
+  >   # nothing, which setup reads as no verdict and fails the run on.
+  >   *'http://127.0.0.1:12345/-/healthy'*) echo BONDI_ALLOY_HEALTHY ;;
   >   *'--name bondi-alloy'*)
   >     echo 'docker: Error response from daemon: Conflict. The container name "/bondi-alloy" is already in use by container "d671990dc231".' >&2
   >     exit 125 ;;
@@ -173,7 +179,9 @@ rather than a phase name they have to translate into one.
   Pulled mlopez1506/bondi-server:0.25.0 on server 127.0.0.1
   bondi-orchestrator container is already running on server 127.0.0.1: 0.25.0, skipping...
   Pulled grafana/alloy:v1.8.0 on server 127.0.0.1
+  curl on server 127.0.0.1 can ask Alloy on port 12345
   Journal on server 127.0.0.1 is stored persistently under /var/log/journal
+  port 12345 on server 127.0.0.1 is free for Alloy
   Alloy config written on server 127.0.0.1: /etc/bondi/alloy/config.alloy
   Wrote Alloy credentials file on server 127.0.0.1: /etc/bondi/alloy/env
   Error: command failed (125): docker: Error response from daemon: Conflict. The container name "/bondi-alloy" is already in use by container "d671990dc231".

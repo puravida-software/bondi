@@ -17,8 +17,9 @@
 # Grafana Cloud is not reached, and the credentials the config reads are empty,
 # which a Loki without auth ignores.
 #
-# Alloy runs inside its Loki's network namespace and pushes to it over
-# loopback, and both are reached from here through ports Loki publishes. A
+# Every Alloy but the loopback one below runs inside its Loki's network
+# namespace and pushes to it over loopback, and both are reached from here
+# through ports Loki publishes. A
 # Docker network of the run's own would need a subnet of its own, and Docker
 # hands out subnets regardless of the host's routes: on a host whose VPN routes
 # part of Docker's address pool, such a network's published ports were observed
@@ -77,6 +78,21 @@
 # Alloy stopped, plus that one re-sent entry. An Alloy that lost its position
 # re-reads every earlier entry of this run and exceeds it. The metric is read
 # by its name in Alloy v1.8.0, `loki_source_journal_target_lines_total`.
+#
+# Alloy's HTTP server on the host's loopback. One more Alloy runs the way setup
+# runs it: with the journal arguments and the network and listen address
+# emit_config prints from the module that owns them for setup's run line. Only
+# its port is this run's own, drawn from below the kernel's ephemeral range and
+# checked free, since several Alloys share this host. It shares the host's
+# network, so it pushes to a Loki of its own at the port that Loki publishes,
+# and everything about it is read from this host with curl, never with
+# `docker exec`. Its arms: a container that logs and is removed before the
+# discovery refresh Alloy defaults to (one minute) has its line delivered; the
+# dropped-entries and sent-entries counters are read from the host; and the
+# port listens on the host's 127.0.0.1 only, so a container on Docker's default
+# bridge is refused at the bridge's gateway on it. The listener table is read
+# with ss. Written against, and executed under, Docker Engine 29.10.0, Alloy
+# v1.8.0, Loki 3.7.9 and iproute2 7.2.0's ss.
 
 set -u
 
@@ -101,7 +117,7 @@ unavailable() {
   exit 0
 }
 
-for program in docker jq curl; do
+for program in docker jq curl ss; do
   command -v "$program" > /dev/null 2>&1 \
     || unavailable "$program is not on this machine's PATH"
 done
@@ -640,16 +656,16 @@ stream_shape() {
      | if length == 0 then "absent" else unique | join(" | ") end'
 }
 
-# Waits until every marker named has arrived in the journal Loki, or the bound
-# in seconds passes, then reads Loki once more after the pause run_alloy
-# explains, into `loki_answer`. A marker still missing is a verdict, read by
-# the assertions, and not a harness failure.
+# Waits until every marker named has arrived in the Loki at the address given
+# first, or the bound in seconds given second passes, then reads that Loki once
+# more after the pause run_alloy explains, into `loki_answer`. A marker still
+# missing is a verdict, read by the assertions, and not a harness failure.
 await_markers() {
-  local bound=$1 answer deadline marker missing
-  shift
+  local address=$1 bound=$2 answer deadline marker missing
+  shift 2
   deadline=$((SECONDS + bound))
   while [ "$SECONDS" -lt "$deadline" ]; do
-    if answer=$(query_loki "$journal_loki_address"); then
+    if answer=$(query_loki "$address"); then
       loki_answer=$answer
       missing=''
       for marker in "$@"; do
@@ -660,8 +676,8 @@ await_markers() {
     sleep 1
   done
   sleep 3
-  loki_answer=$(query_loki "$journal_loki_address") \
-    || harness_failure 'Loki stopped answering for the journal assertions'
+  loki_answer=$(query_loki "$address") \
+    || harness_failure "the Loki at $address stopped answering"
 }
 
 # Starts one Alloy for the journal assertions, with the arguments emit_config
@@ -747,10 +763,10 @@ run_journal() {
   logger -t "$job" -- "${marker_prefix}journal-logger" \
     || harness_failure 'logger could not write to the journal'
 
-  # Discovery refreshes every 60 seconds by default, so the bound covers one
-  # refresh after the held pass started. The held pass has to reach the
-  # Docker path's relabel component too, so its output below is a verdict on
-  # this pass.
+  # The generated config has discovery refresh every 5 seconds, so the held
+  # pass is listed within one refresh of its start; the bound leaves room for
+  # a slow host. The held pass has to reach the Docker path's relabel component
+  # too, so its output below is a verdict on this pass.
   deadline=$((SECONDS + 90))
   while [ "$SECONDS" -lt "$deadline" ]; do
     if discovery=$(curl -sf --max-time 5 "$journal_components/discovery.docker.containers") \
@@ -780,7 +796,8 @@ run_journal() {
   docker wait "$prefix-$held" > /dev/null \
     || harness_failure "could not wait for $prefix-$held"
 
-  await_markers 30 journal-subsecond journal-held journal-noname \
+  await_markers "$journal_loki_address" 30 journal-subsecond journal-held \
+    journal-noname \
     service-logs-true
 
   report 'journal: sub-second cron marker in Loki' \
@@ -831,7 +848,7 @@ run_journal() {
     "bondi.managed=true bondi.type=cron bondi.logs=true bondi.name=$job" \
     journal-down
   start_journal_alloy "$second"
-  await_markers 30 journal-down
+  await_markers "$journal_loki_address" 30 journal-down
 
   # The cron entries the host journal gained since the first Alloy stopped,
   # every one of them, so a cron container of the host's own that logged in
@@ -859,6 +876,238 @@ run_journal() {
 }
 
 run_journal
+
+# --- Alloy's HTTP server on the host's loopback ---
+
+# Sets `listeners` to every TCP and UDP listener on one port of this host, as
+# `netid address:port`, in the shape `kept` has. Set rather than printed, so a
+# failure to list stops the run instead of ending a command substitution.
+listeners=''
+read_listeners() {
+  local out
+  out=$(ss -Hltun "sport = :$1") \
+    || harness_failure "ss could not list this host's listeners"
+  listeners=$(printf '%s\n' "$out" | awk 'NF { print $1 " " $5 }' \
+    | jq -Rnr '[inputs] | unique | join(" ")') \
+    || harness_failure "could not read the listeners on port $1"
+}
+
+# Sets `free_port` to a port nothing on this host listens on, other than the
+# one given. Drawn below the kernel's default ephemeral range (32768 up), where
+# the ports Docker publishes for the Lokis land, so a draw cannot meet one of
+# those.
+free_port=''
+pick_free_port() {
+  local taken=$1 attempt port
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    port=$((20000 + RANDOM % 10000))
+    [ "$port" = "$taken" ] && continue
+    read_listeners "$port"
+    if [ -z "$listeners" ]; then
+      free_port=$port
+      return 0
+    fi
+  done
+  harness_failure "found no free port in $attempt draws"
+}
+
+# How a container on Docker's default bridge fares connecting to this host at
+# the bridge's gateway on one port: `refused`, `answered` (any HTTP answer,
+# error statuses included), or what the client said instead. A refusal is the
+# host's own answer: the connection reached it and found nothing listening on
+# that address. The gateway is read inside the container, as its default
+# route, so it is the address that container would use.
+bridge_reach() {
+  # The single quotes are the point: the script runs in the probe's shell.
+  # shellcheck disable=SC2016
+  docker run --rm --name "$prefix-bridge-probe-$1" --network bridge \
+    "$fixture_image" sh -c '
+      gateway=$(ip route | sed -n "s/^default via \([0-9.]*\).*/\1/p")
+      if [ -z "$gateway" ]; then
+        echo "no default route"
+      elif out=$(wget -q -T 5 -O /dev/null "http://$gateway:$1/" 2>&1); then
+        echo answered
+      else
+        case $out in
+          *"Connection refused"*) echo refused ;;
+          *"server returned error"*) echo answered ;;
+          *) echo "$out" ;;
+        esac
+      fi' sh "$1" 2>&1
+}
+
+# The two loki.write counters in one Alloy metrics page: whether the dropped
+# counter is there at all, and whether the sent counter sums above zero. The
+# dropped counter is read for presence only: Alloy exports it at zero for each
+# reason before anything is dropped [observed -- 2026-11-24, Alloy v1.8.0], and
+# this run drops nothing on purpose. The value is a line's last field.
+loki_write_counters() {
+  printf '%s\n' "$1" | awk '
+    $1 ~ /^loki_write_dropped_entries_total([{]|$)/ { dropped = 1 }
+    $1 ~ /^loki_write_sent_entries_total([{]|$)/ { sent_seen = 1; sent += $NF }
+    END {
+      printf "dropped: %s | sent: %s", (dropped ? "present" : "absent"),
+        (!sent_seen ? "absent" : (sent > 0 ? "above zero" : "zero"))
+    }'
+}
+
+run_loopback() {
+  local loki="$prefix-loki-loopback" name="$prefix-alloy-loopback"
+  local config="$work/loopback.alloy" short="$prefix-short-lived"
+  local gateway_listener="$prefix-gateway-listener"
+  local port other_port base components out alloy_started removed_after window
+  local deadline ready='' discovery listed='' metrics delivered
+  local loki_address
+
+  docker run -d --name "$loki" -p 127.0.0.1::3100 "$loki_image" \
+    -config.file=/etc/loki/local-config.yaml -auth.enabled=false > /dev/null \
+    || harness_failure "could not start $loki_image for the loopback Alloy"
+  await_loki "$loki" loopback
+
+  pick_free_port ''
+  port=$free_port
+  base="http://127.0.0.1:$port"
+  components="$base/api/v0/web/components"
+
+  # This Alloy shares the host's network, so the Loki it pushes to is the one
+  # at the port that Loki publishes on this host.
+  "$emit_config" config all "http://$loki_address/loki/api/v1/push" \
+    "$excluded_name" > "$config" \
+    || harness_failure 'emit_config could not generate the loopback config'
+  load_shipped_args "$work/alloy-state-loopback"
+  # Bound before it is split, as load_shipped_args explains. A run line that
+  # lost its network and listen address prints nothing here, and that has to
+  # reach Alloy and be judged below, not stop the run.
+  out=$("$emit_config" alloy-run-args http-docker "$port") \
+    || harness_failure 'emit_config could not print the HTTP docker run arguments'
+  shipped_http_docker_args=()
+  [ -z "$out" ] || mapfile -t shipped_http_docker_args <<< "$out"
+  out=$("$emit_config" alloy-run-args http-alloy "$port") \
+    || harness_failure "emit_config could not print Alloy's HTTP run arguments"
+  shipped_http_alloy_args=()
+  [ -z "$out" ] || mapfile -t shipped_http_alloy_args <<< "$out"
+
+  alloy_started=$SECONDS
+  docker run -d --name "$name" \
+    -v /var/run/docker.sock:/var/run/docker.sock:ro \
+    -v "$config:/etc/alloy/config.alloy:ro,Z" \
+    "${shipped_docker_args[@]}" "${shipped_http_docker_args[@]}" \
+    "$alloy_image" run "${shipped_alloy_args[@]}" \
+    "${shipped_http_alloy_args[@]}" /etc/alloy/config.alloy > /dev/null \
+    || harness_failure "could not start $alloy_image for the loopback assertions"
+
+  # Everything below is read at this address, so an Alloy that does not answer
+  # there is the counters arm failing, not a harness failure.
+  deadline=$((SECONDS + 60))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if curl -sf --max-time 5 "$base/-/ready" > /dev/null; then
+      ready=ready
+      break
+    fi
+    sleep 1
+  done
+  report "loopback: Alloy answers ready at the host's 127.0.0.1:<its port>" \
+    ready "${ready:-no answer at $base/-/ready within 60 seconds}"
+  if [ -z "$ready" ]; then
+    printf 'Nothing below is read: it is all read at %s. Alloy said:\n' \
+      "$base" >&2
+    docker logs "$name" 2>&1 | tail -n 40 >&2
+    return 0
+  fi
+
+  # Discovery lists containers once at start. A fixture started after that
+  # answer is listed only by a later refresh, and one removed before the
+  # refresh Alloy defaults to is never listed under that default.
+  deadline=$((SECONDS + 60))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if discovery=$(curl -sf --max-time 5 "$components/discovery.docker.containers"); then
+      case " $(target_names "$discovery" exports targets) " in
+        *" service-logs-true "*)
+          listed=listed
+          break
+          ;;
+      esac
+    fi
+    sleep 1
+  done
+  report 'arm_discovery_has_answered (loopback)' listed "${listed:-not listed}"
+  if [ -z "$listed" ]; then
+    docker logs "$name" 2>&1 | tail -n 40 >&2
+    return 0
+  fi
+
+  # The single quotes are the point: `$1` is expanded by the fixture's shell.
+  # shellcheck disable=SC2016
+  docker run -d --name "$short" --label bondi.managed=true \
+    --label bondi.type=service --label bondi.logs=true \
+    "$fixture_image" sh -c 'echo "$1"; exec sleep 600' sh \
+    "${marker_prefix}short-lived" > /dev/null \
+    || harness_failure "could not start fixture $short"
+  # Under the 5-second refresh the Docker source began tailing a new container
+  # 11 to 15 seconds after it started, and a fixture removed after 10 seconds
+  # was never tailed [observed -- 2026-11-24, Docker Engine 29.10.0, Alloy
+  # v1.8.0, five starts and one 10-second run]. So the fixture lives 25
+  # seconds: past that, and still removed well before a one-minute refresh.
+  sleep 25
+  docker rm -f "$short" > /dev/null \
+    || harness_failure "could not remove fixture $short"
+  # Alloy's first discovery answer came no earlier than its start, so its next
+  # refresh under the one-minute default comes no earlier than a minute after
+  # the start. Removed before that, the fixture is one that default never
+  # lists. The bound is under a minute by the margin of whole-second clocks.
+  removed_after=$((SECONDS - alloy_started))
+  window="removed $removed_after s after Alloy started"
+  [ "$removed_after" -lt 55 ] && window='removed within 55 s of Alloy starting'
+  report 'arm_short_lived_fixture_removed_before_a_one_minute_refresh (loopback)' \
+    'removed within 55 s of Alloy starting' "$window"
+
+  await_markers "$loki_address" 30 short-lived
+  if [ "$(marker_count short-lived)" -ge 1 ]; then
+    delivered=delivered
+  else
+    delivered='not delivered'
+  fi
+  report 'short-lived: a container removed before a one-minute refresh has its marker in Loki' \
+    delivered "$delivered"
+
+  # Read from the host, at the address the box's operator reads, once a marker
+  # has been delivered.
+  if metrics=$(curl -sf --max-time 5 "$base/metrics"); then
+    report 'counters: dropped and sent entries read from the host' \
+      'dropped: present | sent: above zero' "$(loki_write_counters "$metrics")"
+  else
+    report 'counters: dropped and sent entries read from the host' \
+      'dropped: present | sent: above zero' "no answer at $base/metrics"
+  fi
+
+  read_listeners "$port"
+  report "loopback: the only listener on Alloy's port is the host's 127.0.0.1" \
+    "tcp 127.0.0.1:$port" "$listeners"
+
+  # A listener on every address of the host, so a refusal on Alloy's port is
+  # told apart from a bridge that reaches nothing on the host.
+  pick_free_port "$port"
+  other_port=$free_port
+  docker run -d --name "$gateway_listener" --network host "$fixture_image" \
+    httpd -f -p "$other_port" > /dev/null \
+    || harness_failure "could not start $gateway_listener"
+  deadline=$((SECONDS + 30))
+  read_listeners "$other_port"
+  while [ -z "$listeners" ] && [ "$SECONDS" -lt "$deadline" ]; do
+    sleep 1
+    read_listeners "$other_port"
+  done
+  [ -n "$listeners" ] \
+    || harness_failure "$gateway_listener did not listen on $other_port within 30 seconds"
+  report "loopback: a default-bridge container is refused at the gateway on Alloy's port, and answered on a port listening on every address" \
+    "alloy=refused every-address=answered" \
+    "alloy=$(bridge_reach "$port") every-address=$(bridge_reach "$other_port")"
+
+  docker rm -f "$name" "$loki" "$gateway_listener" > /dev/null 2>&1
+  return 0
+}
+
+run_loopback
 
 if [ "$failures" -ne 0 ]; then
   printf '%d assertion(s) failed against a real Alloy (%s) writing to a real Loki (%s).\n' \

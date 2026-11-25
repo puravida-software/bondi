@@ -18,3 +18,23 @@
  (alias runtest)
  (action
   (diff orchestrator-run-command.txt orchestrator-run-command.generated)))
+
+; The Alloy config the deploy arms run their Alloy over, printed by the real-Alloy
+; suite's probe from the generator setup writes a box's config with, and
+; committed for the reason the command above is. The endpoint is the Loki the arm
+; starts, reached on 127.0.0.1 because its Alloy runs in that Loki's network
+; namespace.
+
+(rule
+ (with-stdout-to
+  alloy-config.generated
+  (run
+   %{exe:../test/alloy_real_docker/emit_config.exe}
+   config
+   all
+   http://127.0.0.1:3100/loki/api/v1/push)))
+
+(rule
+ (alias runtest)
+ (action
+  (diff alloy-config.alloy alloy-config.generated)))

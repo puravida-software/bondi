@@ -29,12 +29,15 @@ let action_string = function
   | Setup.RunServer -> "RunServer"
   | Setup.EnsureJournalStorage -> "EnsureJournalStorage"
   | Setup.EnsureAlloyState -> "EnsureAlloyState"
+  | Setup.RequireAlloyCurl -> "RequireAlloyCurl"
+  | Setup.RequireAlloyPort -> "RequireAlloyPort"
   | Setup.PullAlloy -> "PullAlloy"
   | Setup.CheckAlloyImage _ -> "CheckAlloyImage"
   | Setup.CorrectAlloyConfigMode -> "CorrectAlloyConfigMode"
   | Setup.EnsureAlloyConfig -> "EnsureAlloyConfig"
   | Setup.WriteAlloyEnv -> "WriteAlloyEnv"
   | Setup.RunAlloy -> "RunAlloy"
+  | Setup.AwaitAlloyHealthy -> "AwaitAlloyHealthy"
   | Setup.StopAlloy -> "StopAlloy"
   | Setup.RemoveAlloy -> "RemoveAlloy"
   | Setup.CleanAlloyConfig -> "CleanAlloyConfig"
@@ -62,11 +65,14 @@ let is_ensure_network = function
   | Setup.RunServer
   | Setup.EnsureJournalStorage
   | Setup.EnsureAlloyState
+  | Setup.RequireAlloyCurl
+  | Setup.RequireAlloyPort
   | Setup.PullAlloy
   | Setup.CheckAlloyImage _
   | Setup.CorrectAlloyConfigMode
   | Setup.EnsureAlloyConfig
   | Setup.WriteAlloyEnv
+  | Setup.AwaitAlloyHealthy
   | Setup.RunAlloy
   | Setup.StopAlloy
   | Setup.RemoveAlloy
@@ -99,10 +105,13 @@ let joins_network = function
   | Setup.RemoveOrchestrator
   | Setup.EnsureJournalStorage
   | Setup.EnsureAlloyState
+  | Setup.RequireAlloyCurl
+  | Setup.RequireAlloyPort
   | Setup.PullAlloy
   | Setup.CorrectAlloyConfigMode
   | Setup.EnsureAlloyConfig
   | Setup.WriteAlloyEnv
+  | Setup.AwaitAlloyHealthy
   | Setup.StopAlloy
   | Setup.RemoveAlloy
   | Setup.CleanAlloyConfig
@@ -134,11 +143,14 @@ let is_managed = function
   | Setup.RunServer
   | Setup.EnsureJournalStorage
   | Setup.EnsureAlloyState
+  | Setup.RequireAlloyCurl
+  | Setup.RequireAlloyPort
   | Setup.PullAlloy
   | Setup.CheckAlloyImage _
   | Setup.CorrectAlloyConfigMode
   | Setup.EnsureAlloyConfig
   | Setup.WriteAlloyEnv
+  | Setup.AwaitAlloyHealthy
   | Setup.RunAlloy
   | Setup.StopAlloy
   | Setup.RemoveAlloy
@@ -1181,6 +1193,7 @@ let test_a_rejected_reading_reports_the_account_and_the_phases_left_unrun () =
           Config_file.api_key = "glc_secret";
           Config_file.endpoint =
             "https://logs-prod.grafana.net/loki/api/v1/push";
+          Config_file.max_backoff_retries = None;
         };
       Config_file.collect = None;
       Config_file.labels = None;
@@ -1761,6 +1774,7 @@ let minimal_alloy =
         Config_file.instance_id = "123456";
         Config_file.api_key = "glc_secret";
         Config_file.endpoint = "https://logs-prod.grafana.net/loki/api/v1/push";
+        Config_file.max_backoff_retries = None;
       };
     Config_file.collect = None;
     Config_file.labels = None;
@@ -2117,13 +2131,16 @@ let test_plan_alloy_declared_image_converges_like_the_default () =
         "PullOrchestrator";
         "CheckOrchestratorImage";
         "PullAlloy";
+        "RequireAlloyCurl";
         "EnsureJournalStorage";
         "EnsureAlloyState";
+        "RequireAlloyPort";
         "StopAlloy";
         "RemoveAlloy";
         "EnsureAlloyConfig";
         "WriteAlloyEnv";
         "RunAlloy";
+        "AwaitAlloyHealthy";
       ]
     actions
 
@@ -2154,13 +2171,16 @@ let test_plan_alloy_stopped_is_removed_before_running () =
         "PullOrchestrator";
         "CheckOrchestratorImage";
         "PullAlloy";
+        "RequireAlloyCurl";
         "EnsureJournalStorage";
         "EnsureAlloyState";
+        "RequireAlloyPort";
         "StopAlloy";
         "RemoveAlloy";
         "EnsureAlloyConfig";
         "WriteAlloyEnv";
         "RunAlloy";
+        "AwaitAlloyHealthy";
       ]
     (plan config context)
 
@@ -2186,11 +2206,14 @@ let test_plan_alloy_absent_runs_without_removing () =
         "PullOrchestrator";
         "CheckOrchestratorImage";
         "PullAlloy";
+        "RequireAlloyCurl";
         "EnsureJournalStorage";
         "EnsureAlloyState";
+        "RequireAlloyPort";
         "EnsureAlloyConfig";
         "WriteAlloyEnv";
         "RunAlloy";
+        "AwaitAlloyHealthy";
       ]
     (plan config context)
 
@@ -2461,13 +2484,16 @@ let test_plan_for_config_proceeds_when_probes_succeed () =
             "RemoveOrchestrator";
             "RunServer";
             "PullAlloy";
+            "RequireAlloyCurl";
             "EnsureJournalStorage";
             "EnsureAlloyState";
+            "RequireAlloyPort";
             "StopAlloy";
             "RemoveAlloy";
             "EnsureAlloyConfig";
             "WriteAlloyEnv";
             "RunAlloy";
+            "AwaitAlloyHealthy";
           ]
         actions
 
@@ -2619,11 +2645,14 @@ let orchestrator_check actions =
       | Setup.RunServer
       | Setup.EnsureJournalStorage
       | Setup.EnsureAlloyState
+      | Setup.RequireAlloyCurl
+      | Setup.RequireAlloyPort
       | Setup.PullAlloy
       | Setup.CheckAlloyImage _
       | Setup.CorrectAlloyConfigMode
       | Setup.EnsureAlloyConfig
       | Setup.WriteAlloyEnv
+      | Setup.AwaitAlloyHealthy
       | Setup.RunAlloy
       | Setup.StopAlloy
       | Setup.RemoveAlloy
@@ -2653,10 +2682,13 @@ let alloy_check actions =
       | Setup.RunServer
       | Setup.EnsureJournalStorage
       | Setup.EnsureAlloyState
+      | Setup.RequireAlloyCurl
+      | Setup.RequireAlloyPort
       | Setup.PullAlloy
       | Setup.CorrectAlloyConfigMode
       | Setup.EnsureAlloyConfig
       | Setup.WriteAlloyEnv
+      | Setup.AwaitAlloyHealthy
       | Setup.RunAlloy
       | Setup.StopAlloy
       | Setup.RemoveAlloy
@@ -2754,13 +2786,16 @@ let test_missing_spec_label_plans_replacement () =
   check (list string) "an alloy without the label"
     [
       "PullAlloy";
+      "RequireAlloyCurl";
       "EnsureJournalStorage";
       "EnsureAlloyState";
+      "RequireAlloyPort";
       "StopAlloy";
       "RemoveAlloy";
       "EnsureAlloyConfig";
       "WriteAlloyEnv";
       "RunAlloy";
+      "AwaitAlloyHealthy";
     ]
     (alloy_phase
        (plan
@@ -2794,6 +2829,7 @@ let alloy_declaration ?(labels = None) ?(api_key = "glc_secret") () =
         Config_file.instance_id = "123456";
         Config_file.api_key;
         Config_file.endpoint = "https://logs-prod.grafana.net/loki/api/v1/push";
+        Config_file.max_backoff_retries = None;
       };
     Config_file.collect = None;
     Config_file.labels;
@@ -2820,11 +2856,19 @@ let alloy_plan ~running ~declared =
 
 let alloy_teardown =
   [
-    "StopAlloy"; "RemoveAlloy"; "EnsureAlloyConfig"; "WriteAlloyEnv"; "RunAlloy";
+    "RequireAlloyPort";
+    "StopAlloy";
+    "RemoveAlloy";
+    "EnsureAlloyConfig";
+    "WriteAlloyEnv";
+    "RunAlloy";
+    "AwaitAlloyHealthy";
   ]
 
 let alloy_preparation =
-  [ "PullAlloy"; "EnsureJournalStorage"; "EnsureAlloyState" ]
+  [
+    "PullAlloy"; "RequireAlloyCurl"; "EnsureJournalStorage"; "EnsureAlloyState";
+  ]
 
 (* An alloy whose command, River configuration and credentials all match is
    left running: nothing in its config directory is rewritten and it is neither
@@ -2844,10 +2888,168 @@ let test_unchanged_alloy_plans_no_rewrite_or_restart () =
   check
     (list (list string))
     "a kept alloy has its config mode corrected"
-    [ [ "CorrectAlloyConfigMode" ] ]
+    [ [ "CorrectAlloyConfigMode"; "AwaitAlloyHealthy" ] ]
     (List.map
        (fun (check : Setup.image_check) -> List.map action_string check.kept)
        (alloy_check actions))
+
+(* Each action paired with the one the plan runs next, the last with none. *)
+let rec with_successor = function
+  | [] -> []
+  | [ last ] -> [ (last, None) ]
+  | action :: (next :: _ as rest) -> (action, Some next) :: with_successor rest
+
+(* Every list of actions a setup can run that starts alloy: the plan from each
+   state the host can report alloy in, and the replacement an image check
+   carries for the run whose pull moved the tag. *)
+let alloy_run_paths () =
+  let declared = alloy_declaration () in
+  let from_state alloy_state =
+    plan (alloy_config declared)
+      (ctx ~alloy_state ~orchestrator:Setup.Orchestrator_absent
+         ~docker_probe:docker_present ())
+  in
+  let unchanged = alloy_plan ~running:declared ~declared in
+  let replacements =
+    List.map
+      (fun (image_check : Setup.image_check) ->
+        ("the replacement a moved image runs", image_check.replacement))
+      (alloy_check unchanged)
+  in
+  check int "an unchanged alloy carries one image check" 1
+    (List.length replacements);
+  [
+    ("no container", from_state Setup.Alloy_absent);
+    ("a stopped container", from_state Setup.Alloy_not_running);
+    ( "a container no setup recorded",
+      from_state (Setup.Alloy_running { spec_hash = None }) );
+    ( "a container with other credentials",
+      alloy_plan ~running:(alloy_declaration ~api_key:"glc_old" ()) ~declared );
+  ]
+  @ replacements
+
+(* A started alloy that cannot bind its HTTP port exits, and [docker run -d] has
+   already succeeded, so the run that started it waits for it to answer healthy
+   before anything else is done. Right after the run, on every path that runs
+   it: a wait planned later would let the next action read as alloy's success,
+   and a path without one would report a dead alloy as started. *)
+let test_await_alloy_healthy_follows_run_alloy () =
+  List.iter
+    (fun (label, actions) ->
+      let names = List.map action_string actions in
+      let runs = List.filter (String.equal "RunAlloy") names in
+      check int (label ^ ": alloy is run once") 1 (List.length runs);
+      check int
+        (label ^ ": one wait for each run")
+        (List.length runs)
+        (List.length (List.filter (String.equal "AwaitAlloyHealthy") names));
+      List.iter
+        (fun (action, next) ->
+          match action with
+          | "RunAlloy" ->
+              check (option string)
+                (label ^ ": the wait comes right after the run")
+                (Some "AwaitAlloyHealthy") next
+          | _ -> ())
+        (with_successor names))
+    (alloy_run_paths ())
+
+(* An alloy listed as running is waited on too. The listing names a container
+   running while Docker holds it so, and a crash-looping Alloy is [running]
+   between its restarts, so a kept alloy that was never asked would be reported
+   as kept. The wait is nested in the kept list, after the mode correction a
+   container that cannot read its file needs, and not at the top of the plan,
+   which stays free of any wait of its own. The replacement the same check
+   carries waits as well. *)
+let test_kept_alloy_plans_health_wait_after_mode_correction () =
+  let declared = alloy_declaration () in
+  let actions = alloy_plan ~running:declared ~declared in
+  check_absent ~label:"an unchanged alloy, at the top of the plan"
+    ~absent:[ "AwaitAlloyHealthy" ] actions;
+  match alloy_check actions with
+  | [ image_check ] ->
+      check (list string) "a kept alloy is corrected, then waited on"
+        [ "CorrectAlloyConfigMode"; "AwaitAlloyHealthy" ]
+        (List.map action_string image_check.kept);
+      check bool "the replacement, which runs alloy, waits for it" true
+        (List.mem "AwaitAlloyHealthy"
+           (List.map action_string image_check.replacement))
+  | []
+  | _ :: _ :: _ ->
+      fail "an unchanged alloy carries one image check"
+
+(* The box's two facts the replacement depends on -- curl to ask with, and the
+   port free or Alloy's own -- are planned ahead of the first stop, on every
+   route to a replacement, so a refusal leaves the Alloy the box had. The route
+   through an image check is the plan's own prefix followed by the check's
+   replacement, which is how the run takes it. *)
+let test_alloy_preconditions_precede_every_stop () =
+  let declared = alloy_declaration () in
+  let from_state alloy_state =
+    alloy_phase
+      (plan (alloy_config declared)
+         (ctx ~alloy_state ~orchestrator:Setup.Orchestrator_absent
+            ~docker_probe:docker_present ()))
+  in
+  let unchanged = alloy_plan ~running:declared ~declared in
+  let through_check =
+    match alloy_check unchanged with
+    | [ image_check ] ->
+        List.filter
+          (fun name -> name <> "CheckAlloyImage")
+          (alloy_phase unchanged)
+        @ List.map action_string image_check.replacement
+    | []
+    | _ :: _ :: _ ->
+        fail "an unchanged alloy carries one image check"
+  in
+  let index_of ~label name names =
+    let rec at i = function
+      | [] -> failf "%s: %s is not planned" label name
+      | found :: _ when String.equal found name -> i
+      | _ :: rest -> at (i + 1) rest
+    in
+    at 0 names
+  in
+  List.iter
+    (fun (label, names) ->
+      let port = index_of ~label "RequireAlloyPort" names in
+      let curl = index_of ~label "RequireAlloyCurl" names in
+      let run = index_of ~label "RunAlloy" names in
+      check bool
+        (label ^ ": the port is checked before alloy is run")
+        true (port < run);
+      check bool
+        (label ^ ": curl is checked before alloy is run")
+        true (curl < run);
+      if List.mem "StopAlloy" names then (
+        let stop = index_of ~label "StopAlloy" names in
+        check bool
+          (label ^ ": the port is checked before the stop")
+          true (port < stop);
+        check bool
+          (label ^ ": curl is checked before the stop")
+          true (curl < stop)))
+    [
+      ("no container", from_state Setup.Alloy_absent);
+      ("a stopped container", from_state Setup.Alloy_not_running);
+      ( "a container no setup recorded",
+        from_state (Setup.Alloy_running { spec_hash = None }) );
+      ( "a container with other credentials",
+        alloy_phase
+          (alloy_plan
+             ~running:(alloy_declaration ~api_key:"glc_old" ())
+             ~declared) );
+      ("a moved image, through the check", through_check);
+    ]
+
+(* The kept path stops nothing, so it plans curl, which its wait asks with, and
+   not the port, which is the kept container's own. *)
+let test_kept_alloy_plans_curl_and_not_the_port () =
+  let declared = alloy_declaration () in
+  let names = alloy_phase (alloy_plan ~running:declared ~declared) in
+  check bool "curl is checked" true (List.mem "RequireAlloyCurl" names);
+  check bool "the port is not checked" false (List.mem "RequireAlloyPort" names)
 
 (* A River configuration other than the one the running alloy was created
    against is a change only the digest's files show: it is on no command line. *)
@@ -2939,10 +3141,13 @@ let as_run ~verdict actions =
       | Setup.RunServer
       | Setup.EnsureJournalStorage
       | Setup.EnsureAlloyState
+      | Setup.RequireAlloyCurl
+      | Setup.RequireAlloyPort
       | Setup.PullAlloy
       | Setup.CorrectAlloyConfigMode
       | Setup.EnsureAlloyConfig
       | Setup.WriteAlloyEnv
+      | Setup.AwaitAlloyHealthy
       | Setup.RunAlloy
       | Setup.StopAlloy
       | Setup.RemoveAlloy
@@ -2981,8 +3186,14 @@ let test_moved_image_runs_planned_replacement () =
     (List.map action_string (box ~stamped:false))
     (List.map action_string
        (as_run ~verdict:Bondi_client.Image_identity.Moved (box ~stamped:true)));
+  (* A kept alloy is still waited on, so the wait is the one action of alloy's
+     teardown list that [Same] does run. *)
   check_absent ~label:"same"
-    ~absent:(orchestrator_teardown @ alloy_teardown)
+    ~absent:
+      (orchestrator_teardown
+      @ List.filter
+          (fun name -> not (String.equal name "AwaitAlloyHealthy"))
+          alloy_teardown)
     (as_run ~verdict:Bondi_client.Image_identity.Same (box ~stamped:true))
 
 (* An identity that could not be read runs neither list: the check fails the
@@ -3734,6 +3945,14 @@ let () =
             test_version_bump_plans_replacement_after_pull;
           test_case "an unchanged alloy is not rewritten or restarted" `Quick
             test_unchanged_alloy_plans_no_rewrite_or_restart;
+          test_case "every run of alloy is followed by a health wait" `Quick
+            test_await_alloy_healthy_follows_run_alloy;
+          test_case "a kept alloy is waited on after its mode correction" `Quick
+            test_kept_alloy_plans_health_wait_after_mode_correction;
+          test_case "alloy's preconditions precede every stop" `Quick
+            test_alloy_preconditions_precede_every_stop;
+          test_case "a kept alloy plans curl and not the port" `Quick
+            test_kept_alloy_plans_curl_and_not_the_port;
           test_case "a changed River config replaces alloy" `Quick
             test_changed_river_config_plans_alloy_replacement;
           test_case "a changed credentials file replaces alloy" `Quick
