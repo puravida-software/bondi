@@ -125,6 +125,18 @@ let test_a_refused_sink_degrades_and_says_so_once () =
   Sys.remove fresh_path;
   Sys.remove blocker
 
+(* A refusal the caller already prints on its own stderr must not be printed a
+   second time by the log path: this sink writes the container log's copy only. *)
+let test_the_container_log_copy_leaves_own_stderr_alone () =
+  let path, sink = reachable_sink () in
+  let own =
+    own_stderr_during (fun () -> Diagnostics.to_container_log_to sink line)
+  in
+  check string "the sink got the line, terminated" (line ^ "\n")
+    (read_file path);
+  check string "and own stderr got nothing" "" own;
+  Sys.remove path
+
 let pp_step formatter = function
   | Diagnostics.Advance { offset; remaining } ->
       Format.fprintf formatter "Advance {offset = %d; remaining = %d}" offset
@@ -188,6 +200,8 @@ let () =
         [
           test_case "a reachable sink receives the line" `Quick
             test_a_reachable_sink_receives_the_line;
+          test_case "the container log copy leaves own stderr alone" `Quick
+            test_the_container_log_copy_leaves_own_stderr_alone;
           test_case "a refused sink degrades and says so once" `Quick
             test_a_refused_sink_degrades_and_says_so_once;
         ] );

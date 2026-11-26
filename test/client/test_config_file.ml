@@ -166,7 +166,8 @@ cron_jobs:
                   check string "cron job name" "my-job" job.name;
                   check string "cron job image" "ghcr.io/org/my-job"
                     (Bondi_common.Image_reference.to_string job.image);
-                  check string "cron job schedule" "0 14 * * 3" job.schedule;
+                  check string "cron job schedule" "0 14 * * 3"
+                    (Bondi_common.Cron_schedule.to_string job.schedule);
                   check (option string) "cron job registry user"
                     (Some "registry-user") job.registry_user;
                   check (option string) "cron job registry pass"
@@ -218,7 +219,8 @@ cron_jobs:
                   check string "cron job name" "my-cron" job.name;
                   check string "cron job image" "ghcr.io/org/cron"
                     (Bondi_common.Image_reference.to_string job.image);
-                  check string "cron job schedule" "0 * * * *" job.schedule;
+                  check string "cron job schedule" "0 * * * *"
+                    (Bondi_common.Cron_schedule.to_string job.schedule);
                   check (option string)
                     "cron job registry user defaults to None" None
                     job.registry_user;
@@ -1075,6 +1077,33 @@ let test_config_new_fields_absent () =
             (job.exit_code_severities = None)
       | _ -> fail "expected two cron jobs")
 
+(* A schedule written as a number is refused at read, naming the job. *)
+let test_config_rejects_non_string_schedule () =
+  let yaml =
+    {|bondi_server:
+  version: 0.1.0
+
+cron_jobs:
+  - name: nightly
+    image: ghcr.io/org/nightly
+    schedule: 5
+    server:
+      ip_address: 1.2.3.4
+|}
+  in
+  with_temp_config yaml (fun () ->
+      match Config_file.read () with
+      | Ok _ -> fail "expected a numeric schedule to be refused"
+      | Error message ->
+          check bool
+            (Printf.sprintf "the refusal names the job and the value, got: %s"
+               message)
+            true
+            (Bondi_common.String_utils.contains
+               ~needle:
+                 "cron job \"nightly\" schedule 5: the schedule is not a string"
+               message))
+
 let test_config_rejects_non_https_sink () =
   let yaml =
     {|bondi_server:
@@ -1238,10 +1267,10 @@ let test_service_volumes_parse () =
   let yaml =
     volumes_yaml
       {|  volumes:
-    - host: /srv/comalito/invoices
+    - host: /srv/myapp/invoices
       container: /data/invoices
       read_only: false
-    - host: /etc/comalito
+    - host: /etc/myapp
       container: /config
       read_only: true
 |}
@@ -1254,15 +1283,15 @@ let test_service_volumes_parse () =
         (list (triple string string bool))
         "both entries, in order"
         [
-          ("/srv/comalito/invoices", "/data/invoices", false);
-          ("/etc/comalito", "/config", true);
+          ("/srv/myapp/invoices", "/data/invoices", false);
+          ("/etc/myapp", "/config", true);
         ]
         (List.map mount_fields mounts)
 
 let test_service_without_volumes_parses_as_none () =
   let present =
     read_service_volumes
-      (volumes_yaml (invoices_volume ~host:"/srv/comalito/invoices"))
+      (volumes_yaml (invoices_volume ~host:"/srv/myapp/invoices"))
   in
   let absent = read_service_volumes (volumes_yaml "") in
   (* The same fixture reaches [Some] with the field declared, so the [None]
@@ -1282,12 +1311,12 @@ let test_service_without_volumes_parses_as_none () =
 let test_service_volume_relative_path_fails_the_read () =
   match
     read_service_volumes
-      (volumes_yaml (invoices_volume ~host:"srv/comalito/invoices"))
+      (volumes_yaml (invoices_volume ~host:"srv/myapp/invoices"))
   with
   | Ok _ -> fail "a relative host path was accepted"
   | Error message ->
       check string "the read fails naming the path"
-        "invalid bondi.yaml: volume host path \"srv/comalito/invoices\" is not \
+        "invalid bondi.yaml: volume host path \"srv/myapp/invoices\" is not \
          absolute: it must start with /"
         message
 
@@ -1297,7 +1326,7 @@ let test_service_unknown_key_still_fails_the_read () =
   let misspelt =
     volumes_yaml
       {|  volume:
-    - host: /srv/comalito/invoices
+    - host: /srv/myapp/invoices
       container: /data/invoices
       read_only: false
 |}
@@ -1323,7 +1352,7 @@ let test_service_volume_missing_read_only_fails_the_read () =
   check_volumes_refused ~label:"an entry without read_only"
     (volumes_yaml
        {|  volumes:
-    - host: /srv/comalito/invoices
+    - host: /srv/myapp/invoices
       container: /data/invoices
 |})
 
@@ -1337,7 +1366,7 @@ let test_service_volume_unknown_entry_key_fails_the_read () =
   check_volumes_refused ~label:"an unknown key inside an entry"
     (volumes_yaml
        {|  volumes:
-    - host: /srv/comalito/invoices
+    - host: /srv/myapp/invoices
       container: /data/invoices
       read_only: false
       mode: rw
@@ -1350,7 +1379,7 @@ let test_service_volume_yes_read_only_reads_as_true () =
     read_service_volumes
       (volumes_yaml
          {|  volumes:
-    - host: /srv/comalito/invoices
+    - host: /srv/myapp/invoices
       container: /data/invoices
       read_only: yes
 |})
@@ -1569,6 +1598,306 @@ let test_config_refuses_unroutable_service_name () =
              Bondi_common.Router_name.to_string service.name)
            config.user_service)
 
+(* A cron job's name, schedule and secret entries are refused when bondi.yaml
+   is read, before any server is contacted. A job runs in a container named
+   after it, its schedule is written into root's crontab, and its secrets into
+   a KEY=VALUE file read with no unquoting. *)
+
+let cron_job_yaml ~name ~schedule ~secrets =
+  Printf.sprintf
+    {|  - name: "%s"
+    image: ghcr.io/acme/job
+    schedule: %s
+%s    server:
+      ip_address: 203.0.113.10
+|}
+    name schedule secrets
+
+let free_job name = cron_job_yaml ~name ~schedule:{|"0 3 * * *"|} ~secrets:""
+
+let cron_manifest ~service ~managed ~jobs =
+  let service_block =
+    match service with
+    | None -> ""
+    | Some name ->
+        Printf.sprintf
+          {|service:
+  name: "%s"
+  image: ghcr.io/acme/%s
+  port: 8080
+  env_vars: {}
+  servers:
+    - ip_address: 203.0.113.10
+|}
+          name name
+  in
+  let managed_block =
+    match managed with
+    | [] -> ""
+    | names ->
+        "managed_containers:\n"
+        ^ String.concat ""
+            (List.map
+               (fun name ->
+                 String.concat "\n"
+                   [
+                     "  - name: " ^ name;
+                     "    image: postgres";
+                     "    tag: \"17\"";
+                     "    restart: always";
+                     "";
+                   ])
+               names)
+  in
+  service_block
+  ^ "bondi_server:\n  version: 0.1.0\n"
+  ^ managed_block
+  ^ "cron_jobs:\n"
+  ^ String.concat "" jobs
+
+let collision_refusal collisions =
+  Printf.sprintf
+    "cron jobs cannot take names already in use (%s): rename these jobs in \
+     bondi.yaml"
+    (String.concat "; " collisions)
+
+let collision ~job ~holder =
+  Printf.sprintf
+    "cron job %S cannot take that name: %s already runs under it, and a cron \
+     job's container is named after the job"
+    job holder
+
+(* One manifest per class of holder. Each refusal names the job and what holds
+   its name, so the operator is told both entries. *)
+let test_cron_name_collision_per_holder () =
+  let refused ~label ~expected yaml =
+    match with_temp_config yaml Config_file.read with
+    | Ok _ -> fail (label ^ ": the clash was accepted")
+    | Error message -> check string label (collision_refusal expected) message
+  in
+  refused ~label:"the service"
+    ~expected:[ collision ~job:"web" ~holder:{|the service "web"|} ]
+    (cron_manifest ~service:(Some "web") ~managed:[] ~jobs:[ free_job "web" ]);
+  refused ~label:"the service's blue-green candidate"
+    ~expected:
+      [
+        collision ~job:"web-new"
+          ~holder:{|the service's blue-green candidate "web-new"|};
+      ]
+    (cron_manifest ~service:(Some "web") ~managed:[]
+       ~jobs:[ free_job "web-new" ]);
+  List.iter
+    (fun builtin ->
+      refused ~label:builtin
+        ~expected:
+          [
+            collision ~job:builtin
+              ~holder:(Printf.sprintf "the built-in container %S" builtin);
+          ]
+        (cron_manifest ~service:None ~managed:[] ~jobs:[ free_job builtin ]))
+    [ "bondi-orchestrator"; "bondi-traefik"; "bondi-alloy" ];
+  refused ~label:"a declared managed container's container name"
+    ~expected:
+      [ collision ~job:"bondi-db" ~holder:{|the managed container "bondi-db"|} ]
+    (cron_manifest ~service:None ~managed:[ "db" ]
+       ~jobs:[ free_job "bondi-db" ]);
+  refused ~label:"another cron job"
+    ~expected:[ collision ~job:"backup" ~holder:{|another cron job "backup"|} ]
+    (cron_manifest ~service:None ~managed:[]
+       ~jobs:[ free_job "backup"; free_job "backup" ]);
+  (* The affirmative arm on the same fixture's shape: a managed container's
+     own name, unprefixed, is not a container name, so a job may take it. *)
+  match
+    with_temp_config
+      (cron_manifest ~service:(Some "web") ~managed:[ "db" ]
+         ~jobs:[ free_job "db"; free_job "web-backup" ])
+      Config_file.read
+  with
+  | Error message -> fail ("free names were refused: " ^ message)
+  | Ok config ->
+      check (list string) "the jobs come back" [ "db"; "web-backup" ]
+        (List.map
+           (fun (job : Config_file.cron_job) -> job.name)
+           (Option.value config.cron_jobs ~default:[]))
+
+(* The path rule is the server's too; read here, a name that would climb out of
+   its directory is refused before any server is contacted. *)
+let test_cron_unsafe_name_refused () =
+  match
+    with_temp_config
+      (cron_manifest ~service:None ~managed:[]
+         ~jobs:[ free_job "ok"; free_job "../x" ])
+      Config_file.read
+  with
+  | Ok _ -> fail "an unsafe job name was accepted"
+  | Error message ->
+      check string "the refusal names the unsafe name only"
+        "cron job names must be safe to place in a file path (\"../x\"). A \
+         name must begin with a letter or a digit and may hold only letters, \
+         digits, '.', '_' and '-': rename these jobs in bondi.yaml"
+        message
+
+let secret_refusal offenders =
+  Printf.sprintf
+    "cron job secret entries cannot be written to an env file (%s). A key must \
+     be non-empty and hold no \"=\" and no control character, and a value must \
+     hold no control character, newline included: fix these entries in \
+     bondi.yaml"
+    (String.concat "; " offenders)
+
+(* The value is shaped like the credential it would be, so the absence check
+   below is one a leak could fail. *)
+let test_cron_secret_control_character_refused () =
+  let secrets =
+    {|    secret_env_vars:
+      API_TOKEN: "sk-live-4f9a2c\nINJECTED=1"
+|}
+  in
+  match
+    with_temp_config
+      (cron_manifest ~service:None ~managed:[]
+         ~jobs:
+           [ cron_job_yaml ~name:"nightly" ~schedule:{|"0 3 * * *"|} ~secrets ])
+      Config_file.read
+  with
+  | Ok _ -> fail "a secret value holding a newline was accepted"
+  | Error message ->
+      check string "names the job and the key"
+        (secret_refusal
+           [
+             {|job "nightly" has a control character in the value of "API_TOKEN"|};
+           ])
+        message;
+      check bool "carries no part of the value" false
+        (Bondi_common.String_utils.contains ~needle:"sk-live" message
+        || Bondi_common.String_utils.contains ~needle:"INJECTED" message)
+
+let test_cron_secret_bad_key_refused () =
+  let secrets =
+    {|    secret_env_vars:
+      "API=TOKEN": placeholder
+      "": placeholder
+|}
+  in
+  match
+    with_temp_config
+      (cron_manifest ~service:None ~managed:[]
+         ~jobs:
+           [ cron_job_yaml ~name:"nightly" ~schedule:{|"0 3 * * *"|} ~secrets ])
+      Config_file.read
+  with
+  | Ok _ -> fail "a secret key holding = was accepted"
+  | Error message ->
+      check string "names the job and each key"
+        (secret_refusal
+           [
+             {|job "nightly" has an invalid key "API=TOKEN"|};
+             {|job "nightly" has an invalid key ""|};
+           ])
+        message
+
+let test_cron_schedule_refused_naming_job () =
+  let refused ~label ~schedule ~expected =
+    match
+      with_temp_config
+        (cron_manifest ~service:None ~managed:[]
+           ~jobs:
+             [
+               free_job "hourly";
+               cron_job_yaml ~name:"nightly" ~schedule ~secrets:"";
+             ])
+        Config_file.read
+    with
+    | Ok _ -> fail (label ^ " was accepted")
+    | Error message -> check string label expected message
+  in
+  let grammar = Bondi_common.Cron_schedule.grammar in
+  refused ~label:"an empty schedule" ~schedule:{|""|}
+    ~expected:
+      ({|invalid bondi.yaml: cron job "nightly" schedule "": the schedule is empty: |}
+     ^ grammar);
+  refused ~label:"four fields" ~schedule:{|"0 3 * *"|}
+    ~expected:
+      ({|invalid bondi.yaml: cron job "nightly" schedule "0 3 * *": the schedule holds 4 fields, not five: |}
+     ^ grammar);
+  refused ~label:"a schedule carrying a second crontab line"
+    ~schedule:{|"not a schedule\n* * * * * root reboot"|}
+    ~expected:
+      ({|invalid bondi.yaml: cron job "nightly" schedule "not a schedule\n* * * * * root reboot": the schedule holds a control character, which would end the crontab line early: |}
+     ^ grammar)
+
+(* Names, schedules and secret keys of the shapes real manifests use; the
+   manifest; the secret values are placeholders, since the real ones live in
+   the operators' environments. The app's volumes are left out: only its fork
+   build reads them. *)
+let test_realistic_manifest_values_accepted () =
+  let accepted ~label ~jobs yaml =
+    match with_temp_config yaml Config_file.read with
+    | Error message -> fail (label ^ " was refused: " ^ message)
+    | Ok config ->
+        check
+          (list (pair string string))
+          (label ^ ": names and schedules read back as written")
+          jobs
+          (List.map
+             (fun (job : Config_file.cron_job) ->
+               (job.name, Bondi_common.Cron_schedule.to_string job.schedule))
+             (Option.value config.cron_jobs ~default:[]))
+  in
+  accepted ~label:"cron-trading-systems"
+    ~jobs:[ ("canary-paper", "17 * * * *") ]
+    (cron_manifest ~service:None ~managed:[]
+       ~jobs:
+         [
+           cron_job_yaml ~name:"canary-paper" ~schedule:{|"17 * * * *"|}
+             ~secrets:
+               {|    secret_env_vars:
+      API_KEY_ID: placeholder-key-id
+      API_SECRET_KEY: placeholder-secret
+      API_KEY: placeholder-api-key
+|};
+         ]);
+  accepted ~label:"app"
+    ~jobs:[ ("alert-check", "* * * * *") ]
+    (cron_manifest ~service:(Some "app") ~managed:[]
+       ~jobs:
+         [
+           cron_job_yaml ~name:"alert-check" ~schedule:{|"* * * * *"|}
+             ~secrets:
+               {|    secret_env_vars:
+      DB_URL: "postgres://user:pass@db:5432/app?sslmode=disable"
+      ALERT_RUNNER_PING_URL: "https://hc-ping.example.com/abc"
+|};
+         ]);
+  accepted ~label:"app"
+    ~jobs:[ ("app-backup", "30 3 * * *") ]
+    (cron_manifest ~service:(Some "app-server") ~managed:[ "app-db" ]
+       ~jobs:
+         [
+           cron_job_yaml ~name:"app-backup" ~schedule:{|"30 3 * * *"|}
+             ~secrets:"";
+         ]);
+  (* The app declares no cron jobs; its service name is the only value the
+     new pass reads. *)
+  match
+    with_temp_config
+      {|service:
+  name: myapp
+  image: ghcr.io/acme/myapp
+  port: 8080
+  env_vars: {}
+  servers:
+    - ip_address: 203.0.113.10
+bondi_server:
+  version: 0.1.0
+|}
+      Config_file.read
+  with
+  | Error message -> fail ("myapp was refused: " ^ message)
+  | Ok config ->
+      check bool "myapp declares no cron jobs" true
+        (Option.is_none config.cron_jobs)
+
 let () =
   run "Config_file"
     [
@@ -1587,6 +1916,23 @@ let () =
             test_config_refuses_http_acme_ca_server;
           test_case "an unroutable service name is refused, naming the field"
             `Quick test_config_refuses_unroutable_service_name;
+        ] );
+      ( "cron job inputs",
+        [
+          test_case "a cron job taking a held name is refused, naming both"
+            `Quick test_cron_name_collision_per_holder;
+          test_case "a cron job name unsafe in a path is refused at read" `Quick
+            test_cron_unsafe_name_refused;
+          test_case
+            "a secret value with a control character is refused, naming job \
+             and key"
+            `Quick test_cron_secret_control_character_refused;
+          test_case "a bad secret key is refused, naming job and key" `Quick
+            test_cron_secret_bad_key_refused;
+          test_case "a bad schedule is refused, naming the job" `Quick
+            test_cron_schedule_refused_naming_job;
+          test_case "realistic names and schedules are accepted" `Quick
+            test_realistic_manifest_values_accepted;
         ] );
       ( "read",
         [
@@ -1690,5 +2036,7 @@ let () =
             test_config_new_fields_absent;
           test_case "rejects non-https sink" `Quick
             test_config_rejects_non_https_sink;
+          test_case "rejects a schedule that is not a string, naming the job"
+            `Quick test_config_rejects_non_string_schedule;
         ] );
     ]

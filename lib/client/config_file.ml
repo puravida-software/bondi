@@ -216,10 +216,15 @@ let exit_code_severities_of_yojson json =
 
 let exit_code_severities_to_yojson = Alert.severity_map_to_yojson
 
-type cron_job = {
+(* A cron job's fields, with the schedule's type left open. A field's decoder
+   sees only its own field, so a schedule refused by one could not say which
+   job it belongs to, and a manifest can declare several. The derived decoder
+   therefore keeps the schedule as the JSON it was written as, and
+   [cron_job_of_yojson] reads it once the job's name is in hand. *)
+type 'schedule cron_job_fields = {
   name : string;
   image : cron_image;
-  schedule : string;
+  schedule : 'schedule;
   network : string option; [@default None]
   env_vars : string_map option; [@default None]
   (* Written to a mode-600 file on the box instead of into the crontab line.
@@ -232,6 +237,32 @@ type cron_job = {
   server : server;
 }
 [@@deriving yojson]
+
+type cron_job = Bondi_common.Cron_schedule.t cron_job_fields
+
+let cron_job_to_yojson =
+  cron_job_fields_to_yojson Bondi_common.Cron_schedule.to_yojson
+
+(* The schedule is written into root's crontab on the box, so one outside the
+   grammar is refused here, before any server is contacted, naming the job and
+   echoing what was written, as the image refusals above echo theirs: the
+   message reaches only the terminal of the operator who wrote it. [%S] prints a
+   newline as [\n], so the probe that would have started a second crontab line
+   is shown as the one line it was written on. *)
+let cron_schedule_of_yojson ~job json =
+  Bondi_common.Cron_schedule.of_yojson json
+  |> Result.map_error (fun e ->
+      Printf.sprintf "cron job %S schedule %s: %s" job
+        (Yojson.Safe.to_string json)
+        (Bondi_common.Cron_schedule.json_error_to_string e))
+
+let cron_job_of_yojson json : (cron_job, string) result =
+  let ( let* ) = Result.bind in
+  let* (fields : Yojson.Safe.t cron_job_fields) =
+    cron_job_fields_of_yojson (fun schedule -> Ok schedule) json
+  in
+  let* schedule = cron_schedule_of_yojson ~job:fields.name fields.schedule in
+  Ok { fields with schedule }
 
 (* The retry limit is refined once, at decode, so a [Max_backoff_retries.t]
    is the only thing that ever leaves this module and the refusal can name the
@@ -449,6 +480,55 @@ let validate_alloy_credentials config =
                 contain control characters"
                variable))
 
+(* A cron job runs in a container named after it, in the one namespace every
+   other container on the box shares, and its run removes the container that
+   holds its name when it cleans up. A job named like the service, its
+   blue-green candidate, a built-in container, a managed container or another
+   job is refused here, by [Cron_job_name], the rule the orchestrator applies to
+   the payload as well. The whole manifest is checked rather than each server's
+   share of it: stricter, and the estate shares no name across servers. Every
+   clash is named, so one edit fixes them all. *)
+let validate_cron_job_names config =
+  let jobs = Option.value config.cron_jobs ~default:[] in
+  let service =
+    Option.map
+      (fun (service : user_service) -> service.name)
+      config.user_service
+  in
+  let managed =
+    List.map
+      (fun (entry : managed_container) ->
+        Bondi_common.Managed_container.container_name_of entry.name)
+      (Option.value config.managed_containers ~default:[])
+  in
+  let names = List.map (fun (job : cron_job) -> job.name) jobs in
+  match Bondi_common.Cron_job_name.unsafe_path_refusal names with
+  | Some message -> Error message
+  | None -> (
+      match
+        Bondi_common.Cron_job_name.refusal
+          (Bondi_common.Cron_job_name.collisions ~service ~managed names)
+      with
+      | None -> Ok config
+      | Some message -> Error message)
+
+(* A job's secrets are written to the box as one [KEY=VALUE] per line and read
+   back with no unquoting, so a control character in either half is a second
+   entry rather than data: a value holding a newline loses its tail to a
+   variable nobody wrote. [Env_entry] is the rule managed containers' entries
+   follow and the orchestrator applies again. The message names the job and the
+   key and never the value, which is a credential. *)
+let validate_cron_secrets config =
+  let jobs =
+    List.map
+      (fun (job : cron_job) ->
+        (job.name, Option.value job.secret_env_vars ~default:[]))
+      (Option.value config.cron_jobs ~default:[])
+  in
+  match Bondi_common.Env_entry.job_refusal jobs with
+  | None -> Ok config
+  | Some message -> Error message
+
 (* An encrypted private key with nothing to unlock it cannot sign, and the key
    file states its own cipher in cleartext, so the configuration is refused
    where it is read rather than at the connection. Left to the connection, ssh
@@ -516,6 +596,8 @@ let read () =
           in
           let* config = validate_alloy_collect config in
           let* config = validate_alloy_credentials config in
+          let* config = validate_cron_job_names config in
+          let* config = validate_cron_secrets config in
           let* config = validate_ssh_identity config in
           let* _ = managed_containers config in
           Ok config)

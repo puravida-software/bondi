@@ -21,9 +21,9 @@ let cfg ?bind_address ?api_token ?cron_jobs () =
 
 let a_cron_job : Config_file.cron_job =
   {
-    Config_file.name = "levtra-paper";
-    image = Test_helpers.image_reference "registry.example.com/org/levtra";
-    schedule = "10 22 * * 1-5";
+    Config_file.name = "canary-paper";
+    image = Test_helpers.image_reference "registry.example.com/org/canary";
+    schedule = Test_helpers.cron_schedule "10 22 * * 1-5";
     network = None;
     env_vars = None;
     secret_env_vars = None;

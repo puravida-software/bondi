@@ -11,9 +11,9 @@ let bind_mount = Test_helpers.bind_mount
    either path, so a mapping that reordered or dropped the flag would show. *)
 let volumes : Bind_mount.t list =
   [
-    bind_mount ~host:"/srv/comalito/invoices" ~container:"/app/invoices"
+    bind_mount ~host:"/srv/myapp/invoices" ~container:"/app/invoices"
       ~read_only:false;
-    bind_mount ~host:"/etc/comalito" ~container:"/app/config" ~read_only:true;
+    bind_mount ~host:"/etc/myapp" ~container:"/app/config" ~read_only:true;
   ]
 
 let test_of_volumes_maps_each_volume_to_a_bind_mount () =
@@ -24,13 +24,13 @@ let test_of_volumes_maps_each_volume_to_a_bind_mount () =
        [
          {
            Docker.type_ = "bind";
-           source = "/srv/comalito/invoices";
+           source = "/srv/myapp/invoices";
            target = "/app/invoices";
            read_only = false;
          };
          {
            Docker.type_ = "bind";
-           source = "/etc/comalito";
+           source = "/etc/myapp";
            target = "/app/config";
            read_only = true;
          };

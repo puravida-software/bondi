@@ -5,8 +5,9 @@
     states the owning module's grammar, and never quotes the value: a refusal's
     message never carries a value from the payload (see
     [Handler_error.message]), and a rejected reference may hold a pasted
-    credential. The codecs that [deploy] and [run] share live here so neither
-    reaches into the other's strategy for a message. *)
+    credential. {!cron_schedule_of_yojson} is the exception, and says why. The
+    codecs that [deploy] and [run] share live here so neither reaches into the
+    other's strategy for a message. *)
 
 module Image_reference = Bondi_common.Image_reference
 
@@ -31,6 +32,15 @@ val traefik_image_of_yojson :
 (** Accepts an untagged reference, which pulls [latest]. *)
 
 val cron_image_of_yojson : Yojson.Safe.t -> (Image_reference.t, string) result
+
+val cron_schedule_of_yojson :
+  job:string -> Yojson.Safe.t -> (Bondi_common.Cron_schedule.t, string) result
+(** [cron_schedule_of_yojson ~job json] reads the schedule of the cron job named
+    [job]. The refusal names the field and the job, since one payload can carry
+    several jobs, and gives {!Bondi_common.Cron_schedule.error_to_string}'s
+    reason. This is the one reader whose refusal carries payload values: the
+    job's name, and for a bad field the item at fault, never the whole schedule.
+    Neither is a place a credential is written. *)
 
 val traefik_acme_ca_server_of_yojson :
   Yojson.Safe.t -> (Bondi_common.Acme_ca_server.t, string) result

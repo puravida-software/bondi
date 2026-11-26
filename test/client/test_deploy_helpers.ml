@@ -85,7 +85,7 @@ let mk_cron_job ?network ?alert_sinks ?exit_code_severities name ip :
   {
     name;
     image = Test_helpers.image_reference "img";
-    schedule = "* * * * *";
+    schedule = Test_helpers.cron_schedule "* * * * *";
     network;
     env_vars = None;
     secret_env_vars = None;
@@ -195,7 +195,8 @@ let test_cron_job_to_deploy () =
   let result = Deploy.cron_job_to_deploy job ~image:"img:v1" in
   check string "name" "backup" result.name;
   check string "image" "img:v1" result.image;
-  check string "schedule" "* * * * *" result.schedule
+  check string "schedule" "* * * * *"
+    (Bondi_common.Cron_schedule.to_string result.schedule)
 
 let test_cron_job_to_deploy_carries_network () =
   let job = mk_cron_job ~network:"bondi-network" "backup" "1.2.3.4" in
@@ -355,6 +356,74 @@ let test_cron_job_wire_key_is_network () =
   | `Intlit _ ->
       Alcotest.fail "expected a JSON object"
 
+(* The schedule is typed in the client but stays a JSON string on the wire,
+   written exactly as bondi.yaml spelled it: the orchestrator writes that text
+   into the crontab line, so a tab or a doubled space normalised here would
+   rewrite every line on the next deploy. *)
+let test_deploy_cron_job_schedule_on_the_wire () =
+  let job =
+    {
+      (mk_cron_job "backup" "1.2.3.4") with
+      schedule = Test_helpers.cron_schedule "30\t4  1,15 * 5";
+    }
+  in
+  let payload =
+    Deploy.deploy_payload_to_yojson
+      {
+        service_name = None;
+        image = None;
+        port = None;
+        env_vars = [];
+        traefik_domain_name = None;
+        traefik_image = None;
+        traefik_acme_email = None;
+        traefik_acme_ca_server = None;
+        registry_user = None;
+        registry_pass = None;
+        force_traefik_redeploy = None;
+        cron_jobs = Some [ Deploy.cron_job_to_deploy job ~image:"img:v1" ];
+        deployment_strategy = None;
+        health_timeout = None;
+        poll_interval = None;
+        logs = None;
+        volumes = None;
+      }
+  in
+  let schedules =
+    match payload with
+    | `Assoc fields -> (
+        match List.assoc_opt "cron_jobs" fields with
+        | Some (`List jobs) ->
+            List.map
+              (function
+                | `Assoc job_fields -> List.assoc_opt "schedule" job_fields
+                | `String _
+                | `Int _
+                | `Float _
+                | `Bool _
+                | `Null
+                | `List _
+                | `Intlit _ ->
+                    None)
+              jobs
+        | Some _
+        | None ->
+            [])
+    | `String _
+    | `Int _
+    | `Float _
+    | `Bool _
+    | `Null
+    | `List _
+    | `Intlit _ ->
+        []
+  in
+  check
+    (list (option string))
+    "the schedule is the JSON string as written"
+    [ Some {|"30\t4  1,15 * 5"|} ]
+    (List.map (Option.map Yojson.Safe.to_string) schedules)
+
 (* deploy_payload logs flag *)
 
 let test_deploy_payload_includes_logs_flag () =
@@ -407,7 +476,7 @@ let payload_server : Config_file.server =
   { ip_address = "10.0.0.5"; ssh = None; port = None }
 
 let invoices_mount () =
-  Test_helpers.bind_mount ~host:"/srv/comalito/invoices"
+  Test_helpers.bind_mount ~host:"/srv/myapp/invoices"
     ~container:"/data/invoices" ~read_only:false
 
 let service_payload_json volumes =
@@ -451,7 +520,7 @@ let test_payload_carries_volumes_when_declared () =
       check
         (option (list (triple string string bool)))
         "the declared mount survives the wire"
-        (Some [ ("/srv/comalito/invoices", "/data/invoices", false) ])
+        (Some [ ("/srv/myapp/invoices", "/data/invoices", false) ])
         (Option.map (List.map mount_fields) decoded.volumes)
 
 (* deploy_payload traefik_acme_ca_server
@@ -1192,7 +1261,7 @@ let test_present_host_paths_let_every_server_through () =
 let test_a_cron_only_deploy_does_not_check_the_services_volumes () =
   let server = gated_server "10.0.0.1" in
   let mount =
-    Test_helpers.bind_mount ~host:"/srv/comalito/invoices"
+    Test_helpers.bind_mount ~host:"/srv/myapp/invoices"
       ~container:"/data/invoices" ~read_only:false
   in
   let config =
@@ -1231,7 +1300,7 @@ let test_a_server_outside_the_service_gets_no_volumes () =
   let service_server = gated_server "10.0.0.1" in
   let other = gated_server "10.0.0.9" in
   let mount =
-    Test_helpers.bind_mount ~host:"/srv/comalito/invoices"
+    Test_helpers.bind_mount ~host:"/srv/myapp/invoices"
       ~container:"/data/invoices" ~read_only:false
   in
   let config =
@@ -1377,6 +1446,8 @@ let () =
             test_cron_job_to_deploy_absent_network;
           test_case "wire key is network" `Quick
             test_cron_job_wire_key_is_network;
+          test_case "schedule on the wire is the string as written" `Quick
+            test_deploy_cron_job_schedule_on_the_wire;
           test_case "carries alert_sinks" `Quick
             test_cron_job_to_deploy_carries_alert_sinks;
           test_case "carries exit_code_severities" `Quick

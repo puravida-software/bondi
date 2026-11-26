@@ -338,7 +338,7 @@ let backup_cron_job =
   {
     Config_file.name = "backup";
     Config_file.image = Test_helpers.image_reference "backup";
-    Config_file.schedule = "0 0 * * *";
+    Config_file.schedule = Test_helpers.cron_schedule "0 0 * * *";
     Config_file.network = None;
     Config_file.env_vars = None;
     Config_file.secret_env_vars = None;
@@ -1596,7 +1596,7 @@ let test_plan_cron_only_no_acme () =
     {
       Config_file.name = "backup";
       Config_file.image = Test_helpers.image_reference "backup";
-      Config_file.schedule = "0 0 * * *";
+      Config_file.schedule = Test_helpers.cron_schedule "0 0 * * *";
       Config_file.network = None;
       Config_file.env_vars = None;
       Config_file.secret_env_vars = None;
@@ -1645,7 +1645,7 @@ let test_plan_requires_curl_when_cron_jobs_declared () =
     {
       Config_file.name = "backup";
       Config_file.image = Test_helpers.image_reference "backup";
-      Config_file.schedule = "0 0 * * *";
+      Config_file.schedule = Test_helpers.cron_schedule "0 0 * * *";
       Config_file.network = None;
       Config_file.env_vars = None;
       Config_file.secret_env_vars = None;
@@ -1703,7 +1703,7 @@ let test_plan_requires_cron_docker_when_cron_jobs_declared () =
     {
       Config_file.name = "backup";
       Config_file.image = Test_helpers.image_reference "backup";
-      Config_file.schedule = "0 0 * * *";
+      Config_file.schedule = Test_helpers.cron_schedule "0 0 * * *";
       Config_file.network = None;
       Config_file.env_vars = None;
       Config_file.secret_env_vars = None;

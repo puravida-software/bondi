@@ -564,8 +564,82 @@ cron_jobs:
 Key differences from services:
 
 - Each cron job has exactly **one server** (not a list)
-- The `schedule` field uses standard cron syntax
+- The `schedule` field is the five time fields of a crontab line, in the narrower form described under [Schedules](#schedules)
 - Cron jobs are deployed with the same `bondi deploy` command, by name and tag
+
+The name, the schedule and any secret entries are checked when `bondi.yaml` is read, before any server is contacted, and the server checks them again when the deploy arrives. A refusal names the job, so a manifest declaring several says which one to fix.
+
+### Schedules
+
+A job's `schedule` is written into the server's root crontab, so it is parsed before it is written. It is five fields, separated by one or more spaces or tabs, with nothing before the first or after the last:
+
+| Field | Range |
+|---|---|
+| minute | 0-59 |
+| hour | 0-23 |
+| day of month | 1-31 |
+| month | 1-12 |
+| day of week | 0-7 (0 and 7 are both Sunday) |
+
+Each field is a comma-separated list of one or more items, and an item is one of:
+
+- `*`, every value of the field;
+- a number inside the field's range;
+- a range `a-b` of two numbers inside the field's range, with `a` no greater than `b`;
+- `*` or a range followed by `/step`, every step-th value of it, where the step is from 1 to the field's largest value.
+
+So `0 2 * * *`, `*/15 * * * *`, `1-9/2 * * * *` and `30 4 1,15 * 5` are accepted.
+
+This is narrower than what some cron daemons read. Bondi accepts the forms that both Debian's `cron` and `cronie` document with the same meaning, so a schedule means the same thing whichever one the server runs. Refused, even where your daemon would read them:
+
+- month and day names (`jan`, `mon`);
+- `@` nicknames (`@daily`, `@reboot`);
+- `~` random ranges (`6~15`);
+- a step after a bare number (`0/35`);
+- 0 as a day of month or a month.
+
+An empty schedule, one with more or fewer than five fields, and one holding a control character — a newline, which would start a second crontab line, included — are refused too:
+
+```
+Error reading configuration: invalid bondi.yaml: cron job "nightly" schedule "0 2 * jan *": the month "jan" is not a number from 1 to 12
+```
+
+### Names a cron job cannot take
+
+A job's container is named after the job, in the same namespace as every other container on the server. So a job cannot take a name already in use by:
+
+- the service, or its blue-green candidate, `<service>-new`;
+- one of Bondi's own containers: `bondi-orchestrator`, `bondi-traefik` or `bondi-alloy`;
+- a managed container, under its container name `bondi-<name>`;
+- another cron job.
+
+Every clash among the names is named, with what holds the name, so one edit fixes them all. The checks run in order and the first to refuse reports: a schedule outside the grammar, then a name that is not safe in a file path, then name clashes, then secret entries. A manifest with several kinds of fault may need one edit per kind:
+
+```
+Error reading configuration: cron jobs cannot take names already in use (cron job "web" cannot take that name: the service "web" already runs under it, and a cron job's container is named after the job): rename these jobs in bondi.yaml
+```
+
+The server checks again when the deploy arrives, against the managed containers already running on it as well as the names in the deploy.
+
+### A container under the job's name when it runs
+
+A job's container takes the job's name when a run finishes, replacing the previous run's. Before each run Bondi reads the name, and again when the run finishes. A container under it that carries both `bondi.type=cron` and `bondi.name=<job>` is the job's own. Anything else, such as a container started by hand, is left alone. Bondi does not remove it, rename it or start over it, and the run fails with exit code 1, is mailed by cron, and alerts the job's failure sinks as a run that never started:
+
+```
+refusing to run cron job nightly: the container named nightly was not made by this job: it does not carry both bondi.type=cron and bondi.name=nightly, so it was left untouched
+```
+
+If the container appears while a run is in progress, the run has already happened. The refusal then reads `cron job nightly finished, but the container named nightly was not made by this job: ...`, and the run's own container keeps its temporary name, `nightly-` and a timestamp, until you clear the clash. To fix either, rename or remove the other container (`docker rename`), or give the job another name in `bondi.yaml` and deploy again.
+
+### Secrets
+
+Values under a job's `secret_env_vars` are written to a mode-`600` file under `/etc/bondi/cron/<name>/` on the server rather than into the crontab line. That file is one `KEY=VALUE` per line, read back without unquoting, so the rule managed containers' secrets follow applies here too: a key must be non-empty and hold no `=` and no control character, and a value must hold no control character, newline included. A newline in a value would cut it short and turn its tail into a variable nobody wrote. A multi-line credential cannot be passed this way.
+
+A refused entry is named by job and key, never by its value:
+
+```
+Error reading configuration: cron job secret entries cannot be written to an env file (job "nightly" has a control character in the value of "API_TOKEN"). A key must be non-empty and hold no "=" and no control character, and a value must hold no control character, newline included: fix these entries in bondi.yaml
+```
 
 ### Reaching other containers from a cron job
 

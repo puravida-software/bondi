@@ -10,9 +10,9 @@
 # because a subcommand that works under `dune exec` and not in the image is a
 # subcommand nobody can call.
 #
-# Twenty-two assertions. The first seven are reached with `docker exec` into a
-# container started from the image passed in by the exact command the client
-# produces; 7a and the eighth to thirteenth, with 9a, 9b, 9c, 11a, 12a, 12b and 13a, are deploys
+# Twenty-four assertions. The first seven, with 6a and 6b, are reached with
+# `docker exec` into a container started from the image passed in by the exact
+# command the client produces; 7a and the eighth to thirteenth, with 9a, 9b, 9c, 11a, 12a, 12b and 13a, are deploys
 # sent through that same container and judged from outside it, by container id;
 # the fourteenth is asked from outside,
 # because stopping a container is not a thing the container can be asked to do
@@ -30,6 +30,13 @@
 #   6. `run` leaves a job container on the engine, a second `run` of the same job
 #      exits 0, and the first container is gone -- both halves asked by container
 #      id rather than inferred from an exit code
+#  6a. a `run` of a job whose name a container no job made holds,
+#      `arm_cron_run_spares_foreign` in `deploy-arms.sh`: that container, by id,
+#      still runs after the run, the run exits 1, and its stderr names the
+#      container
+#  6b. its twin on the same job, `arm_cron_run_replaces_own`: with the job's own
+#      last run under the name, a second run exits 0 and its container holds the
+#      name, by an id other than the first's, and the first is gone
 #   7. a `run` whose severity map routes an alert to an `https` sink completes a
 #      TLS handshake against the system trust store. Opt-in: it is the one
 #      assertion here that reaches a third party's host, so it runs only when
@@ -175,6 +182,8 @@
 #     the arms assert are the missing tag in assertion 8, the missing layer in
 #     assertion 11 and the missing Traefik tag in assertion 12, all failed
 #     pulls.
+#   - that a run 6a refuses reaches the orchestrator's log stream or routes an
+#     alert. 6a reads the stderr of the exec that ran it, and sets no alert sink.
 #   - that `status` reports the job assertion 6 ran. It does not and cannot:
 #     `status` lists cron jobs from the Bondi section of the crontab, and a job
 #     started by `run` writes no crontab entry. Manufacturing one would mean
@@ -334,6 +343,11 @@ work="$(mktemp -d)"
 # bumping it is a deliberate edit, which is the point.
 run_job="image-gate-run"
 tls_job="image-gate-alert-tls"
+# The job both cron-run arms fire, 6a and 6b in `deploy-arms.sh`. Named after
+# the check for the reason the two above are, and carrying this run's pid as the
+# deploy arms' names do, because 6a starts a container under it that no job
+# made, and the teardown below removes whatever holds it by name.
+cron_guard_job="image-gate-cron-guard-$$"
 run_image="alpine@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
 # RFC 2606 reserves this name and IANA operates a live HTTPS site on it. It is
 # the host the HTTP integration bundle's own TLS check posted to, so the arm
@@ -355,6 +369,7 @@ cleanup() {
     # socket, so removing the orchestrator does not remove them.
     docker rm --force "$run_job" > /dev/null 2>&1 || true
     docker rm --force "$tls_job" > /dev/null 2>&1 || true
+    docker rm --force "$cron_guard_job" > /dev/null 2>&1 || true
     # The deploy arms' fixture, which removes only what this run recorded making,
     # so a run its preconditions refused removes nothing. Silenced here: the
     # reporting call is the one after the arms, and this is the backstop for an
@@ -836,6 +851,11 @@ if docker inspect --format '{{.Id}}' "$first_run_id" > /dev/null 2>&1; then
     exit 1
 fi
 echo "ok: the second run of $run_job removed its predecessor $first_run_id"
+
+echo "==> $image: ${#cron_run_arms[@]} cron run arms, on the job $cron_guard_job"
+for arm in "${cron_run_arms[@]}"; do
+    "$arm"
+done
 
 case "$tls_handshake" in
     1 | true | yes | on)

@@ -1,6 +1,6 @@
 # shellcheck shell=bash
-# `work`, `here`, `attempts` and `container` are the sourcing script's, and
-# `deploy_arms` is read there.
+# `work`, `here`, `attempts`, `container`, `run_image` and `cron_guard_job` are
+# the sourcing script's, and `deploy_arms` and `cron_run_arms` are read there.
 # shellcheck disable=SC2154,SC2034
 #
 # The deploy arms of check-server-image.sh, and the fixture they deploy into.
@@ -16,6 +16,9 @@
 # Traefik the server creates binds. It is shared, so an arm is
 # one function and one entry in `deploy_arms`, and the assertions an arm makes are
 # the three below it, not copies of them.
+#
+# Last in the file are the two cron-run arms, which use none of the fixture and
+# run earlier, straight after the sourcing script's run arm.
 
 # Containers and the network the fixture makes carry this label, and the workload
 # images it builds bake it in, so every container a deploy starts from one of them
@@ -218,7 +221,7 @@ deploy_fixture_preconditions() {
     # Every tool the arms call outside docker, refused before anything is pulled,
     # made or written: a tool found missing half way would leave the host as the
     # run had changed it.
-    for tool in curl openssl timeout sha256sum base64; do
+    for tool in curl openssl timeout sha256sum base64 jq; do
         if ! command -v "$tool" > /dev/null; then
             echo "error: the deploy arms need $tool, which is not on PATH" >&2
             return 1
@@ -2579,4 +2582,95 @@ deploy_fixture_down() {
         return 1
     fi
     echo "ok: the deploy fixture is torn down"
+}
+
+# The cron-run arms, 6a and 6b. They are `run` arms rather than deploy arms and
+# use none of the fixture above: they need the no-cron orchestrator container,
+# the run arm's base image, which assertion 6 has already pulled, and the job
+# name `cron_guard_job`, all the sourcing script's. They run straight after
+# assertion 6, from `cron_run_arms`, in this order. The firing is induced rather
+# than awaited: each pipes a run payload to `bondi-server run` through the
+# container's socket, and no crontab or schedule is involved.
+#
+# Both fire the same job, so the arm that is refused and the arm that is not
+# differ only in what holds the name when the run starts.
+cron_run_arms=(arm_cron_run_spares_foreign arm_cron_run_replaces_own)
+
+# One run of the guarded job, with its exit status and streams where
+# `run_subcommand` leaves them.
+fire_cron_guard_run() {
+    jq -n --arg job "$cron_guard_job" --arg image "$run_image" \
+        '{job: $job, image: $image}' > "$work/cron-guard-run.json"
+    run_subcommand "$work/cron-guard-run.json" run
+}
+
+# A container nobody's job made, under the job's name, is still running, by the
+# id it had, after a run of that job, and the run says why it refused.
+#
+# The container's survival is asked first and the exit code after it, so that a
+# run which removed the container fails on the absence rather than on the code:
+# a run that does not check the labels removes the old container by id and
+# exits 0, and the survival is the claim this arm exists to make.
+arm_cron_run_spares_foreign() {
+    local foreign_id holder_id
+    echo "==> $image: a run of $cron_guard_job, whose name a container no job made holds"
+    expect_no_container_named "$cron_guard_job"
+    # Started by the arm and removed by it, with no label at all: the run's own
+    # containers carry the job's labels, and this one must carry none of them.
+    foreign_id="$(docker run --detach --name "$cron_guard_job" "$run_image" sleep 600)"
+    expect_running_at "$foreign_id" "$run_image"
+
+    fire_cron_guard_run
+    holder_id="$(container_id_of "$cron_guard_job")"
+    if [ "$holder_id" != "$foreign_id" ]; then
+        {
+            echo "error: after a run of $cron_guard_job the name is held by"
+            echo "'${holder_id:-nothing}', not by $foreign_id, the container no job made"
+            echo "that held it before the run. A run removes or replaces only a"
+            echo "container carrying its own job's cron labels."
+        } >&2
+        show_subcommand
+        return 1
+    fi
+    expect_running_at "$foreign_id" "$run_image"
+    expect_code "run $cron_guard_job over a container no job made" 1
+    expect_stream_contains "run $cron_guard_job over a container no job made" stderr \
+        "refusing to run cron job $cron_guard_job: the container named $cron_guard_job was not made by this job"
+
+    docker rm --force "$foreign_id" > /dev/null
+    expect_gone "$foreign_id"
+}
+
+# The pass-through twin on the same job: with the job's own container under the
+# name, a second run replaces it. The second run exiting 0 with a new container
+# under the name is what shows the first was recognised as the job's own: a run
+# that took it for a foreign one would refuse, exit 1 and leave it there.
+arm_cron_run_replaces_own() {
+    local own_id new_id
+    echo "==> $image: a run of $cron_guard_job, whose name the job's own last run holds"
+    expect_no_container_named "$cron_guard_job"
+
+    fire_cron_guard_run
+    expect_code "first run $cron_guard_job" 0
+    expect_stream_contains "first run $cron_guard_job" stdout '"exit_code":0'
+    own_id="$(container_id_of "$cron_guard_job")"
+    require_full_id "$own_id" "the first run of $cron_guard_job" || return 1
+    echo "ok: the first run of $cron_guard_job left $own_id under the name"
+
+    fire_cron_guard_run
+    expect_code "second run $cron_guard_job" 0
+    expect_stream_contains "second run $cron_guard_job" stdout '"exit_code":0'
+    new_id="$(container_id_of "$cron_guard_job")"
+    require_full_id "$new_id" "the second run of $cron_guard_job" || return 1
+    if [ "$new_id" = "$own_id" ]; then
+        {
+            echo "error: after a second run of $cron_guard_job the name is still held"
+            echo "by $own_id, the first run's container, so the second run did not"
+            echo "replace it."
+        } >&2
+        show_subcommand
+        return 1
+    fi
+    echo "ok: the second run of $cron_guard_job holds the name with $new_id"
+    expect_gone "$own_id"
 }

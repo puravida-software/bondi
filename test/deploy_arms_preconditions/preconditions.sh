@@ -401,7 +401,7 @@ new_case() {
     mkdir -p "$scratch/case/bin"
     cp "$stubs/docker" "$stubs/ss" "$scratch/case/bin/"
     # The tools the preconditions require be present; none is run by them.
-    for tool in curl openssl timeout sha256sum base64; do
+    for tool in curl openssl timeout sha256sum base64 jq; do
         printf '#!/usr/bin/env bash\nexit 0\n' > "$scratch/case/bin/$tool"
         chmod +x "$scratch/case/bin/$tool"
     done
@@ -544,7 +544,7 @@ run_teardown_case "a refused run removes nothing on the host" \
 
 # Each tool the arms call outside docker is refused before anything is pulled, made
 # or written, and the refusal names it.
-for tool in curl openssl timeout sha256sum base64; do
+for tool in curl openssl timeout sha256sum base64 jq; do
     new_case
     rm "$scratch/case/bin/$tool"
     run_case "an absent $tool is refused" 1 "error: the deploy arms need $tool, which is not on PATH"

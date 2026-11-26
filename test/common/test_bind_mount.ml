@@ -67,11 +67,11 @@ let list_refused json =
 
 let test_accepts_absolute_paths_and_reads_them_back () =
   let mount =
-    accepted ~host:"/srv/comalito/invoices" ~container:"/app/invoices"
+    accepted ~host:"/srv/myapp/invoices" ~container:"/app/invoices"
       ~read_only:false
   in
   check mount_fields "a writable mount reads back as declared"
-    ("/srv/comalito/invoices", "/app/invoices", false)
+    ("/srv/myapp/invoices", "/app/invoices", false)
     (fields mount);
   let mount = accepted ~host:"/" ~container:"/host" ~read_only:true in
   check mount_fields "the host root is a normalised host path"
@@ -88,13 +88,13 @@ let test_accepts_absolute_paths_and_reads_them_back () =
     ("/srv/a:b", "/c:d", true) (fields mount)
 
 let test_refuses_relative_host_path_naming_it () =
-  let e = refused ~host:"srv/comalito/invoices" ~container:"/app/invoices" in
+  let e = refused ~host:"srv/myapp/invoices" ~container:"/app/invoices" in
   check error "a relative host path is not absolute"
     (Bind_mount.Not_absolute
-       { role = Bind_mount.Host; path = "srv/comalito/invoices" })
+       { role = Bind_mount.Host; path = "srv/myapp/invoices" })
     e;
   check string "the message names the host path"
-    {|volume host path "srv/comalito/invoices" is not absolute: it must start with /|}
+    {|volume host path "srv/myapp/invoices" is not absolute: it must start with /|}
     (Bind_mount.error_to_string e);
   check error "an empty host path is not absolute"
     (Bind_mount.Not_absolute { role = Bind_mount.Host; path = "" })
@@ -105,7 +105,7 @@ let test_refuses_relative_host_path_naming_it () =
        (Bind_mount.list_of_yojson
           (`List
              [
-               entry ~host:"srv/comalito/invoices" ~container:"/app/invoices"
+               entry ~host:"srv/myapp/invoices" ~container:"/app/invoices"
                  ~read_only:false;
              ])))
 
@@ -214,13 +214,13 @@ let test_list_refuses_missing_read_only () =
          [
            `Assoc
              [
-               ("host", `String "/srv/comalito/invoices");
+               ("host", `String "/srv/myapp/invoices");
                ("container", `String "/app/invoices");
              ];
          ])
   in
   names ~needle:"read_only" message;
-  names ~needle:"/srv/comalito/invoices" message;
+  names ~needle:"/srv/myapp/invoices" message;
   (* A boolean spelled as a string is not a boolean. *)
   let message =
     list_refused
@@ -278,14 +278,14 @@ let test_list_refuses_string_entry () =
 let test_list_round_trips_through_json () =
   let declared =
     [
-      accepted ~host:"/srv/comalito/invoices" ~container:"/app/invoices"
+      accepted ~host:"/srv/myapp/invoices" ~container:"/app/invoices"
         ~read_only:false;
-      accepted ~host:"/etc/comalito" ~container:"/app/config" ~read_only:true;
+      accepted ~host:"/etc/myapp" ~container:"/app/config" ~read_only:true;
     ]
   in
   let json = Bind_mount.list_to_yojson declared in
   check string "the wire shape is a list of objects"
-    {|[{"host":"/srv/comalito/invoices","container":"/app/invoices","read_only":false},{"host":"/etc/comalito","container":"/app/config","read_only":true}]|}
+    {|[{"host":"/srv/myapp/invoices","container":"/app/invoices","read_only":false},{"host":"/etc/myapp","container":"/app/config","read_only":true}]|}
     (Yojson.Safe.to_string json);
   check
     (result (list mount_fields) string)

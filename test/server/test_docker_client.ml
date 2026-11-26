@@ -380,13 +380,13 @@ let test_host_config_encodes_bind_mounts () =
     [
       {
         type_ = "bind";
-        source = "/srv/comalito/invoices";
+        source = "/srv/myapp/invoices";
         target = "/app/invoices";
         read_only = false;
       };
       {
         type_ = "bind";
-        source = "/etc/comalito";
+        source = "/etc/myapp";
         target = "/app/config";
         read_only = true;
       };
@@ -394,8 +394,8 @@ let test_host_config_encodes_bind_mounts () =
   in
   Alcotest.check Alcotest.string "host config body"
     ({|{"RestartPolicy":{"Name":"unless-stopped"},"Mounts":[|}
-   ^ {|{"Type":"bind","Source":"/srv/comalito/invoices","Target":"/app/invoices","ReadOnly":false},|}
-   ^ {|{"Type":"bind","Source":"/etc/comalito","Target":"/app/config","ReadOnly":true}]}|}
+   ^ {|{"Type":"bind","Source":"/srv/myapp/invoices","Target":"/app/invoices","ReadOnly":false},|}
+   ^ {|{"Type":"bind","Source":"/etc/myapp","Target":"/app/config","ReadOnly":true}]}|}
     )
     (Yojson.Safe.to_string
        (Docker.host_config_to_yojson
@@ -421,9 +421,9 @@ let host_config_with_reported_mounts : string =
           "NetworkMode": "bridge",
           "RestartPolicy": {"Name": "unless-stopped", "MaximumRetryCount": 0},
           "Mounts": [
-            {"Type": "bind", "Source": "/srv/comalito/invoices",
+            {"Type": "bind", "Source": "/srv/myapp/invoices",
              "Target": "/app/invoices"},
-            {"Type": "bind", "Source": "/etc/comalito", "Target": "/app/config",
+            {"Type": "bind", "Source": "/etc/myapp", "Target": "/app/config",
              "ReadOnly": true, "BindOptions": {"Propagation": "rprivate"}}
           ]
         }|}
@@ -446,13 +446,13 @@ let test_inspect_response_decodes_reported_mounts () =
            [
              {
                type_ = "bind";
-               source = "/srv/comalito/invoices";
+               source = "/srv/myapp/invoices";
                target = "/app/invoices";
                read_only = false;
              };
              {
                type_ = "bind";
-               source = "/etc/comalito";
+               source = "/etc/myapp";
                target = "/app/config";
                read_only = true;
              };

@@ -3,7 +3,7 @@
 (library
  (name server_test_helpers)
  (modules server_test_helpers)
- (libraries alcotest yojson bondi.server))
+ (libraries alcotest yojson bondi.common bondi.server eio eio.mock))
 
 (tests
  (names
@@ -66,6 +66,8 @@
   eio
   eio.mock
   mirage-crypto-rng
+  qcheck-alcotest
+  qcheck-core
   server_test_helpers
   test_helpers
   unix

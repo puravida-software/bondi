@@ -1,10 +1,23 @@
 let ( let* ) = Result.bind
 
+(* The schedule goes over the wire as the JSON string bondi.yaml spelled, which
+   is what the orchestrator writes into the crontab line, so a deploy rewrites
+   no line it wrote before. The reader exists only for
+   [deploy_payload_of_yojson], which the client never calls outside a test; a
+   job was already named when its schedule was refused at read. *)
+type cron_schedule = Bondi_common.Cron_schedule.t
+
+let cron_schedule_to_yojson = Bondi_common.Cron_schedule.to_yojson
+
+let cron_schedule_of_yojson json =
+  Bondi_common.Cron_schedule.of_yojson json
+  |> Result.map_error Bondi_common.Cron_schedule.json_error_to_string
+
 (* Cron job for deploy payload - excludes server (server filters which jobs to send per target) *)
 type deploy_cron_job = {
   name : string;
   image : string;
-  schedule : string;
+  schedule : cron_schedule;
   network : string option; [@default None]
   env_vars : Config_file.string_map option; [@default None]
   secret_env_vars : Config_file.string_map option; [@default None]

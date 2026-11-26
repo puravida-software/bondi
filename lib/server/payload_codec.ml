@@ -44,6 +44,12 @@ let service_image_of_yojson json =
 let traefik_image_of_yojson = reference_of_yojson ~field:"traefik_image"
 let cron_image_of_yojson = reference_of_yojson ~field:"cron_jobs[].image"
 
+let cron_schedule_of_yojson ~job json =
+  Bondi_common.Cron_schedule.of_yojson json
+  |> Result.map_error (fun e ->
+      Printf.sprintf "cron_jobs[].schedule: job %s: %s" job
+        (Bondi_common.Cron_schedule.json_error_to_string e))
+
 let traefik_acme_ca_server_of_yojson json =
   Bondi_common.Acme_ca_server.of_yojson json
   |> Result.map_error (fun (_ : string) ->

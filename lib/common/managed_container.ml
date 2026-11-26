@@ -115,8 +115,8 @@ let rec first_duplicate_key seen = function
 
 (* The secret env file is one KEY=VALUE per line and Docker's --env-file parser
    does no unquoting, so a control character in either half declares variables
-   the operator did not write. Rejecting here rather than escaping at render
-   time is deliberate: there is no escape Docker would decode. *)
+   the operator did not write. The rule is Env_entry's, shared with the cron
+   secrets file; a plain value and a secret one are held to it alike. *)
 let validate_env_entry (key, value) =
   let raw_value =
     match value with
@@ -124,14 +124,10 @@ let validate_env_entry (key, value) =
     | Secret s ->
         s
   in
-  if
-    String.length key = 0
-    || String.contains key '='
-    || String_utils.has_control_char key
-  then Error (Invalid_env_key key)
-  else if String_utils.has_control_char raw_value then
-    Error (Invalid_env_value key)
-  else Ok ()
+  match Env_entry.check ~key ~value:raw_value with
+  | Ok () -> Ok ()
+  | Error (Env_entry.Invalid_key key) -> Error (Invalid_env_key key)
+  | Error (Env_entry.Invalid_value { key }) -> Error (Invalid_env_value key)
 
 let rec validate_env_entries = function
   | [] -> Ok ()

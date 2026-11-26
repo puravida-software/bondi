@@ -90,8 +90,9 @@ let duplicate sink line =
   with
   | Unix.Unix_error (e, _, _) -> Error (Unix.error_message e)
 
-let write_to sink line =
-  to_own_stderr line;
+(* The half of a diagnostic that reaches the container log. A sink that was
+   given up on stays given up on, and the loss is announced once. *)
+let to_container_log_to sink line =
   if should_duplicate ~pid:(Unix.getpid ()) && not sink.given_up then
     match duplicate sink line with
     | Ok () -> ()
@@ -103,4 +104,9 @@ let write_to sink line =
               this process's own stderr and will not reach the container log"
              sink.path reason)
 
+let write_to sink line =
+  to_own_stderr line;
+  to_container_log_to sink line
+
 let write line = write_to pid_one_sink line
+let to_container_log line = to_container_log_to pid_one_sink line

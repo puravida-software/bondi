@@ -125,17 +125,55 @@ type deploy_action =
       restart_policy : Docker.Client.restart_policy;
     }  (** Write a restart policy onto a running container in place. *)
 
+val managed_container_names : Docker.Client.container list -> string list
+(** The names the managed containers in a listing run under, without the leading
+    [/] the Engine reports them with. A container is managed when it carries
+    {!Bondi_common.Managed_container.type_label}; a cron run's container and an
+    unlabelled one are left out. {!deploy} reads these off the box for
+    {!cron_plan}, because the request carries no managed containers. *)
+
+val service_names_of :
+  Docker.Client.container list -> Bondi_common.Router_name.t list
+(** The services in a listing: a container labelled [bondi.type=service] gives
+    its [bondi.name], when that is a router name. The blue-green candidate
+    [<service>-new] is the same container under a temporary name and carries the
+    same label, so it gives the same service. Managed and cron containers and
+    unlabelled ones give none. {!deploy} reads these off the box for
+    {!cron_plan}, because a cron-only request carries no service name. *)
+
 val cron_plan :
-  Strategy.Simple.deploy_input -> (deploy_action list, Handler_error.t) result
-(** Plan the cron half of a deploy, purely, from the request alone. A request
-    declaring no jobs plans nothing. Two things are refused here, both by naming
-    every offending job in one message rather than only the first, so the
-    operator does not rediscover the next bad one on a later deploy.
+  managed_containers:string list ->
+  box_services:Bondi_common.Router_name.t list ->
+  Strategy.Simple.deploy_input ->
+  (deploy_action list, Handler_error.t) result
+(** Plan the cron half of a deploy, purely, from the request and
+    [managed_containers], the names of the managed containers on the box, which
+    the request does not carry, and [box_services], the services on the box,
+    which stand in for the service's names when the request declares no service
+    (a cron-only deploy) and are ignored when it does. There is no default: a
+    plan that assumed the box held none would accept a job named like one. A
+    request declaring no jobs plans nothing. Four things are refused here, each
+    by naming every offending job in one message rather than only the first, so
+    the operator does not rediscover the next bad one on a later deploy. Every
+    refusal is [Invalid_request].
 
     A job whose name could not be placed in a path is refused, by the same check
     that guards the write, because the interpreter that writes the job's files
     and its crontab line interpolates that name into three paths and carries no
     check of its own. Refusing here means nothing on the box has moved yet.
+
+    A job whose name is already in use is refused, by
+    {!Bondi_common.Cron_job_name.collisions}, the rule the client applies too: a
+    built-in container's name, the service's, its blue-green candidate's
+    ([<service>-new]), a name in [managed_containers], or another job's. A job
+    container takes its job's name, so a clash would fail the run or have its
+    cleanup remove the container that held the name. The message names the job
+    and what holds the name.
+
+    A secret entry {!Bondi_common.Env_entry.check} refuses is refused, naming
+    the job and the key and never the value. The entry is a line of the job's
+    env file, and a control character in it, newline included, would be a second
+    entry. The client refuses it as well, but this side writes the file.
 
     A job declaring a network Bondi does not manage is refused too. That check
     compares against the one managed name and cannot see which networks exist on
@@ -262,6 +300,10 @@ val decode_input :
     does not carry the rejected text: {!Handler_error.message} never carries a
     value from the payload, and a reference that failed to parse may hold a
     pasted credential.
+
+    A cron job's schedule outside {!Bondi_common.Cron_schedule}'s grammar is
+    refused here as well, before it can reach root's crontab. That refusal names
+    the job, since a payload can carry several.
 
     Refusals are [Invalid_request], so this decision carries an exit code like
     every other one this module makes. It is separate from {!deploy} rather than
