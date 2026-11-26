@@ -297,10 +297,9 @@ let input_with_volumes =
     volumes =
       Some
         [
-          bind_mount ~host:"/srv/comalito/invoices" ~container:"/app/invoices"
+          bind_mount ~host:"/srv/myapp/invoices" ~container:"/app/invoices"
             ~read_only:false;
-          bind_mount ~host:"/etc/comalito" ~container:"/app/config"
-            ~read_only:true;
+          bind_mount ~host:"/etc/myapp" ~container:"/app/config" ~read_only:true;
         ];
   }
 
@@ -321,13 +320,13 @@ let test_run_workload_carries_declared_mounts () =
        [
          {
            Docker.type_ = "bind";
-           source = "/srv/comalito/invoices";
+           source = "/srv/myapp/invoices";
            target = "/app/invoices";
            read_only = false;
          };
          {
            Docker.type_ = "bind";
-           source = "/etc/comalito";
+           source = "/etc/myapp";
            target = "/app/config";
            read_only = true;
          };

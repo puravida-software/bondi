@@ -16,7 +16,7 @@
 type deploy_cron_job = {
   name : string;
   image : string;
-  schedule : string;
+  schedule : Bondi_common.Cron_schedule.t;
   network : string option;
   env_vars : Config_file.string_map option;
   secret_env_vars : Config_file.string_map option;

@@ -96,7 +96,7 @@ let mk_cron_job name image ip : Config_file.cron_job =
   {
     name;
     image = Test_helpers.image_reference image;
-    schedule = "0 0 * * *";
+    schedule = Test_helpers.cron_schedule "0 0 * * *";
     network = None;
     env_vars = None;
     secret_env_vars = None;

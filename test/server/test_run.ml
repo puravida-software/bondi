@@ -236,9 +236,9 @@ let alerting_sinks_json =
       ("failure", `List [ `String "https://sink.example.com/x" ]);
     ]
 
-let run_body ?alert_sinks ~image () =
+let run_body ?(job = "nightly") ?alert_sinks ~image () =
   let fields =
-    [ ("job", `String "nightly"); ("image", `String image) ]
+    [ ("job", `String job); ("image", `String image) ]
     @
     match alert_sinks with
     | None -> []
@@ -391,17 +391,19 @@ let warning_with ~started ~run_result =
   let warning =
     Run.warning_of_run ~started ~run_result ~cleanup:(fun _container_id ->
         cleaned := true;
-        Some "cleanup ran")
+        Ok (Some "cleanup ran"))
   in
   (!cleaned, warning)
+
+let cleanup_answer = Alcotest.(result (option string) string)
 
 let test_warning_runs_cleanup_when_the_run_completed () =
   let cleaned, warning =
     warning_with ~started:(Ok "abc123") ~run_result:(Ok 0)
   in
   Alcotest.(check bool) "a completed run cleans up" true cleaned;
-  Alcotest.(check (option string))
-    "and carries whatever the cleanup reported" (Some "cleanup ran") warning
+  Alcotest.check cleanup_answer "and carries whatever the cleanup reported"
+    (Ok (Some "cleanup ran")) warning
 
 let test_warning_skips_cleanup_when_the_wait_failed () =
   let cleaned, warning =
@@ -409,7 +411,7 @@ let test_warning_skips_cleanup_when_the_wait_failed () =
   in
   Alcotest.(check bool)
     "a run that never finished does not clean up" false cleaned;
-  Alcotest.(check (option string)) "and carries no warning" None warning
+  Alcotest.check cleanup_answer "and carries no warning" (Ok None) warning
 
 let test_warning_skips_cleanup_when_the_start_failed () =
   let cleaned, warning =
@@ -418,7 +420,7 @@ let test_warning_skips_cleanup_when_the_start_failed () =
   in
   Alcotest.(check bool)
     "a run that never started does not clean up" false cleaned;
-  Alcotest.(check (option string)) "and carries no warning" None warning
+  Alcotest.check cleanup_answer "and carries no warning" (Ok None) warning
 
 let test_run_exit_code_for_orchestrator_failure () =
   match
@@ -466,6 +468,345 @@ let test_combine_warnings_some_some () =
     (Alcotest.option Alcotest.string)
     "both Some" (Some "a; b")
     (Run.combine_warnings (Some "a") (Some "b"))
+
+(* --- The container already under the job's name --- *)
+
+(* A cron run replaces the container under its job's name only when that
+   container carries both labels a run writes: bondi.type=cron and bondi.name
+   naming this job. Anything else under the name is someone else's, and is
+   neither started over nor removed. *)
+
+let existing_testable =
+  let pp fmt = function
+    | Run.No_container -> Format.fprintf fmt "No_container"
+    | Run.Own_cron_container id -> Format.fprintf fmt "Own_cron_container %S" id
+    | Run.Foreign name -> Format.fprintf fmt "Foreign %S" name
+  in
+  Alcotest.testable pp ( = )
+
+let container_named_nightly ~labels : Docker.container =
+  {
+    id = "abc123";
+    image = "someone/else:1";
+    image_id = "sha256:0000";
+    names = [ "/nightly" ];
+    state = Some "running";
+    status = Some "Up 2 hours";
+    labels;
+  }
+
+let check_existing msg ~expected ~labels =
+  Alcotest.check existing_testable msg expected
+    (Run.existing_of ~job:"nightly" (Some (container_named_nightly ~labels)))
+
+let test_existing_of_unlabelled_is_foreign () =
+  check_existing "a container with no labels is foreign"
+    ~expected:(Run.Foreign "nightly") ~labels:None;
+  check_existing "a container with an empty label set is foreign"
+    ~expected:(Run.Foreign "nightly") ~labels:(Some []);
+  check_existing "a managed container under the job's name is foreign"
+    ~expected:(Run.Foreign "nightly")
+    ~labels:(Some [ ("bondi.type", "managed"); ("bondi.name", "nightly") ]);
+  check_existing "the job's name label alone is not the cron label"
+    ~expected:(Run.Foreign "nightly")
+    ~labels:(Some [ ("bondi.name", "nightly") ])
+
+let test_existing_of_other_job_is_foreign () =
+  check_existing "another job's cron container is foreign"
+    ~expected:(Run.Foreign "nightly")
+    ~labels:(Some [ ("bondi.type", "cron"); ("bondi.name", "other") ]);
+  check_existing "a cron container naming no job is foreign"
+    ~expected:(Run.Foreign "nightly")
+    ~labels:(Some [ ("bondi.type", "cron") ])
+
+(* The labels are taken from what a run itself writes, as well as written out:
+   a container this job's previous pass left behind must be recognised as its
+   own, so the reader and the writer of the labels cannot drift apart. *)
+let test_existing_of_own_job () =
+  check_existing "the job's own cron container is its own"
+    ~expected:(Run.Own_cron_container "abc123")
+    ~labels:(Some [ ("bondi.type", "cron"); ("bondi.name", "nightly") ]);
+  let written =
+    (Run.run_opts ~container_name:"nightly-1759312345.123"
+       ~full_image:"myapp:v1" (mk_payload ()))
+      .config
+      .labels
+  in
+  check_existing "the labels a run writes mark the container as its own"
+    ~expected:(Run.Own_cron_container "abc123") ~labels:written
+
+let test_existing_of_none () =
+  Alcotest.check existing_testable "nothing under the name" Run.No_container
+    (Run.existing_of ~job:"nightly" None)
+
+(* The seams take the lookup, not its result, so a caller cannot hand one a
+   verdict that skips the guard. *)
+let test_start_seam_reads_the_name_itself () =
+  let started = ref false in
+  let refusals = ref [] in
+  let start () =
+    started := true;
+    Ok "new456"
+  in
+  let refuse msg = refusals := !refusals @ [ msg ] in
+  let foreign =
+    Run.start_unless_foreign ~refuse
+      ~lookup:(fun () -> Ok (Run.Foreign "canary-paper"))
+      ~start
+  in
+  Alcotest.(check bool) "a foreign container starts nothing" false !started;
+  Alcotest.(check (list string))
+    "the refusal is handed to refuse, once, as answered"
+    [ Result.get_error foreign ]
+    !refusals;
+  let unread =
+    Run.start_unless_foreign ~refuse
+      ~lookup:(fun () -> Error "docker http 500")
+      ~start
+  in
+  Alcotest.(check bool) "a lookup that fails starts nothing" false !started;
+  Alcotest.(check (result string string))
+    "and its failure is the answer" (Error "docker http 500") unread;
+  let own =
+    Run.start_unless_foreign ~refuse
+      ~lookup:(fun () -> Ok (Run.Own_cron_container "abc123"))
+      ~start
+  in
+  Alcotest.(check (result string string))
+    "the job's own lets it start" (Ok "new456") own
+
+let test_cleanup_seam_reads_the_name_itself () =
+  let steps = ref [] in
+  let step name =
+    steps := !steps @ [ name ];
+    None
+  in
+  let remove old_id = step ("remove " ^ old_id) in
+  let rename () = step "rename" in
+  let refuse _ = () in
+  let own =
+    Run.cleanup_of_existing ~refuse ~remove ~rename ~lookup:(fun () ->
+        Ok (Run.Own_cron_container "abc123"))
+  in
+  Alcotest.(check (list string))
+    "the old container is removed before the new one takes its name"
+    [ "remove abc123"; "rename" ]
+    !steps;
+  Alcotest.(check (result (option string) string))
+    "and nothing is warned" (Ok None) own;
+  steps := [];
+  let foreign =
+    Run.cleanup_of_existing ~refuse ~remove ~rename ~lookup:(fun () ->
+        Ok (Run.Foreign "canary-paper"))
+  in
+  Alcotest.(check (list string)) "a foreign container is not touched" [] !steps;
+  Alcotest.(check bool)
+    "and the cleanup is refused" true (Result.is_error foreign);
+  let unread =
+    Run.cleanup_of_existing ~refuse ~remove ~rename ~lookup:(fun () ->
+        Error "docker http 500")
+  in
+  Alcotest.(check (result (option string) string))
+    "a name that cannot be read is a warning beside the rename"
+    (Ok (Some "docker http 500")) unread
+
+(* --- Run.run against a scripted Engine --- *)
+
+let job = "canary-paper"
+
+let listing_entry ~id =
+  Printf.sprintf
+    {|{"Id":"%s","Image":"x:1","ImageID":"sha256:x","Names":["/%s"],"State":"exited"}|}
+    id job
+
+let foreign_listing = "[" ^ listing_entry ~id:"f1" ^ "]"
+
+let own_listing =
+  Printf.sprintf
+    {|[{"Id":"old123","Image":"x:1","ImageID":"sha256:x","Names":["/%s"],"State":"exited","Labels":{"bondi.type":"cron","bondi.name":"%s"}}]|}
+    job job
+
+let has needle target = Bondi_common.String_utils.contains ~needle target
+
+(* [listings] answers the n-th listing read of the name, the last one repeating,
+   so a test can say what the box holds before the pass and after it. *)
+let respond ?(remove = (200, "")) ?(rename = (200, "")) ~listings meth target =
+  match (meth, target) with
+  | _, t when has "/version" t -> (500, "no negotiation")
+  | "GET", t when has "/containers/json" t -> listings ()
+  | "POST", t when has "/containers/create" t -> (201, {|{"Id":"new456"}|})
+  | "POST", t when has "/start" t -> (200, "{}")
+  | "POST", t when has "/wait" t -> (200, {|{"StatusCode":0}|})
+  | "DELETE", _ -> remove
+  | "POST", t when has "/rename" t -> rename
+  | _ -> (200, "{}")
+
+let nth_listing sequence =
+  let reads = ref 0 in
+  fun () ->
+    let i = min !reads (List.length sequence - 1) in
+    incr reads;
+    List.nth sequence i
+
+let run_against ~respond ?alert_sinks () =
+  let engine, net = Server_test_helpers.Fake_engine.make ~respond in
+  let clock = Eio_mock.Clock.make () in
+  let client = Docker.create () in
+  let dispatched = ref [] in
+  let deliver ~net:_ ~clock:_ ~targets ~payload:_ =
+    dispatched := !dispatched @ [ List.map Alert.sink_url targets ]
+  in
+  let body = run_body ~job ?alert_sinks ~image:"myapp:v1" () in
+  let result = Run.run ~clock ~client ~net ~deliver body in
+  (Server_test_helpers.Fake_engine.calls engine, result, !dispatched)
+
+let made calls ~meth ~needle =
+  List.filter (fun (m, t) -> m = meth && has needle t) calls
+
+let check_untouched ~label calls =
+  Alcotest.(check int)
+    (label ^ ": nothing was created")
+    0
+    (List.length (made calls ~meth:"POST" ~needle:"/containers/create"));
+  Alcotest.(check int)
+    (label ^ ": nothing was removed")
+    0
+    (List.length (made calls ~meth:"DELETE" ~needle:"/containers/"));
+  Alcotest.(check int)
+    (label ^ ": nothing was renamed")
+    0
+    (List.length (made calls ~meth:"POST" ~needle:"/rename"))
+
+let refused_message ~label = function
+  | Ok _ -> Alcotest.fail (label ^ ": a foreign container must fail the run")
+  | Error err ->
+      Alcotest.(check int)
+        (label ^ ": the box disagrees with a well-formed request")
+        1
+        (Handler_error.exit_code err);
+      let msg = Handler_error.message err in
+      Alcotest.(check bool)
+        (label ^ ": the message names the container: " ^ msg)
+        true (has job msg);
+      msg
+
+let test_foreign_refuses_before_start () =
+  Eio_mock.Backend.run @@ fun () ->
+  let calls, result, dispatched =
+    run_against ~alert_sinks:alerting_sinks_json
+      ~respond:(respond ~listings:(nth_listing [ (200, foreign_listing) ]))
+      ()
+  in
+  check_untouched ~label:"before start" calls;
+  let msg = refused_message ~label:"before start" result in
+  Alcotest.(check bool)
+    "the refusal says it is before the start" true
+    (has "refusing to run cron job" msg);
+  Alcotest.(check (list (list string)))
+    "the refusal alerts the failure sinks as a run that never started"
+    [ [ "https://sink.example.com/x" ] ]
+    dispatched
+
+let test_a_failed_first_lookup_names_the_job () =
+  Eio_mock.Backend.run @@ fun () ->
+  let calls, result, _ =
+    run_against
+      ~respond:(respond ~listings:(nth_listing [ (500, "listing refused") ]))
+      ()
+  in
+  check_untouched ~label:"unread name" calls;
+  match result with
+  | Ok _ -> Alcotest.fail "an unreadable name must not start a run"
+  | Error err ->
+      Alcotest.(check bool)
+        "the failure names the job" true
+        (has ("failed to look up container " ^ job) (Handler_error.message err))
+
+let test_own_container_is_replaced_after_the_run () =
+  Eio_mock.Backend.run @@ fun () ->
+  let calls, result, _ =
+    run_against
+      ~respond:(respond ~listings:(nth_listing [ (200, own_listing) ]))
+      ()
+  in
+  let order =
+    List.filter_map
+      (fun (m, t) ->
+        if m = "DELETE" && has "/containers/old123" t then Some "remove"
+        else if m = "POST" && has "/containers/new456/rename" t then
+          Some "rename"
+        else None)
+      calls
+  in
+  Alcotest.(check (list string))
+    "the old container is removed by id before the new one takes the name"
+    [ "remove"; "rename" ] order;
+  match result with
+  | Ok response ->
+      Alcotest.(check int) "the run reports its exit code" 0 response.exit_code;
+      Alcotest.(check (option string)) "with no warning" None response.warning
+  | Error err -> Alcotest.fail (Handler_error.message err)
+
+(* A container can take the job's name while the pass runs. The name is read
+   again at cleanup and judged by the same verdict, so it is not removed, and
+   the run that otherwise finished answers the refusal. *)
+let test_cleanup_reads_the_name_again () =
+  Eio_mock.Backend.run @@ fun () ->
+  let calls, result, dispatched =
+    run_against ~alert_sinks:alerting_sinks_json
+      ~respond:
+        (respond
+           ~listings:(nth_listing [ (200, "[]"); (200, foreign_listing) ]))
+      ()
+  in
+  Alcotest.(check int)
+    "the pass started" 1
+    (List.length (made calls ~meth:"POST" ~needle:"/containers/create"));
+  Alcotest.(check int)
+    "nothing was removed" 0
+    (List.length (made calls ~meth:"DELETE" ~needle:"/containers/"));
+  Alcotest.(check int)
+    "and the pass did not try to take the name" 0
+    (List.length (made calls ~meth:"POST" ~needle:"/rename"));
+  let msg = refused_message ~label:"at cleanup" result in
+  Alcotest.(check bool)
+    "the refusal says the pass kept its temporary name" true
+    (has "kept its temporary name" msg);
+  Alcotest.(check (list (list string)))
+    "a run that finished but could not be cleaned up alerts"
+    [ [ "https://sink.example.com/x" ] ]
+    dispatched
+
+let test_cleanup_warnings_name_the_job_and_container () =
+  Eio_mock.Backend.run @@ fun () ->
+  let warning_of ?remove ?rename listings =
+    let _, result, _ =
+      run_against
+        ~respond:(respond ?remove ?rename ~listings:(nth_listing listings))
+        ()
+    in
+    match result with
+    | Ok response -> response.warning
+    | Error err -> Alcotest.fail (Handler_error.message err)
+  in
+  Alcotest.(check (option string))
+    "a lookup that fails at cleanup is a warning, naming the job"
+    (Some
+       "failed to look up container canary-paper: docker http 500: listing \
+        refused")
+    (warning_of [ (200, "[]"); (500, "listing refused") ]);
+  Alcotest.(check (option string))
+    "a failed removal names the container and the job"
+    (Some
+       "failed to remove old container old123 of cron job canary-paper: docker \
+        http 500: remove refused")
+    (warning_of ~remove:(500, "remove refused") [ (200, own_listing) ]);
+  Alcotest.(check (option string))
+    "a failed rename names the container and the job"
+    (Some
+       "failed to rename container new456 of cron job canary-paper: docker \
+        http 500: rename refused")
+    (warning_of ~rename:(500, "rename refused") [ (200, "[]") ])
 
 (* --- Run.run: the composition the seams sit underneath --- *)
 
@@ -560,6 +901,29 @@ let () =
             test_warning_skips_cleanup_when_the_wait_failed;
           Alcotest.test_case "skips cleanup when the start failed" `Quick
             test_warning_skips_cleanup_when_the_start_failed;
+        ] );
+      ( "existing container",
+        [
+          Alcotest.test_case "unlabelled is foreign" `Quick
+            test_existing_of_unlabelled_is_foreign;
+          Alcotest.test_case "another job's is foreign" `Quick
+            test_existing_of_other_job_is_foreign;
+          Alcotest.test_case "the job's own" `Quick test_existing_of_own_job;
+          Alcotest.test_case "none" `Quick test_existing_of_none;
+          Alcotest.test_case "the start seam reads the name itself" `Quick
+            test_start_seam_reads_the_name_itself;
+          Alcotest.test_case "the cleanup seam reads the name itself" `Quick
+            test_cleanup_seam_reads_the_name_itself;
+          Alcotest.test_case "foreign refuses before start" `Quick
+            test_foreign_refuses_before_start;
+          Alcotest.test_case "a failed first lookup names the job" `Quick
+            test_a_failed_first_lookup_names_the_job;
+          Alcotest.test_case "own container is replaced after the run" `Quick
+            test_own_container_is_replaced_after_the_run;
+          Alcotest.test_case "cleanup reads the name again" `Quick
+            test_cleanup_reads_the_name_again;
+          Alcotest.test_case "cleanup warnings name the job and container"
+            `Quick test_cleanup_warnings_name_the_job_and_container;
         ] );
       ( "combine_warnings",
         [

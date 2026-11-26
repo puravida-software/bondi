@@ -30,6 +30,13 @@ let image_reference text =
   | Error (Bondi_common.Image_reference.Malformed rejected) ->
       Alcotest.failf "not an image reference: %S" rejected
 
+let cron_schedule text =
+  match Bondi_common.Cron_schedule.of_string text with
+  | Ok schedule -> schedule
+  | Error e ->
+      Alcotest.failf "not a schedule: %S: %s" text
+        (Bondi_common.Cron_schedule.error_to_string e)
+
 let router_name text =
   match Bondi_common.Router_name.of_string ~field:"service.name" text with
   | Ok name -> name
@@ -47,7 +54,13 @@ let rec remove_tree path =
         (fun entry -> remove_tree (Filename.concat path entry))
         (Sys.readdir path);
       Sys.rmdir path
-  | _ -> Sys.remove path
+  | Unix.S_REG
+  | Unix.S_LNK
+  | Unix.S_CHR
+  | Unix.S_BLK
+  | Unix.S_FIFO
+  | Unix.S_SOCK ->
+      Sys.remove path
 
 let with_temp_dir prefix f =
   let dir = Filename.temp_dir prefix "" in

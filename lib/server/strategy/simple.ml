@@ -72,10 +72,15 @@ let service_name_to_yojson = Bondi_common.Router_name.to_yojson
 (* Types                                                                     *)
 (* ------------------------------------------------------------------------- *)
 
-type cron_job = {
+(* A cron job's fields, with the schedule's type left open. A field's decoder
+   sees only its own field, so a schedule read by one could not say which job
+   it belongs to, and a payload can carry several. The derived decoder
+   therefore keeps the schedule as the JSON it arrived as, and
+   [cron_job_of_yojson] reads it once the job's name is in hand. *)
+type 'schedule cron_job_fields = {
   name : string;
   image : cron_image;
-  schedule : string;
+  schedule : 'schedule;
   network : string option; [@default None]
   env_vars : string_map option; [@default None]
   secret_env_vars : string_map option; [@default None]
@@ -86,6 +91,22 @@ type cron_job = {
 }
 [@@deriving yojson]
 
+type cron_job = Bondi_common.Cron_schedule.t cron_job_fields
+
+let cron_job_to_yojson =
+  cron_job_fields_to_yojson Bondi_common.Cron_schedule.to_yojson
+
+(** Reads a cron job, refusing a schedule outside the grammar with a message
+    that names the job. *)
+let cron_job_of_yojson json : (cron_job, string) result =
+  let* (fields : Yojson.Safe.t cron_job_fields) =
+    cron_job_fields_of_yojson (fun schedule -> Ok schedule) json
+  in
+  let* schedule =
+    Payload_codec.cron_schedule_of_yojson ~job:fields.name fields.schedule
+  in
+  Ok { fields with schedule }
+
 (* How many times a service router sends a request: the first try and the
    resends. A resend goes to a backend that may be the one that just stopped, and
    the Traefik Bondi creates abandons a dial to it after 1 s
@@ -95,8 +116,7 @@ type cron_job = {
    59 of 8593 swap requests (0.69 %, 1 of 10 runs over 1 in 100); 3 attempts
    22 of 8378 (0.26 %, 0 of 10 over); 4 attempts 10 of 8355 (0.12 %, 0 of 10
    over). At 4 attempts the longest exhausted request took 4.006 s before its
-   504, and the rescued ones a median of 1.046 s, at most 3.048 s.] Feature
-   0041, NFR-1. *)
+   504, and the rescued ones a median of 1.046 s, at most 3.048 s.] *)
 let retry_attempts = "4"
 
 type deploy_input = {

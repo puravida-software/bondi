@@ -207,16 +207,16 @@ relative one mean the run never got that far.
   > EOF
   > }
 
-  $ volume_config srv/comalito/invoices
+  $ volume_config srv/myapp/invoices
   $ rm -f "$ROOT/relative.argv" && touch "$ROOT/relative.argv"
   $ SSH_ARGV_LOG="$ROOT/relative.argv" PATH="$ROOT/logging-bin:$PATH" bondi-client deploy web:v1 2>&1
   Deployment process initiated...
-  Error reading configuration: invalid bondi.yaml: volume host path "srv/comalito/invoices" is not absolute: it must start with /
+  Error reading configuration: invalid bondi.yaml: volume host path "srv/myapp/invoices" is not absolute: it must start with /
   [1]
   $ wc -l < "$ROOT/relative.argv"
   0
 
-  $ volume_config /srv/comalito/invoices
+  $ volume_config /srv/myapp/invoices
   $ rm -f "$ROOT/absolute.argv" && touch "$ROOT/absolute.argv"
   $ SSH_ARGV_LOG="$ROOT/absolute.argv" PATH="$ROOT/logging-bin:$PATH" bondi-client deploy web:v1 > absolute.log 2>&1 || :
   $ test -s "$ROOT/absolute.argv" && echo ssh was called

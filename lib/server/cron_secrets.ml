@@ -22,7 +22,7 @@ let run_file_of = Bondi_common.Cron_exec_line.run_file_of
    written, so a leading dot or any separator must not be representable, or
    "job" could name its way out of its own directory. Restating it gave two
    predicates that agreed and were held together by nothing. *)
-let is_valid_name = Bondi_common.Managed_container.is_valid_name
+let is_valid_name = Bondi_common.Cron_job_name.is_safe_path_name
 
 let file_contents entries =
   String.concat ""

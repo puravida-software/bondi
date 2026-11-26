@@ -45,18 +45,23 @@ let action_string = function
       "UpdateRestartPolicy(" ^ container_id ^ "," ^ restart_policy.Docker.name
       ^ ")"
 
-let planned_actions ~context input =
-  match Deploy.cron_plan input with
+(* The plan helpers below that take no [~managed_containers] plan for a box
+   holding no managed container, said here once rather than at every call. *)
+let planned_actions_on ~managed_containers ~context input =
+  match Deploy.cron_plan ~managed_containers ~box_services:[] input with
   | Error err ->
       Alcotest.fail
         (context ^ ": cron_plan failed: " ^ Handler_error.message err)
   | Ok actions -> List.map action_string actions
 
+let planned_actions ~context input =
+  planned_actions_on ~managed_containers:[] ~context input
+
 (* The names UpsertCrontab carries, which is what the interpreter writes both
    files from. action_string reports only how many there are, and a plan that
    dropped one job and kept another of the same count would read as correct. *)
 let upsert_job_names ~context input =
-  match Deploy.cron_plan input with
+  match Deploy.cron_plan ~managed_containers:[] ~box_services:[] input with
   | Error err ->
       Alcotest.fail
         (context ^ ": cron_plan failed: " ^ Handler_error.message err)
@@ -72,13 +77,16 @@ let upsert_job_names ~context input =
               [])
         actions
 
-let plan_error ~context input =
-  match Deploy.cron_plan input with
+let plan_error_on ~managed_containers ~context input =
+  match Deploy.cron_plan ~managed_containers ~box_services:[] input with
   | Ok actions ->
       Alcotest.fail
         (Printf.sprintf "%s: expected an error, planned [%s]" context
            (String.concat "; " (List.map action_string actions)))
   | Error err -> err
+
+let plan_error ~context input =
+  plan_error_on ~managed_containers:[] ~context input
 
 let result_testable ok_t =
   Alcotest.testable
@@ -268,7 +276,7 @@ let cron_job_on_network ~name ~network : Simple.cron_job =
   {
     name;
     image = Test_helpers.image_reference "backup:v1";
-    schedule = "0 0 * * *";
+    schedule = Test_helpers.cron_schedule "0 0 * * *";
     network;
     env_vars = None;
     secret_env_vars = None;
@@ -445,6 +453,13 @@ let test_cron_plan_refuses_an_unsafe_job_name () =
   Alcotest.check Alcotest.int "an unsafe job name exits 2" 2
     (Handler_error.exit_code err);
   let msg = Handler_error.message err in
+  (* The exact sentence the client prints for the same names: both read it from
+     Bondi_common.Cron_job_name. *)
+  Alcotest.check Alcotest.string "the sentence is the client's"
+    "cron job names must be safe to place in a file path (\"../etc/backup\"). \
+     A name must begin with a letter or a digit and may hold only letters, \
+     digits, '.', '_' and '-': rename these jobs in bondi.yaml"
+    msg;
   Alcotest.check Alcotest.bool
     ("error names the offending job: " ^ msg)
     true
@@ -477,6 +492,351 @@ let test_cron_plan_upsert_carries_every_declared_job () =
     (Alcotest.list Alcotest.string)
     "every declared job reaches UpsertCrontab, in order" declared
     (upsert_job_names ~context:"three declared jobs" input)
+
+(* --- Cron job names already in use, and secret entries --- *)
+
+let contains needle haystack =
+  Bondi_common.String_utils.contains ~needle haystack
+
+let cron_jobs_named names =
+  List.map (fun name -> cron_job_on_network ~name ~network:None) names
+
+let web_input jobs =
+  {
+    minimal_input with
+    service_name = Some (Test_helpers.router_name "web");
+    cron_jobs = Some jobs;
+  }
+
+(* A refusal the caller can fix in bondi.yaml, whose message carries every
+   fragment in [expected]. *)
+let check_refused_naming ~context ~managed_containers ~expected input =
+  let err = plan_error_on ~managed_containers ~context input in
+  Alcotest.check Alcotest.int
+    (context ^ ": a name already in use exits 2")
+    2
+    (Handler_error.exit_code err);
+  let msg = Handler_error.message err in
+  List.iter
+    (fun fragment ->
+      Alcotest.check Alcotest.bool
+        (Printf.sprintf "%s: the message names %s: %s" context fragment msg)
+        true (contains fragment msg))
+    expected
+
+(* One payload per class of holder, each naming the job and what holds its
+   name, then all of them at once, in one message. The service is [web]; the
+   expected fragments are written from the names Bondi runs its containers
+   under, not read from the module that reserves them. *)
+let test_cron_plan_refuses_collision_per_holder () =
+  let cases =
+    [
+      ("the service", [ "web" ], [ {|cron job "web"|}; {|service "web"|} ]);
+      ( "the blue-green candidate",
+        [ "web-new" ],
+        [ {|cron job "web-new"|}; {|candidate "web-new"|} ] );
+      ( "the orchestrator",
+        [ "bondi-orchestrator" ],
+        [
+          {|cron job "bondi-orchestrator"|};
+          {|built-in container "bondi-orchestrator"|};
+        ] );
+      ( "Traefik",
+        [ "bondi-traefik" ],
+        [ {|cron job "bondi-traefik"|}; {|built-in container "bondi-traefik"|} ]
+      );
+      ( "Alloy",
+        [ "bondi-alloy" ],
+        [ {|cron job "bondi-alloy"|}; {|built-in container "bondi-alloy"|} ] );
+      ( "a duplicate pair",
+        [ "report"; "report" ],
+        [ {|cron job "report"|}; {|another cron job "report"|} ] );
+    ]
+  in
+  List.iter
+    (fun (context, jobs, expected) ->
+      check_refused_naming ~context ~managed_containers:[] ~expected
+        (web_input (cron_jobs_named jobs)))
+    cases;
+  check_refused_naming ~context:"every clash at once" ~managed_containers:[]
+    ~expected:(List.concat_map (fun (_, _, expected) -> expected) cases)
+    (web_input
+       (cron_jobs_named (List.concat_map (fun (_, jobs, _) -> jobs) cases)));
+  (* The same service with jobs that only resemble its names plans the write:
+     the refusals above are made on the name, not on the fixture. *)
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "names that only resemble a holder are accepted" [ "UpsertCrontab(3)" ]
+    (planned_actions ~context:"near misses"
+       (web_input (cron_jobs_named [ "web-old"; "bondi-web"; "report" ])))
+
+(* The deploy payload carries no managed containers, so the orchestrator learns
+   them from the box. The same payload is accepted on a box holding none and
+   refused on a box holding [bondi-db]: the clash is found only through what
+   the box reports, never through the client. *)
+let test_cron_plan_managed_clash_only_from_box () =
+  let input = web_input (cron_jobs_named [ "bondi-db" ]) in
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "a box with no managed container accepts the job" [ "UpsertCrontab(1)" ]
+    (planned_actions_on ~managed_containers:[] ~context:"no managed container"
+       input);
+  check_refused_naming ~context:"the box holds bondi-db"
+    ~managed_containers:[ "bondi-db" ]
+    ~expected:[ {|cron job "bondi-db"|}; {|managed container "bondi-db"|} ]
+    input
+
+(* The listing names containers with a leading [/], and only the label marks a
+   managed container: a cron run's container and an unlabelled one hold names
+   too, but a cron job's own container is its to replace, and an unlabelled one
+   is not Bondi's to reserve. *)
+let test_managed_container_names_reads_labels () =
+  let containers =
+    [
+      Server_test_helpers.mk_container ~id:"m1" ~image:"postgres:16"
+        ~names:[ "/bondi-db" ]
+        ~labels:(Some [ ("bondi.type", "managed"); ("bondi.name", "db") ])
+        ();
+      Server_test_helpers.mk_container ~id:"c1" ~image:"backup:v1"
+        ~names:[ "/backup" ]
+        ~labels:(Some [ ("bondi.type", "cron"); ("bondi.name", "backup") ])
+        ();
+      Server_test_helpers.mk_container ~id:"u1" ~image:"nginx:1"
+        ~names:[ "/stray" ] ~labels:None ();
+    ]
+  in
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "only the managed container, without its leading slash" [ "bondi-db" ]
+    (Deploy.managed_container_names containers)
+
+(* The service container carries [bondi.type=service] and [bondi.name]; the
+   blue-green candidate is the same container under a temporary name, so the
+   label gives the service for both. A managed container, a cron run's container
+   and an unlabelled one are not the service, and a name that is no router name
+   is not one either. *)
+let test_service_names_of_reads_labels () =
+  let labelled ~id ~names labels =
+    Server_test_helpers.mk_container ~id ~image:"img:1" ~names
+      ~labels:(Some labels) ()
+  in
+  let containers =
+    [
+      labelled ~id:"s1" ~names:[ "/orders" ]
+        [ ("bondi.type", "service"); ("bondi.name", "orders") ];
+      labelled ~id:"s2" ~names:[ "/billing-new" ]
+        [ ("bondi.type", "service"); ("bondi.name", "billing") ];
+      labelled ~id:"m1" ~names:[ "/bondi-db" ]
+        [ ("bondi.type", "managed"); ("bondi.name", "db") ];
+      labelled ~id:"c1" ~names:[ "/backup" ]
+        [ ("bondi.type", "cron"); ("bondi.name", "backup") ];
+      labelled ~id:"s3" ~names:[ "/Bad_Name" ]
+        [ ("bondi.type", "service"); ("bondi.name", "Bad_Name") ];
+      labelled ~id:"s4" ~names:[ "/noname" ] [ ("bondi.type", "service") ];
+      Server_test_helpers.mk_container ~id:"u1" ~image:"nginx:1"
+        ~names:[ "/stray" ] ~labels:None ();
+    ]
+  in
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "only the service containers, by their bondi.name" [ "orders"; "billing" ]
+    (List.map Bondi_common.Router_name.to_string
+       (Deploy.service_names_of containers))
+
+(* A cron-only deploy carries no service_name, so the client cannot have told
+   the orchestrator which names the service holds. The payload below is the raw
+   JSON of such a request, decoded and planned: the service on the box is read
+   from the listing, and a job named after it or its candidate is refused. *)
+let test_cron_plan_cron_only_payload_sees_box_service () =
+  let body_of job =
+    Printf.sprintf
+      {|{"cron_jobs":[{"name":%S,"image":"nightly:v1","schedule":"0 0 * * *"}]}|}
+      job
+  in
+  let plan job ~box_services =
+    match Deploy.decode_input (body_of job) with
+    | Error e ->
+        Alcotest.failf "the cron-only payload was refused at decode: %s"
+          (Handler_error.message e)
+    | Ok (input : Simple.deploy_input) ->
+        Alcotest.check
+          (Alcotest.option Alcotest.string)
+          "the payload carries no service name" None
+          (Option.map Bondi_common.Router_name.to_string input.service_name);
+        Deploy.cron_plan ~managed_containers:[] ~box_services input
+  in
+  let box_services = [ Test_helpers.router_name "orders" ] in
+  let refused ~expected job =
+    match plan job ~box_services with
+    | Ok _ -> Alcotest.failf "job %s was planned on a box holding orders" job
+    | Error err ->
+        Alcotest.check Alcotest.string "the refusal, exactly" expected
+          (Handler_error.message err)
+  in
+  refused
+    ~expected:
+      "cron jobs cannot take names already in use (cron job \"orders\" cannot \
+       take that name: the service \"orders\" already runs under it, and a \
+       cron job's container is named after the job): rename these jobs in \
+       bondi.yaml"
+    "orders";
+  refused
+    ~expected:
+      "cron jobs cannot take names already in use (cron job \"orders-new\" \
+       cannot take that name: the service's blue-green candidate \
+       \"orders-new\" already runs under it, and a cron job's container is \
+       named after the job): rename these jobs in bondi.yaml"
+    "orders-new";
+  match plan "nightly" ~box_services with
+  | Ok actions ->
+      Alcotest.check
+        (Alcotest.list Alcotest.string)
+        "a job named after nothing on the box is planned" [ "UpsertCrontab(1)" ]
+        (List.filter
+           (fun a ->
+             a
+             <> "EnsureCronNetwork(" ^ Bondi_common.Defaults.network_name ^ ")")
+           (List.map action_string actions))
+  | Error err ->
+      Alcotest.failf "a free name was refused: %s" (Handler_error.message err)
+
+(* A secret value is written as one line of the job's env file, so a newline in
+   it is a second entry: [a\nB=c] would hand the job a [B] it never declared.
+   The entry is refused naming the job and the key. The refusal's error type has
+   no slot for the value, so the absence checks below pin the message's shape;
+   the exact naming checks are what show the right entries were refused. *)
+let test_cron_plan_refuses_secret_control_character () =
+  let job ~name secrets =
+    { (cron_job_on_network ~name ~network:None) with secret_env_vars = secrets }
+  in
+  let probe = "a\nB=c" in
+  let input =
+    web_input
+      [
+        job ~name:"backup" (Some [ ("K", probe); ("OK", "x=y") ]);
+        job ~name:"report" (Some [ ("BAD=KEY", "v") ]);
+        job ~name:"cleanup" None;
+      ]
+  in
+  let err = plan_error ~context:"a newline in a secret value" input in
+  Alcotest.check Alcotest.int "a bad secret entry exits 2" 2
+    (Handler_error.exit_code err);
+  let msg = Handler_error.message err in
+  List.iter
+    (fun fragment ->
+      Alcotest.check Alcotest.bool
+        (Printf.sprintf "the message names %s: %s" fragment msg)
+        true (contains fragment msg))
+    [ {|"backup"|}; {|"K"|}; {|"report"|}; {|"BAD=KEY"|} ];
+  List.iter
+    (fun fragment ->
+      Alcotest.check Alcotest.bool
+        (Printf.sprintf "the message does not carry %S: %s" fragment msg)
+        false (contains fragment msg))
+    [ probe; "B=c"; {|"OK"|}; {|"cleanup"|} ];
+  (* The same jobs with entries the env file can hold are planned. *)
+  Alcotest.check
+    (Alcotest.list Alcotest.string)
+    "entries without a control character are accepted" [ "UpsertCrontab(3)" ]
+    (planned_actions ~context:"clean secrets"
+       (web_input
+          [
+            job ~name:"backup" (Some [ ("K", "a=B=c"); ("OK", "x=y") ]);
+            job ~name:"report" (Some [ ("KEY", "") ]);
+            job ~name:"cleanup" None;
+          ]))
+
+module Gen = QCheck2.Gen
+
+(* Names over a three-letter alphabet, so random names clash often. Each is a
+   router name and safe in a path, so a clash is the only refusal a generated
+   payload can meet. *)
+let small_name =
+  Gen.string_size ~gen:(Gen.oneof_list [ 'a'; 'b'; '0' ]) (Gen.int_range 2 3)
+
+let builtin_names = [ "bondi-orchestrator"; "bondi-traefik"; "bondi-alloy" ]
+
+let names_payload =
+  let open Gen in
+  let* service = option small_name in
+  let* managed =
+    list_size (int_range 0 3) (map (fun n -> "bondi-" ^ n) small_name)
+  in
+  let seeded =
+    List.concat
+      [
+        builtin_names;
+        (match service with
+        | None -> []
+        | Some s -> [ s; s ^ "-new" ]);
+        managed;
+      ]
+  in
+  let+ jobs =
+    list_size (int_range 0 6) (oneof [ oneof_list seeded; small_name ])
+  in
+  (service, managed, jobs)
+
+let print_names_payload (service, managed, jobs) =
+  let strings xs = String.concat "; " (List.map (Printf.sprintf "%S") xs) in
+  Printf.sprintf "service=%s managed=[%s] jobs=[%s]"
+    (match service with
+    | None -> "None"
+    | Some s -> Printf.sprintf "%S" s)
+    (strings managed) (strings jobs)
+
+(* Written from the rule, without Cron_job_name: no two jobs share a name, and
+   no job takes a built-in name, the service's, its candidate's or a managed
+   container's. *)
+let names_free ~service ~managed jobs =
+  let taken =
+    List.concat
+      [
+        builtin_names;
+        (match service with
+        | None -> []
+        | Some s -> [ s; s ^ "-new" ]);
+        managed;
+      ]
+  in
+  let rec distinct = function
+    | [] -> true
+    | job :: rest -> (not (List.mem job rest)) && distinct rest
+  in
+  distinct jobs && List.for_all (fun job -> not (List.mem job taken)) jobs
+
+(* [small_name] is in the router-name grammar and is not a reserved router
+   name, so the refusal cannot happen. *)
+let generated_router_name s =
+  match Bondi_common.Router_name.of_string ~field:"service" s with
+  | Ok r -> r
+  | Error e ->
+      Alcotest.failf "generator: unreachable — small_name is valid: %s" e
+
+(* Whenever the plan accepts, the names are free by the oracle. The converse is
+   checked too, so a plan that refused every payload would fail rather than
+   pass vacuously. *)
+let prop_accepted_payload_names_unique =
+  QCheck_alcotest.to_alcotest ~speed_level:`Quick
+    (QCheck2.Test.make ~count:2000
+       ~name:"an accepted payload's cron names are unique and free"
+       ~print:print_names_payload names_payload (fun (service, managed, jobs) ->
+         let input =
+           {
+             minimal_input with
+             service_name = Option.map generated_router_name service;
+             cron_jobs = Some (cron_jobs_named jobs);
+           }
+         in
+         let free = names_free ~service ~managed jobs in
+         match
+           Deploy.cron_plan ~managed_containers:managed ~box_services:[] input
+         with
+         | Ok _ -> free
+         | Error (Handler_error.Invalid_request _) -> not free
+         | Error (Handler_error.Orchestrator_failure _)
+         | Error (Handler_error.Not_ready _) ->
+             false))
 
 (* The client emits this shape from its own deploy_cron_job type; the two are
    structural duplicates, so the wire key is pinned on both sides. *)
@@ -605,7 +965,7 @@ let alerting_config_cron_job () : Client_config.cron_job =
   {
     name = "backup";
     image = Test_helpers.image_reference "img";
-    schedule = "* * * * *";
+    schedule = Test_helpers.cron_schedule "* * * * *";
     network = None;
     env_vars = None;
     secret_env_vars = None;
@@ -809,9 +1169,9 @@ let test_decode_input_accepts_volumes () =
       volumes =
         Some
           [
-            mount ~host:"/srv/comalito/invoices" ~container:"/app/invoices"
+            mount ~host:"/srv/myapp/invoices" ~container:"/app/invoices"
               ~read_only:false;
-            mount ~host:"/etc/comalito" ~container:"/app/config" ~read_only:true;
+            mount ~host:"/etc/myapp" ~container:"/app/config" ~read_only:true;
           ];
     }
   in
@@ -827,8 +1187,8 @@ let test_decode_input_accepts_volumes () =
         "both mounts, in order, with their flags"
         (Some
            [
-             ("/srv/comalito/invoices", "/app/invoices", false);
-             ("/etc/comalito", "/app/config", true);
+             ("/srv/myapp/invoices", "/app/invoices", false);
+             ("/etc/myapp", "/app/config", true);
            ])
         (Option.map (List.map mount_fields) input.volumes)
 
@@ -862,23 +1222,23 @@ let check_volume_refused ~what ~leaked body =
         leaked
 
 let test_decode_input_rejects_relative_volume () =
-  check_volume_refused ~what:"a relative host path" ~leaked:[ "comalito" ]
-    {|{"service_name":"my-service","volumes":[{"host":"srv/comalito/invoices","container":"/app/invoices","read_only":false}]}|}
+  check_volume_refused ~what:"a relative host path" ~leaked:[ "myapp" ]
+    {|{"service_name":"my-service","volumes":[{"host":"srv/myapp/invoices","container":"/app/invoices","read_only":false}]}|}
 
 let test_decode_input_rejects_duplicate_container_path () =
   check_volume_refused ~what:"a duplicate container path"
-    ~leaked:[ "/app/dupe"; "comalito" ]
-    {|{"service_name":"my-service","volumes":[{"host":"/srv/comalito/a","container":"/app/dupe","read_only":false},{"host":"/srv/comalito/b","container":"/app/dupe","read_only":true}]}|}
+    ~leaked:[ "/app/dupe"; "myapp" ]
+    {|{"service_name":"my-service","volumes":[{"host":"/srv/myapp/a","container":"/app/dupe","read_only":false},{"host":"/srv/myapp/b","container":"/app/dupe","read_only":true}]}|}
 
 let test_decode_input_rejects_unknown_volume_key () =
   check_volume_refused ~what:"an unknown entry key"
-    ~leaked:[ "comalito"; "/app/invoices"; "sekrit_key" ]
-    {|{"service_name":"my-service","volumes":[{"host":"/srv/comalito/invoices","container":"/app/invoices","read_only":false,"sekrit_key":true}]}|}
+    ~leaked:[ "myapp"; "/app/invoices"; "sekrit_key" ]
+    {|{"service_name":"my-service","volumes":[{"host":"/srv/myapp/invoices","container":"/app/invoices","read_only":false,"sekrit_key":true}]}|}
 
 let test_decode_input_rejects_control_character_volume () =
   check_volume_refused ~what:"a control character in a path"
-    ~leaked:[ "comalito"; "/app/invoices" ]
-    {|{"service_name":"my-service","volumes":[{"host":"/srv/comalito\u0001/invoices","container":"/app/invoices","read_only":false}]}|}
+    ~leaked:[ "myapp"; "/app/invoices" ]
+    {|{"service_name":"my-service","volumes":[{"host":"/srv/myapp\u0001/invoices","container":"/app/invoices","read_only":false}]}|}
 
 (* A field that does not decode is refused at decode, before any plan exists,
    as the caller's mistake. The message names the field and restates the
@@ -951,6 +1311,78 @@ let test_decode_refuses_unroutable_service_name () =
   check_field_refused ~what:"a service name that is not a string"
     ~field:"service_name" ~leaked:[ "4242" ]
     {|{"service_name":4242,"image":"myapp:v1","port":8080,"traefik_domain_name":"example.com"}|}
+
+(* The schedule is written into root's crontab as the start of the job's line,
+   so one that is not five fields is refused at decode, naming the job it
+   belongs to. The message carries the job's name and no other value from the
+   payload: neither the image nor what the schedule held. The newline case is
+   the probe that would have started a second crontab line running as root. *)
+let test_decode_refuses_bad_schedule_naming_job () =
+  List.iter
+    (fun (what, schedule, leaked) ->
+      let body =
+        Printf.sprintf
+          {|{"cron_jobs":[{"name":"nightly","image":"backup:v1","schedule":%s}]}|}
+          (Yojson.Safe.to_string (`String schedule))
+      in
+      check_field_refused ~what ~field:"cron_jobs[].schedule"
+        ~leaked:("backup:v1" :: leaked) body;
+      match Deploy.decode_input body with
+      | Ok _ -> Alcotest.failf "%s was accepted" what
+      | Error e ->
+          Alcotest.(check bool)
+            (Printf.sprintf "%s: the message names the job (got %S)" what
+               (Handler_error.message e))
+            true
+            (Bondi_common.String_utils.contains ~needle:"nightly"
+               (Handler_error.message e)))
+    [
+      ("an empty schedule", "", []);
+      ("a four-field schedule", "* * * *", [ "* * * *" ]);
+      ( "a schedule holding a newline",
+        "not a schedule\n* * * * * root reboot",
+        [ "not a schedule"; "root reboot" ] );
+    ]
+
+(* A schedule sent as a number is refused naming the job, and the message
+   does not echo the value. *)
+let test_decode_refuses_non_string_schedule () =
+  let body =
+    {|{"cron_jobs":[{"name":"nightly","image":"backup:v1","schedule":5}]}|}
+  in
+  match Deploy.decode_input body with
+  | Ok _ -> Alcotest.fail "a numeric schedule was accepted"
+  | Error e ->
+      Alcotest.(check string)
+        "the refusal names the field and the job"
+        ("invalid deploy payload: cron_jobs[].schedule: job nightly: the \
+          schedule is not a string: " ^ Bondi_common.Cron_schedule.grammar)
+        (Handler_error.message e)
+
+(* Common schedules decode, and each is read back as it was written: the
+   crontab line starts with these bytes, so a decode that reshaped one would
+   rewrite that box's line on its next deploy. *)
+let test_decode_accepts_common_schedules () =
+  List.iter
+    (fun schedule ->
+      match
+        Deploy.decode_input
+          (Printf.sprintf
+             {|{"cron_jobs":[{"name":"nightly","image":"backup:v1","schedule":%S}]}|}
+             schedule)
+      with
+      | Error e ->
+          Alcotest.failf "the schedule %S was refused: %s" schedule
+            (Handler_error.message e)
+      | Ok (input : Simple.deploy_input) ->
+          Alcotest.(check (option (list string)))
+            (Printf.sprintf "%S is read as written" schedule)
+            (Some [ schedule ])
+            (Option.map
+               (List.map (fun (job : Simple.cron_job) ->
+                    Bondi_common.Cron_schedule.to_string job.schedule))
+               input.cron_jobs))
+    [ "17 * * * *"; "* * * * *"; "30 3 * * *" ]
 
 (* The certificate server arrives as [traefik_acme_ca_server]. An https URL is
    read as written. Anything else is refused at decode as the caller's mistake,
@@ -1554,92 +1986,7 @@ let test_deploy_reports_an_escaping_exception () =
 
 (* --- Deploy.deploy against a scripted Engine --- *)
 
-(* An in-memory Docker socket. The client opens one connection per request, so
-   each connection reads one request off its writes, records its method and
-   target, and answers it once from [respond]. What a test asserts is the list
-   of requests the deploy made, which is what "nothing moved" means. *)
-module Fake_engine = struct
-  type t = { mutable requests : (string * string) list }
-
-  let calls t = List.rev t.requests
-
-  let header_end s =
-    let rec go i =
-      if i + 4 > String.length s then None
-      else if String.sub s i 4 = "\r\n\r\n" then Some (i + 4)
-      else go (i + 1)
-    in
-    go 0
-
-  let content_length head =
-    String.split_on_char '\n' head
-    |> List.find_map (fun line ->
-        match String.index_opt line ':' with
-        | Some i
-          when String.lowercase_ascii (String.trim (String.sub line 0 i))
-               = "content-length" ->
-            int_of_string_opt
-              (String.trim
-                 (String.sub line (i + 1) (String.length line - i - 1)))
-        | _ -> None)
-    |> Option.value ~default:0
-
-  (* The request is complete once its head and a declared body are in. A chunked
-     body is complete at its terminating chunk. *)
-  let complete s =
-    match header_end s with
-    | None -> false
-    | Some body_at ->
-        let head = String.lowercase_ascii (String.sub s 0 body_at) in
-        if Bondi_common.String_utils.contains ~needle:"chunked" head then
-          String.ends_with ~suffix:"0\r\n\r\n" s
-        else String.length s - body_at >= content_length head
-
-  (* The connection is an [Eio_mock.Flow], not a hand-written
-     [Eio.Net.Pi.stream_socket]: that interface gained members across eio
-     releases, and a fake that implements it breaks on the next one. The mock's
-     [pp] is called with every string written to it, in order, which is how the
-     request is recovered; its first read waits for the whole request and
-     answers it, and later reads fall back to the mock's default End_of_file. *)
-  let answer_for engine ~respond request =
-    let line = List.hd (String.split_on_char '\r' request) |> String.trim in
-    let meth, target =
-      match String.split_on_char ' ' line with
-      | m :: target :: _ -> (m, target)
-      | _ -> ("?", "?")
-    in
-    engine.requests <- (meth, target) :: engine.requests;
-    let code, body = respond meth target in
-    Printf.sprintf
-      "HTTP/1.1 %d X\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" code
-      (String.length body) body
-
-  let make ~respond =
-    let engine = { requests = [] } in
-    let net = Eio_mock.Net.make "docker" in
-    let socket () =
-      let written = Buffer.create 256 in
-      let answered = ref false in
-      let flow =
-        Eio_mock.Flow.make
-          ~pp:(fun _ s -> if not !answered then Buffer.add_string written s)
-          "docker-conn"
-      in
-      let rec read () =
-        let request = Buffer.contents written in
-        if complete request then (
-          answered := true;
-          answer_for engine ~respond request)
-        else (
-          Eio.Fiber.yield ();
-          read ())
-      in
-      Eio_mock.Flow.on_read flow [ `Run read ];
-      (flow :> _ Eio.Net.stream_socket)
-    in
-    Eio_mock.Net.on_connect net (List.init 400 (fun _ -> `Run socket));
-    (engine, net)
-end
+module Fake_engine = Server_test_helpers.Fake_engine
 
 let request_moves_the_box (meth, target) =
   let has needle = Bondi_common.String_utils.contains ~needle target in
@@ -1832,6 +2179,67 @@ let test_an_unrecognised_health_check_is_named () =
     (Bondi_common.String_utils.contains
        ~needle:"unrecognised health check `GRPC`" (reason unknown))
 
+(* A cron-only deploy of one job named like a managed container. Nothing in the
+   payload says the box holds one, so only the listing [deploy] makes can find
+   the clash. *)
+let cron_only_input_named name =
+  {
+    minimal_input with
+    service_name = None;
+    image = None;
+    port = None;
+    traefik_domain_name = None;
+    traefik_image = None;
+    traefik_acme_email = None;
+    cron_jobs = Some (cron_jobs_named [ name ]);
+  }
+
+let managed_db_listing =
+  {|[{"Id":"m1","Image":"postgres:16","ImageID":"sha256:pg","Names":["/bondi-db"],"State":"running","Labels":{"bondi.type":"managed","bondi.name":"db"}}]|}
+
+let test_deploy_refuses_a_job_named_like_a_managed_container_on_the_box () =
+  Eio_mock.Backend.run @@ fun () ->
+  let engine, result =
+    run_deploy
+      ~respond:
+        (engine_with ~containers:managed_db_listing
+           ~image_inspect:(ok_image_inspect ()) ~container_inspect:(fun _ ->
+             (500, "unreadable")))
+      (cron_only_input_named "bondi-db")
+  in
+  (match result with
+  | Error (Handler_error.Invalid_request msg) ->
+      Alcotest.(check bool)
+        ("the refusal names the managed container: " ^ msg)
+        true
+        (contains {|managed container "bondi-db"|} msg)
+  | Error (Handler_error.Orchestrator_failure msg)
+  | Error (Handler_error.Not_ready msg) ->
+      Alcotest.failf "a name the box holds is the caller's to fix, got: %s" msg
+  | Ok _ -> Alcotest.fail "a job named like a managed container was deployed");
+  check_nothing_moved ~context:"a name the box holds" engine
+
+(* A box whose containers cannot be listed cannot be checked, and the deploy
+   stops with nothing moved rather than planning as if the box held none. *)
+let test_a_failed_container_listing_stops_a_cron_deploy () =
+  Eio_mock.Backend.run @@ fun () ->
+  let respond meth target =
+    match contains "/containers/json" target with
+    | true -> (500, {|{"message":"listing refused"}|})
+    | false ->
+        engine_with ~containers:"[]" ~image_inspect:(ok_image_inspect ())
+          ~container_inspect:(fun _ -> (500, "unreadable"))
+          meth target
+  in
+  let engine, result = run_deploy ~respond (cron_only_input_named "backup") in
+  let context = "a failed listing" in
+  let msg = refusal_message ~context result in
+  Alcotest.(check bool)
+    ("the failure carries the Engine's answer: " ^ msg)
+    true
+    (contains "listing refused" msg);
+  check_nothing_moved ~context engine
+
 let () =
   Alcotest.run "Deploy"
     [
@@ -1881,6 +2289,19 @@ let () =
             test_cron_plan_refuses_an_unsafe_job_name;
           Alcotest.test_case "upsert carries every declared job" `Quick
             test_cron_plan_upsert_carries_every_declared_job;
+          Alcotest.test_case "refuses a name in use, per holder" `Quick
+            test_cron_plan_refuses_collision_per_holder;
+          Alcotest.test_case "a managed clash is found only from the box" `Quick
+            test_cron_plan_managed_clash_only_from_box;
+          Alcotest.test_case "managed container names read the label" `Quick
+            test_managed_container_names_reads_labels;
+          Alcotest.test_case "service names read the label" `Quick
+            test_service_names_of_reads_labels;
+          Alcotest.test_case "a cron-only payload sees the box's service" `Quick
+            test_cron_plan_cron_only_payload_sees_box_service;
+          Alcotest.test_case "refuses a control character in a secret" `Quick
+            test_cron_plan_refuses_secret_control_character;
+          prop_accepted_payload_names_unique;
         ] );
       ( "failure classification",
         [
@@ -1933,6 +2354,12 @@ let () =
             test_decode_refuses_bad_reference;
           Alcotest.test_case "decode refuses an unroutable service name" `Quick
             test_decode_refuses_unroutable_service_name;
+          Alcotest.test_case "decode refuses a bad schedule, naming the job"
+            `Quick test_decode_refuses_bad_schedule_naming_job;
+          Alcotest.test_case "decode refuses a schedule that is not a string"
+            `Quick test_decode_refuses_non_string_schedule;
+          Alcotest.test_case "decode accepts common schedules" `Quick
+            test_decode_accepts_common_schedules;
           Alcotest.test_case "decode reads and refuses the certificate server"
             `Quick test_decode_acme_ca_server;
           Alcotest.test_case "decode accepts an input with drain_grace_period"
@@ -2003,5 +2430,10 @@ let () =
           Alcotest.test_case
             "an escaping exception becomes an orchestrator failure" `Quick
             test_deploy_reports_an_escaping_exception;
+          Alcotest.test_case
+            "a job named like a managed container on the box is refused" `Quick
+            test_deploy_refuses_a_job_named_like_a_managed_container_on_the_box;
+          Alcotest.test_case "a failed container listing stops a cron deploy"
+            `Quick test_a_failed_container_listing_stops_a_cron_deploy;
         ] );
     ]

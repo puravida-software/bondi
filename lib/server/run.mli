@@ -85,18 +85,87 @@ val combine_warnings : string option -> string option -> string option
 (** Join two best-effort cleanup warnings into the single [warning] field,
     keeping both when both are present. *)
 
+(** What is under a job's name when a run reads it, judged by the labels a run
+    writes. *)
+type existing =
+  | No_container  (** Nothing is under the name. *)
+  | Own_cron_container of string
+      (** This job's cron container, by id: it carries both [bondi.type=cron]
+          and [bondi.name] naming the job, so a finished run may replace it. *)
+  | Foreign of string
+      (** A container under the job's name, named here, that lacks either label:
+          something this job did not make, which a run never removes, replaces
+          or starts over. *)
+
+val existing_of : job:string -> Docker.Client.container option -> existing
+(** The verdict on the container found under [job]'s name, purely.
+
+    Both labels are required. [bondi.type=cron] alone is not enough, because one
+    job's container must never be taken for another's, and a [bondi.name] alone
+    is what a managed container or a service carries too. *)
+
+val start_unless_foreign :
+  refuse:(string -> unit) ->
+  lookup:(unit -> (existing, string) result) ->
+  start:(unit -> (string, string) result) ->
+  (string, string) result
+(** Start the run, or refuse it, by the verdict this reads before the start.
+
+    It takes the lookup rather than its result, so no caller can hand it a
+    verdict that skips the guard: the read is made here, once, before anything
+    starts. A lookup that fails is the start's failure and calls nothing that
+    starts. Nothing under the name and the job's own container both call [start]
+    and answer what it answered. A {!Foreign} container calls nothing that
+    starts or removes: the refusal, naming the container, is handed to [refuse]
+    and answered as the start's failure, so it reaches the answer and the alert
+    by the same path a container that failed to start takes. {!run} passes
+    {!Diagnostics.to_container_log} as [refuse]: the answer is what the
+    subcommand prints on its own standard error, so the refusal is printed there
+    once, and [refuse] only adds the container log's copy. *)
+
+val cleanup_of_existing :
+  refuse:(string -> unit) ->
+  remove:(string -> string option) ->
+  rename:(unit -> string option) ->
+  lookup:(unit -> (existing, string) result) ->
+  (string option, string) result
+(** The post-run cleanup, by the verdict this reads once the pass finished.
+
+    It takes the lookup rather than its result, so the name is read here, after
+    the pass, and cannot be a verdict read earlier. The job's own container is
+    removed by its id and the pass takes the name; with nothing under the name
+    the pass only takes it. A {!Foreign} container, which took the name while
+    the pass ran, is neither removed nor contended for: the refusal, naming it,
+    is handed to [refuse] and answered as the [Error], and the pass's container
+    keeps its temporary name. A name that could not be read removes nothing; the
+    failed read is a warning beside the rename, as a failed removal or rename
+    is, because the pass itself finished. *)
+
 val warning_of_run :
-  cleanup:(string -> string option) ->
+  cleanup:(string -> (string option, string) result) ->
   started:(string, string) result ->
   run_result:(int, string) result ->
-  string option
-(** Decide whether the post-run cleanup happens, and carry what it reported.
+  (string option, string) result
+(** Decide whether the post-run cleanup happens, and carry what it reported: a
+    warning, or a refusal that fails the run.
 
     [cleanup] runs only when the container both started and finished. Removing
     the previous container before a failed run has been reported would destroy
     the only record of what ran last, and renaming a container that never
     started has nothing to rename. Taking [cleanup] as a parameter is what keeps
-    this decision pure: {!run} supplies the Docker calls it needs. *)
+    this decision pure: {!run} supplies the Docker calls it needs, through
+    {!cleanup_of_existing}. *)
+
+val settle :
+  cleaned:(string option, string) result ->
+  (int, string) result ->
+  (int, string) result * string option
+(** The run's final result and its warning, once the cleanup has answered.
+
+    A cleanup refusal turns a run that finished into a failure carrying the
+    refusal, so the answer is an [Orchestrator_failure] and the alert is the one
+    a run that never started raises. Otherwise the run's own result stands with
+    the cleanup's warning beside it. *)
 
 val prepare :
   deliver:
@@ -143,6 +212,18 @@ val run :
     per process, and the net and the clock it needs are bound here rather than
     by the caller: a caller that had to pre-bind them would be rebuilding part
     of this function, which is what this signature exists to make unnecessary.
+
+    The container under the job's name is read before anything starts and read
+    again before the cleanup, and judged both times by {!existing_of}. A run
+    never removes, replaces or starts over a container that is not this job's
+    own: one found before the start refuses the run with nothing started, and
+    one found at cleanup is left in place while the pass keeps its temporary
+    name. Either answers [Orchestrator_failure] naming the container, writes the
+    same message to {!Diagnostics.write}, and alerts as a run that never
+    started. A listing that fails before the start answers
+    [Orchestrator_failure] with nothing started, as a start that failed does;
+    one that fails at cleanup removes nothing and is a warning on the finished
+    run.
 
     Alert delivery is a bounded, best-effort side channel run after the outcome
     is recorded and the container is cleaned up: it cannot change the answer,

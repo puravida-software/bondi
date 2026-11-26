@@ -53,6 +53,11 @@ val image_reference : string -> Bondi_common.Image_reference.t
     needs a valid reference as a fixture does not restate the match. It lives
     here for the reason {!bind_mount} does. *)
 
+val cron_schedule : string -> Bondi_common.Cron_schedule.t
+(** [cron_schedule text] is the schedule [text] parses to, failing the test when
+    {!Bondi_common.Cron_schedule.of_string} refuses it. It lives here for the
+    reason {!bind_mount} does. *)
+
 val mount_fields : Bondi_common.Bind_mount.t -> string * string * bool
 (** [mount_fields mount] is [(host, container, read_only)], the shape suites
     compare mounts by. *)

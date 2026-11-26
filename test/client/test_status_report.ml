@@ -411,7 +411,7 @@ let cron_config =
         {
           name = "daily-close";
           image = Test_helpers.image_reference "ghcr.io/org/close";
-          schedule = "0 0 * * *";
+          schedule = Test_helpers.cron_schedule "0 0 * * *";
           network = None;
           env_vars = None;
           secret_env_vars = None;

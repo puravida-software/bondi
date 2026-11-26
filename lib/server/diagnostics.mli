@@ -253,3 +253,15 @@ val write_to : sink -> string -> unit
     is deliberate -- retrying per line is the flood the notice warns about --
     and it is recorded here because it is the one condition where the latch
     outlives its cause. *)
+
+val to_container_log_to : sink -> string -> unit
+(** [to_container_log_to sink line] is the duplicate half of {!write_to} alone:
+    the line goes to [sink] and nothing goes to this process's own stderr, under
+    the same {!should_duplicate} rule and the same give-up latch, and the loss
+    of the sink is announced on own stderr once, as {!write_to} announces it. *)
+
+val to_container_log : string -> unit
+(** {!to_container_log_to} against PID 1's stderr. For a line the caller is
+    already answering on its own stderr by another path, so that the operator
+    reading the run's output sees it once and the container log carries it as
+    well. Returns nothing, for the reason {!write} does. *)

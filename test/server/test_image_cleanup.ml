@@ -241,7 +241,7 @@ let cron_job ~name ~image : Simple.cron_job =
   {
     name;
     image = Test_helpers.image_reference image;
-    schedule = "*/5 * * * *";
+    schedule = Test_helpers.cron_schedule "*/5 * * * *";
     network = None;
     env_vars = None;
     secret_env_vars = None;

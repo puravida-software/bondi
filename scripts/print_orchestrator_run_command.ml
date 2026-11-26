@@ -41,11 +41,20 @@ let nightly_image =
       prerr_endline "the nightly job's image fixture is not an image reference";
       exit 1
 
+let nightly_schedule =
+  match Bondi_common.Cron_schedule.of_string "10 22 * * *" with
+  | Ok schedule -> schedule
+  | Error
+      Bondi_common.Cron_schedule.(
+        Empty | Control_character | Field_count _ | Bad_field _) ->
+      prerr_endline "the nightly job's schedule fixture is not a schedule";
+      exit 1
+
 let a_cron_job : Config_file.cron_job =
   {
     Config_file.name = "nightly";
     image = nightly_image;
-    schedule = "10 22 * * *";
+    schedule = nightly_schedule;
     network = None;
     env_vars = None;
     secret_env_vars = None;

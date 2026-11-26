@@ -28,7 +28,7 @@ let mk_cron_job ?network ?env_vars ?alert_sinks ?exit_code_severities ~name
   {
     name;
     image = Test_helpers.image_reference image;
-    schedule;
+    schedule = Test_helpers.cron_schedule schedule;
     network;
     env_vars;
     secret_env_vars = None;
@@ -205,6 +205,36 @@ let test_line_path_is_delimiter_bounded () =
   check bool "api2's line names its own run file" true
     (Bondi_common.String_utils.contains ~needle:"/etc/bondi/cron/api2/run.json"
        (line_for "api2"))
+
+(* Three common schedules, each with the line the writer produced for it
+   before schedules were parsed. The lines are literals captured from that
+   writer, not rebuilt from today's, so a parse that reshaped what it accepted
+   (collapsed a separator, normalised a field) changes a line here rather than
+   rewriting every box's crontab on its next deploy. *)
+let test_entry_line_unchanged_for_common_schedules () =
+  let cases =
+    [
+      ( "canary-paper",
+        "17 * * * *",
+        "17 * * * * docker exec bondi-orchestrator sh -c 'bondi-server run < \
+         /etc/bondi/cron/canary-paper/run.json'" );
+      ( "alert-check",
+        "* * * * *",
+        "* * * * * docker exec bondi-orchestrator sh -c 'bondi-server run < \
+         /etc/bondi/cron/alert-check/run.json'" );
+      ( "app-backup",
+        "30 3 * * *",
+        "30 3 * * * docker exec bondi-orchestrator sh -c 'bondi-server run < \
+         /etc/bondi/cron/app-backup/run.json'" );
+    ]
+  in
+  check (list string) "each job's line, byte for byte"
+    (List.map (fun (_, _, expected) -> expected) cases)
+    (List.map
+       (fun (name, schedule, _) ->
+         Crontab.entry_of_cron_job
+           (mk_cron_job ~name ~image:"img:v1" ~schedule ()))
+       cases)
 
 let test_generate_bondi_entries () =
   let jobs =
@@ -945,6 +975,8 @@ let () =
             test_line_names_the_jobs_run_file;
           test_case "a job named api does not match api2's path" `Quick
             test_line_path_is_delimiter_bounded;
+          test_case "the line is unchanged for common schedules" `Quick
+            test_entry_line_unchanged_for_common_schedules;
         ] );
       ( "legacy lines",
         [

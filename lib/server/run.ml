@@ -64,22 +64,6 @@ let temp_container_name job =
   let ts = Unix.gettimeofday () |> Float.to_string in
   Printf.sprintf "%s-%s" job ts
 
-let best_effort_remove_old ~client ~net ~job =
-  match Docker.Client.get_container_by_name client ~net ~container_name:job with
-  | Error msg -> Some ("failed to look up old container: " ^ msg)
-  | Ok None -> None
-  | Ok (Some old) -> (
-      match Docker.Client.remove_container client ~net ~container_id:old.id with
-      | Ok () -> None
-      | Error msg -> Some ("failed to remove old container: " ^ msg))
-
-let best_effort_rename ~client ~net ~container_id ~job =
-  match
-    Docker.Client.rename_container client ~net ~container_id ~new_name:job
-  with
-  | Ok () -> None
-  | Error msg -> Some ("failed to rename container: " ^ msg)
-
 let combine_warnings w1 w2 =
   match (w1, w2) with
   | None, None -> None
@@ -87,6 +71,110 @@ let combine_warnings w1 w2 =
   | None, Some w ->
       Some w
   | Some a, Some b -> Some (a ^ "; " ^ b)
+
+type existing =
+  | No_container
+  | Own_cron_container of string
+  | Foreign of string
+
+(* The labels that make a container this job's own. [run_opts] writes them and
+   [existing_of] reads them, from these two bindings, so what a pass leaves
+   behind is what the next pass recognises. *)
+let cron_type_label = ("bondi.type", "cron")
+let job_label_key = "bondi.name"
+
+let existing_of ~job = function
+  | None -> No_container
+  | Some (container : Docker.Client.container) -> (
+      let labels = Option.value container.labels ~default:[] in
+      let type_key, type_value = cron_type_label in
+      let carries key value =
+        Option.equal String.equal (List.assoc_opt key labels) (Some value)
+      in
+      match (carries type_key type_value, carries job_label_key job) with
+      | true, true -> Own_cron_container container.id
+      | true, false
+      | false, true
+      | false, false ->
+          Foreign job)
+
+(* What the refusal says, at either point it is reached. It names the container
+   and the labels it lacks, and says it was left alone, because the operator
+   reading it in cron's mail has to find that container and decide about it. *)
+let foreign_label_clause name =
+  Printf.sprintf
+    "the container named %s was not made by this job: it does not carry both \
+     %s=%s and %s=%s, so it was left untouched"
+    name (fst cron_type_label) (snd cron_type_label) job_label_key name
+
+let refusal_before_start name =
+  Printf.sprintf "refusing to run cron job %s: %s" name
+    (foreign_label_clause name)
+
+let refusal_at_cleanup name =
+  Printf.sprintf
+    "cron job %s finished, but %s, and the pass kept its temporary name" name
+    (foreign_label_clause name)
+
+let start_unless_foreign ~refuse ~lookup ~start =
+  match lookup () with
+  | Error _ as unread -> unread
+  | Ok (No_container | Own_cron_container _) -> start ()
+  | Ok (Foreign name) ->
+      let msg = refusal_before_start name in
+      refuse msg;
+      Error msg
+
+let cleanup_of_existing ~refuse ~remove ~rename ~lookup =
+  match lookup () with
+  | Error msg -> Ok (combine_warnings (Some msg) (rename ()))
+  | Ok No_container -> Ok (rename ())
+  | Ok (Own_cron_container old_id) ->
+      (* Bound in turn, not passed as two arguments: OCaml evaluates arguments
+         right to left, and a rename attempted before the removal is refused
+         as a conflict, leaving no container under the name. *)
+      let removed = remove old_id in
+      let renamed = rename () in
+      Ok (combine_warnings removed renamed)
+  | Ok (Foreign name) ->
+      let msg = refusal_at_cleanup name in
+      refuse msg;
+      Error msg
+
+let settle ~cleaned run_result =
+  match cleaned with
+  | Error refusal -> (Error refusal, None)
+  | Ok warning -> (run_result, warning)
+
+(* The warnings of the two cleanup steps name the job and the container, as the
+   lookup's does: they reach cron's mail with nothing else to say whose they
+   are. *)
+let best_effort_remove ~client ~net ~job ~container_id =
+  match Docker.Client.remove_container client ~net ~container_id with
+  | Ok () -> None
+  | Error msg ->
+      Some
+        (Printf.sprintf "failed to remove old container %s of cron job %s: %s"
+           container_id job msg)
+
+(* The impure half of the verdict: what is under the job's name now. A listing
+   that fails names the job it was read for, since the message reaches cron's
+   mail with nothing else to say which job's run it came from. *)
+let existing_under_name ~client ~net ~job =
+  Docker.Client.get_container_by_name client ~net ~container_name:job
+  |> Result.map (existing_of ~job)
+  |> Result.map_error (fun msg ->
+      Printf.sprintf "failed to look up container %s: %s" job msg)
+
+let best_effort_rename ~client ~net ~container_id ~job =
+  match
+    Docker.Client.rename_container client ~net ~container_id ~new_name:job
+  with
+  | Ok () -> None
+  | Error msg ->
+      Some
+        (Printf.sprintf "failed to rename container %s of cron job %s: %s"
+           container_id job msg)
 
 (* A pass can exit before Alloy's Docker discovery ever lists it, so its lines
    leave through the journal. The tag is the job, for the same reason
@@ -105,11 +193,11 @@ let run_opts ~container_name ~full_image payload :
   let labels =
     [
       ("bondi.managed", "true");
-      ("bondi.type", "cron");
+      cron_type_label;
       ("bondi.logs", "true");
       (* The job, not [container_name]: a pass runs under a timestamped
          temporary name, and the log stream must stay one per job. *)
-      ("bondi.name", payload.job);
+      (job_label_key, payload.job);
     ]
   in
   let config : Docker.Client.container_config =
@@ -213,7 +301,7 @@ let warning_of_run ~cleanup ~started ~run_result =
   | Ok _, Error _
   | Error _, Ok _
   | Error _, Error _ ->
-      None
+      Ok None
 
 (* The whole decision, with no transport named.
 
@@ -232,28 +320,38 @@ let warning_of_run ~cleanup ~started ~run_result =
 let run ~clock ~client ~net ~deliver body =
   let post_alert ~targets ~payload = deliver ~net ~clock ~targets ~payload in
   let* payload, full_image = prepare ~deliver:post_alert body in
-  let container_name = temp_container_name payload.job in
+  let job = payload.job in
+  let container_name = temp_container_name job in
   let opts = run_opts ~container_name ~full_image payload in
   (* Capture either the container's exit code or an orchestrator-start error;
-     both classify into an outcome so a job that never ran still alerts. *)
-  let started = Docker.Client.run_image_with_opts client ~net opts in
+     both classify into an outcome so a job that never ran still alerts. The
+     name is read before the start, so a container under it that this job did
+     not make refuses the run before anything is started. *)
+  let lookup () = existing_under_name ~client ~net ~job in
+  let started =
+    start_unless_foreign ~refuse:Diagnostics.to_container_log ~lookup
+      ~start:(fun () -> Docker.Client.run_image_with_opts client ~net opts)
+  in
   let run_result =
     let* container_id = started in
     Docker.Client.wait_container client ~net ~container_id
   in
-  let warning =
+  (* The name is read again at cleanup: a container that took it while the pass
+     ran is judged by the same verdict, and is never removed. *)
+  let cleaned =
     warning_of_run ~started ~run_result ~cleanup:(fun container_id ->
-        let w1 = best_effort_remove_old ~client ~net ~job:payload.job in
-        let w2 =
-          best_effort_rename ~client ~net ~container_id ~job:payload.job
-        in
-        combine_warnings w1 w2)
+        cleanup_of_existing ~refuse:Diagnostics.to_container_log
+          ~remove:(fun old_id ->
+            best_effort_remove ~client ~net ~job ~container_id:old_id)
+          ~rename:(fun () -> best_effort_rename ~client ~net ~container_id ~job)
+          ~lookup)
   in
-  let response = response_of_run_result ~warning run_result in
+  let finished, warning = settle ~cleaned run_result in
+  let response = response_of_run_result ~warning finished in
   (* Delivery is a bounded, best-effort side channel run after the outcome is
      recorded and the container is cleaned up: it cannot change the returned
      outcome, though being synchronous it may delay this response by up to
      one per-sink timeout. *)
   dispatch_alert ~deliver:post_alert ~payload
-    ~outcome:(outcome_of_result run_result);
+    ~outcome:(outcome_of_result finished);
   response

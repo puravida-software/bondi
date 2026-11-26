@@ -186,9 +186,10 @@ let cron_network_action (jobs : Simple.cron_job list) :
    deploy is already running; the refusal belongs here, where nothing on the box
    has moved yet and the caller can still be told the request was wrong.
 
-   Cron_secrets.is_valid_name is the check itself rather than a second copy of
-   its rule, so this cannot drift from the guard that actually protects the
-   path. Every offending job is named in one message, for the reason
+   Cron_job_name.is_safe_path_name is the check itself, and the guard that
+   actually protects the path (Cron_secrets.is_valid_name) is the same
+   function, so neither can drift from the other; the client applies it when it
+   reads bondi.yaml. Every offending job is named in one message, for the reason
    cron_network_action gives.
 
    Jobs are refused, never filtered: a plan that dropped the names it did not
@@ -197,23 +198,105 @@ let cron_network_action (jobs : Simple.cron_job list) :
 let cron_name_check (jobs : Simple.cron_job list) :
     (unit, Handler_error.t) result =
   match
-    List.filter
-      (fun (job : Simple.cron_job) -> not (Cron_secrets.is_valid_name job.name))
-      jobs
+    Bondi_common.Cron_job_name.unsafe_path_refusal
+      (List.map (fun (job : Simple.cron_job) -> job.name) jobs)
   with
-  | [] -> Ok ()
-  | offenders ->
-      Error
-        (Handler_error.Invalid_request
-           (Printf.sprintf
-              "cron job names must be safe to place in a file path (%s). A \
-               name must begin with a letter or a digit and may hold only \
-               letters, digits, '.', '_' and '-': rename these jobs in \
-               bondi.yaml"
-              (String.concat ", "
-                 (List.map (fun (job : Simple.cron_job) -> job.name) offenders))))
+  | None -> Ok ()
+  | Some message -> Error (Handler_error.Invalid_request message)
 
-let cron_plan (input : Simple.deploy_input) :
+(* A job's container is named after the job, in the one namespace every other
+   container on the box shares. A job named like the service, its blue-green
+   candidate, a built-in container, a managed container or another job either
+   fails to start or, when its run cleans up, removes the container that held
+   the name. Cron_job_name is the rule the client applies to bondi.yaml as well,
+   so the two checks cannot disagree; this one runs whether or not the client
+   did. The managed names are the box's, gathered by [deploy], because the
+   payload carries none. *)
+let cron_collision_check ~managed_containers ~box_services
+    ~(service : Bondi_common.Router_name.t option) (jobs : Simple.cron_job list)
+    : (unit, Handler_error.t) result =
+  let names = List.map (fun (job : Simple.cron_job) -> job.name) jobs in
+  let collisions_for service =
+    Bondi_common.Cron_job_name.collisions ~service ~managed:managed_containers
+      names
+  in
+  (* A cron-only payload carries no service, so the service's names are the
+     ones on the box. Each box service is asked about on its own and only the
+     holders that are its names are kept, so the built-in and duplicate-job
+     clashes, which do not depend on the service, are reported once. *)
+  let collisions =
+    match service with
+    | Some _ -> collisions_for service
+    | None ->
+        collisions_for None
+        @ List.concat_map
+            (fun box_service ->
+              List.filter
+                (fun (collision : Bondi_common.Cron_job_name.collision) ->
+                  match collision.holder with
+                  | Service _
+                  | Blue_green_candidate _ ->
+                      true
+                  | Builtin _
+                  | Managed _
+                  | Cron_job _ ->
+                      false)
+                (collisions_for (Some box_service)))
+            box_services
+  in
+  match Bondi_common.Cron_job_name.refusal collisions with
+  | None -> Ok ()
+  | Some message -> Error (Handler_error.Invalid_request message)
+
+(* Each secret entry is written as one line of the job's env file, which is
+   read without unquoting, so a control character in a key or a value is a
+   second entry rather than data. The client refuses such an entry when it reads
+   bondi.yaml; it is refused here too because this is the side that writes the
+   file, and a payload that never passed through the client would otherwise put
+   it there. Env_entry's error carries the key and never the value, so the
+   message cannot quote a credential. *)
+let cron_secret_check (jobs : Simple.cron_job list) :
+    (unit, Handler_error.t) result =
+  match
+    Bondi_common.Env_entry.job_refusal
+      (List.map
+         (fun (job : Simple.cron_job) ->
+           (job.name, Option.value job.secret_env_vars ~default:[]))
+         jobs)
+  with
+  | None -> Ok ()
+  | Some message -> Error (Handler_error.Invalid_request message)
+
+let managed_container_names (containers : Docker.Client.container list) =
+  List.concat_map
+    (fun (container : Docker.Client.container) ->
+      List.map Docker.Client.normalize_container_name container.names)
+    (Status.managed_containers_of containers)
+
+(* The service containers in a listing, by the [bondi.name] they carry. The
+   candidate [<service>-new] is the same container under a temporary name and
+   carries the same label, so one label gives both names. A label that is no
+   router name cannot be a service Bondi deployed and is left out. *)
+let service_names_of (containers : Docker.Client.container list) =
+  List.filter_map
+    (fun (container : Docker.Client.container) ->
+      match container.labels with
+      | None -> None
+      | Some labels -> (
+          match
+            ( List.assoc_opt "bondi.type" labels,
+              List.assoc_opt "bondi.name" labels )
+          with
+          | Some "service", Some name ->
+              Result.to_option
+                (Bondi_common.Router_name.of_string ~field:"service" name)
+          | Some _, Some _
+          | Some _, None
+          | None, _ ->
+              None))
+    containers
+
+let cron_plan ~managed_containers ~box_services (input : Simple.deploy_input) :
     (deploy_action list, Handler_error.t) result =
   match input.cron_jobs with
   | None
@@ -221,8 +304,34 @@ let cron_plan (input : Simple.deploy_input) :
       Ok []
   | Some jobs ->
       let* () = cron_name_check jobs in
+      let* () =
+        cron_collision_check ~managed_containers ~box_services
+          ~service:input.service_name jobs
+      in
+      let* () = cron_secret_check jobs in
       let* network_actions = cron_network_action jobs in
       Ok (network_actions @ [ UpsertCrontab (Some jobs) ])
+
+(* Phase 1 for the cron plan: the names on the box a job's name must not take
+   and the payload does not carry: the managed containers', and the services',
+   which a cron-only payload cannot name. Read-only,
+   and only when jobs are declared, so a deploy without cron jobs asks the box
+   nothing more than it did. Stopped containers are listed too: a stopped
+   managed container still holds its name. *)
+let gather_box_names ~client ~net (input : Simple.deploy_input) :
+    (string list * Bondi_common.Router_name.t list, string) result =
+  match input.cron_jobs with
+  | None
+  | Some [] ->
+      Ok ([], [])
+  | Some (_ :: _) ->
+      let* containers =
+        Docker.Client.list_containers client ~net ~all:true ()
+        |> Result.map_error (fun msg ->
+            "could not list the box's containers to check the cron job names: "
+            ^ msg)
+      in
+      Ok (managed_container_names containers, service_names_of containers)
 
 (* The proxy's input, when the request declares a proxy: a domain, a Traefik
    image and an ACME email, which the client sends together or not at all. A
@@ -715,10 +824,14 @@ let deploy ~clock ~net input : (deploy_response, Handler_error.t) result =
             msg;
           unnegotiated
     in
-    (* The cron plan is pure and depends only on [input], so it runs before any
-       workload is touched: a rejected network declaration must not be discovered
-       after the service has already moved to a new tag. *)
-    let* actions = cron_plan input in
+    (* The cron plan is pure, and decides from [input] and the managed names
+       read off the box, so it runs before any workload is touched: a rejected
+       job must not be discovered after the service has already moved to a new
+       tag. A listing that fails stops the deploy here, with nothing moved. *)
+    let* managed_containers, box_services =
+      orchestrator_step (gather_box_names ~client ~net input)
+    in
+    let* actions = cron_plan ~managed_containers ~box_services input in
     (* Last, and only once every step before it has returned [Ok]: an image is
        removed only when the new service is running and the crontab names the
        new tags, so a failed deploy removes nothing. It returns unit, so nothing
