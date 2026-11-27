@@ -10,6 +10,7 @@ The example service throughout this guide is a web API called `my-api`, publishe
 - [1. Deploying a Service](#1-deploying-a-service)
   - [Initialize the project](#initialize-the-project)
   - [Configure your service](#configure-your-service)
+  - [A service with no proxy](#a-service-with-no-proxy)
   - [SSH configuration](#ssh-configuration)
   - [Environment variables](#environment-variables)
   - [Private registries](#private-registries)
@@ -95,7 +96,7 @@ Key fields:
 |---|---|
 | `service.name` | Name for the Docker container on the server. Also used as the deploy target in `bondi deploy my-api:v1.0.0`, and as the name of the service's Traefik router. It must be at least two characters: a lowercase letter or digit, then lowercase letters, digits, `_` or `-`. A `.` is refused, because Traefik reads it as a separator in its label keys and would not serve the service. Uppercase is refused, because Traefik label keys are case-insensitive and `Api` and `api` would collide. `acme-http` is refused too: Bondi's own Traefik container uses it for the ACME challenge. A name outside this rule is refused when `bondi.yaml` is read, before any server is contacted. |
 | `service.image` | Base image **without a tag**. The tag is provided at deploy time. A registry port works (`registry.example.com:5000/app`). A value that is not a valid image reference is refused when `bondi.yaml` is read. |
-| `service.port` | The port your application listens on inside the container. Traefik routes HTTPS traffic to this port. |
+| `service.port` | The port your application listens on inside the container, which Traefik routes HTTPS traffic to. Required with `traefik:`. Without `traefik:` it's optional and does nothing, since no port is published and nothing routes to it. If you declare it anyway, `bondi deploy` says so on stderr. See [A service with no proxy](#a-service-with-no-proxy). |
 | `service.volumes` | Optional. Host directories to mount into the service's container so that what it writes survives a deploy. Each entry has `host`, `container` and `read_only`. Omit it for no mounts. See [Persistent data (volumes)](#persistent-data-volumes). |
 | `traefik.domain_name` | Your domain. Traefik will request a TLS certificate from Let's Encrypt and route traffic for both `my-api.example.com` and `www.my-api.example.com`. |
 | `traefik.image` | The Traefik image. An image with no tag pulls `latest`, a moving target, unlike a workload image, which Bondi refuses without a tag or digest. Pin a tag, as in the example above. An empty value is refused, and an image in a private registry is not supported: Traefik is pulled without credentials. |
@@ -103,8 +104,54 @@ Key fields:
 | `traefik.acme_ca_server` | Optional. The ACME directory URL Traefik orders its TLS certificates from. Omit it to use Let's Encrypt production. Set it to use another ACME server, for example Let's Encrypt staging on a test box: `https://acme-staging-v02.api.letsencrypt.org/directory`. It must be an absolute `https://` URL that names a host; any other value is refused when `bondi.yaml` is read. A change takes effect when Traefik is redeployed, under either deployment strategy — see [Redeploying Traefik](#redeploying-traefik). |
 | `bondi_server.version` | Version of the bondi-orchestrator image to run on the server. |
 | `servers[].port` | Accepted and ignored — setting it changes nothing. Nothing dials the orchestrator any more; `bondi deploy` and `bondi status` run the server's subcommands inside its container over SSH, and `bondi setup` publishes no host port for any orchestrator it creates — a container an older Bondi created may still publish one until a version bump makes `bondi setup` replace it. The field is still accepted so that a `bondi.yaml` written before that change keeps parsing. Not to be confused with `service.port` above. |
-| `bondi_server.bind_address` | Accepted and ignored — setting it changes nothing, and `bondi setup` and `bondi deploy` each print a line saying so. The orchestrator serves no HTTP, so there is no socket to bind. The field is still accepted so that a `bondi.yaml` written before that change keeps parsing; removal is planned, so remove it from your `bondi.yaml`. |
-| `bondi_server.api_token` | Accepted and ignored — setting it changes nothing, and `bondi setup` and `bondi deploy` each print a line saying so. The orchestrator serves no HTTP, so there is no request to authenticate. The field is still accepted so that a `bondi.yaml` written before that change keeps parsing; removal is planned. Remove it from your `bondi.yaml`, and rotate it if it was ever a real secret — a credential that sat in a configuration file is compromised whether or not anything still reads it. |
+| `bondi_server.bind_address` | Accepted and ignored — setting it changes nothing, and `bondi setup` and `bondi deploy` each print a line on stderr saying so. The orchestrator serves no HTTP, so there is no socket to bind. The field is still accepted so that a `bondi.yaml` written before that change keeps parsing; removal is planned, so remove it from your `bondi.yaml`. |
+| `bondi_server.api_token` | Accepted and ignored — setting it changes nothing, and `bondi setup` and `bondi deploy` each print a line on stderr saying so. The orchestrator serves no HTTP, so there is no request to authenticate. The field is still accepted so that a `bondi.yaml` written before that change keeps parsing; removal is planned. Remove it from your `bondi.yaml`, and rotate it if it was ever a real secret — a credential that sat in a configuration file is compromised whether or not anything still reads it. |
+
+These deprecation notices go to stderr, and so does the `service.port` notice described in [A service with no proxy](#a-service-with-no-proxy). Stdout carries none of them, so a script reading `bondi setup`'s or `bondi deploy`'s stdout never sees one.
+
+### A service with no proxy
+
+Leave out the `traefik:` block to run a service that nothing outside the server can reach, such as a worker that consumes a queue, or an internal API that only your cron jobs and managed containers call:
+
+```yaml
+service:
+  name: my-worker
+  image: ghcr.io/acme/my-worker
+  env_vars: {}
+  servers:
+    - ip_address: "203.0.113.10"
+      ssh:
+        user: root
+
+bondi_server:
+  version: 0.32.0
+```
+
+Such a service publishes no host port and has no router, so it can't be reached from outside the box. The container is started without Traefik labels, and a deploy of it starts no Traefik. Containers on `bondi-network` reach it by its service name, at the port the application listens on inside the container: `my-worker:9000` for a worker listening on 9000. Those are cron jobs that declare `network: bondi-network` (see [Reaching other containers from a cron job](#reaching-other-containers-from-a-cron-job)) and managed containers that join it. The service joins `bondi-network` too, so it reaches managed containers by name as a proxied service does. `bondi deploy` creates the network if `bondi setup` has not.
+
+It is for workers and internal services. If something off the box must reach it, declare `traefik:` instead.
+
+If a service that had `traefik:` drops it, the Traefik container keeps running until you remove it, and the service stops being routed.
+
+It deploys with the [simple](#simple-default) strategy. With `deployment_strategy` omitted, Bondi picks `simple` whatever the image's `HEALTHCHECK` says. `deployment_strategy: blue-green` is refused without `traefik:`, because blue-green switches traffic through the proxy. The deploy fails before any server is contacted, naming the service:
+
+```
+Error: service my-worker declares deployment_strategy blue-green and no traefik: block. Blue-green switches traffic through the proxy, so it needs one: declare traefik:, or declare simple or no strategy
+```
+
+`service.port` is optional here. If you declare it anyway, the deploy goes ahead, and `bondi deploy` writes a notice to stderr:
+
+```
+service.port is set to 9000 and does nothing without a traefik: block: no proxy routes to it and no host port is published. Remove it from bondi.yaml, or declare traefik:.
+```
+
+With `traefik:`, `service.port` is still required. A `bondi.yaml` that declares `traefik:` and no `service.port` is refused when it is read, before any server is contacted:
+
+```
+Error reading configuration: invalid bondi.yaml: service.port is required when traefik: is declared: it is the port Traefik routes the domain to
+```
+
+A service with no proxy needs orchestrator `0.32.0` or later on every server it deploys to. An older orchestrator would pull the image and then fail, so `bondi deploy` reads the server's version first and refuses before anything is sent. See [Before the first deploy after an upgrade](#before-the-first-deploy-after-an-upgrade).
 
 ### SSH configuration
 
@@ -316,7 +363,7 @@ This will:
 
 1. Connect to the server via SSH
 2. Install Docker if it is not already installed
-3. Create the ACME directory for TLS certificates
+3. When the manifest declares a service and a `traefik:` block, create the ACME file Traefik keeps its TLS certificates in, or correct its owner and mode to `root:root` and `600` if they differ. A manifest whose service declares no `traefik:` block has no Traefik, and this step is skipped
 4. Copy the directory the server's cron jobs keep their run and secret files in out of the orchestrator onto the host, before that container is replaced — on a server set up before Bondi bind-mounted that directory the files live inside the container, and replacing it takes them with it while the crontab lines that read them keep firing. The copy is skipped when the orchestrator already bind-mounts that directory: the files are then already on the host, so there is nothing to rescue, and copying a bind-mounted path into itself would truncate the very files it was meant to save. Any job whose files did not survive is named in the report the run prints, one sentence per job, without printing the files
 5. Pull the bondi-orchestrator image, then run the container unless one with the same image and configuration is already running. A pull that fails leaves the running orchestrator as it was, and the run fails with a message naming the image. An unchanged orchestrator is left running, on a host with cron jobs too, so a job running inside it is not killed. The same holds for Alloy, whose configuration includes its River configuration and credentials file. The first `setup` run by this version of Bondi recreates both once, because containers an older `setup` created carry no record of the configuration they were created with
 6. Read back the restart policy the server actually applied to the orchestrator, and correct it in place if it is not `unless-stopped`
@@ -329,15 +376,36 @@ You only need to run `bondi setup` once per server, or again when you change the
 
 The table is reached on every exit path, including a run that aborted part-way through. A run that stopped early still prints what it managed on its way there, then the failure, then the state of the box — so "which phases did not run" and "what is actually on the server now" are both answered instead of the second being left to a manual check. See [Checking status](#checking-status) for how to read the table.
 
-Between the failure and the table, the run prints its account of what it corrected on each server: one line per divergence, naming the server, what the server reported and what Bondi applied. A run that corrected nothing says so in a sentence of its own —
+Between the failure and the table, the run prints its account of each server. First come its corrections: one line per divergence, naming the server, what the server reported and what Bondi applied. Then one closing line names every change the run made on that server, in the order it made them:
 
 ```
-setup corrected nothing on server 203.0.113.10
+setup changed on server 203.0.113.10: orchestrator 0.31.0 → 0.32.0, Alloy recreated (config changed)
 ```
 
-— so a run whose account was empty and a run whose account was never taken do not read alike. The sentence claims nothing about why it was empty: a run that found a divergence and failed before it could correct it prints the same sentence, beside the failure that says what happened. The account is printed for every server and on every exit path, including a run that stopped part-way — what such a run managed to change is exactly when it matters most — and it changes no exit code, because a correction is a write that succeeded.
+On a server where the run changed nothing, the closing line says so:
 
-Three divergences can appear there today. One is the orchestrator's restart policy, described below. Another is the mode of the Alloy configuration file, which `setup` reads before it changes anything about the file, so that the mode the server had is reported rather than the one `setup` just set. When Alloy is replaced, the file is read and then rewritten. When an unchanged Alloy is left running, the configuration file and the credentials file (`/etc/bondi/alloy/env`, mode `0600`) are left as they are and only their modes are corrected, in place, if they differ. If either file is missing, Alloy is replaced instead:
+```
+setup changed nothing on server 203.0.113.10
+```
+
+A change is a container or file `setup` manages that it created, recreated, stopped, removed or corrected, and each kind has its own item:
+
+- Docker installed: `Docker installed`.
+- The shared network created: `network bondi-network created`.
+- The ACME file created, or its owner and mode corrected: `ACME file created`, `ACME file permissions corrected`.
+- The orchestrator created (`orchestrator 0.32.0 created`), moved to another version (`orchestrator 0.31.0 → 0.32.0`), or recreated with its reason.
+- Alloy created (`Alloy created`), recreated with its reason, or removed (`Alloy removed`). When Alloy is not declared, `setup` also deletes its configuration directory on every run, and lists `Alloy config removed` only on a run whose delete found something to remove.
+- A managed container, by its declared name: `gateway created`, `gateway recreated (config changed)`, `gateway removed`.
+- A container stopped whose removal then failed, so it is left stopped: `orchestrator stopped`, `Alloy stopped`, `gateway stopped`. A stop the run went on to complete is listed as the removal or recreation instead.
+- A correction: `orchestrator restart policy corrected`, `Alloy config mode corrected`, `Alloy credentials mode corrected`, `journal made persistent`.
+
+A recreation's reason is one of `(config changed)`, `(no config digest)`, `(image moved)`, `(not running)`, or, for Alloy, `(mounted file missing)`.
+
+Everything else `setup` does is a check, and a check is not listed. That covers Docker already installed, the network already there, and the ACME file already `root:root` with mode `600`. It covers the preconditions it verifies, such as the server's `docker` and `curl` for cron jobs and Alloy's `curl` and port. It covers an image pull, and a container left running because its image and configuration are unchanged. And it covers waiting for health. It also covers housekeeping that leaves nothing a run could be judged on: creating the directory Alloy keeps its journal position in, and copying the cron jobs' run and secret files out of the orchestrator onto the host before it is replaced. Neither is listed, because each is idempotent and a run that does only that has altered nothing `setup` manages. A run on an up-to-date box changes nothing and says so.
+
+The closing line is printed for every server and on every exit path, including a server whose run never started. A run that stopped part-way lists only what it completed before the failure, so its line can read `setup changed nothing` beside the failure that says what happened. A container the run removed and could not start again is listed as removed (`orchestrator removed`), never under the version that was meant to replace it. The closing line changes no exit code, because a change is a write that succeeded.
+
+Four divergences can appear among the corrections today. One is the orchestrator's restart policy, described below. Another is the mode of the Alloy configuration file, which `setup` reads before it changes anything about the file, so that the mode the server had is reported rather than the one `setup` just set. When Alloy is replaced, the file is read and then rewritten. When an unchanged Alloy is left running, the configuration file and the credentials file (`/etc/bondi/alloy/env`, mode `0600`) are left as they are and only their modes are corrected, in place, if they differ. If either file is missing, Alloy is replaced instead:
 
 ```
 /etc/bondi/alloy/config.alloy on server 203.0.113.10 was mode 0644, applied 0640
@@ -349,15 +417,21 @@ The third is the server's journal storage, when `setup` had to make it persisten
 /var/log/journal on server 203.0.113.10 was storage volatile, applied persistent
 ```
 
+The fourth is the owner and mode of the ACME file Traefik keeps its certificates in. `setup` reads them first and changes them only when they are not `root:root` and `600`:
+
+```
+/etc/traefik/acme/acme.json on server 203.0.113.10 was owner and mode root:root 644, applied root:root 600
+```
+
 A reading `setup` could not take at all is reported in the same block, as a line of its own. It corrects nothing and it claims no value — it says only what could not be read — so a run that was unable to look does not read like a run that looked and found agreement:
 
 ```
 could not read the mode of /etc/bondi/alloy/config.alloy on server 203.0.113.10, so this run cannot say what it found: the host could not read it and answered BONDI_ALLOY_MODE_UNREADABLE
 ```
 
-A run whose account holds only lines of that kind still says it corrected nothing, because it did, and it still exits zero: that reading is taken for the account's sake, and the write is what the run is judged on.
+Such a reading is neither a change nor a check, and the closing line does not count it. A run whose account holds only lines of that kind still says it changed nothing, because it did, and it still exits zero: that reading is taken for the account's sake, and the write is what the run is judged on.
 
-The account is meant to be safe to paste into a ticket, and it is worth knowing exactly how far that goes. The file or the container a line names is one of Bondi's own constants, picked from the reading itself — there is no parameter for it, so nothing out of your `bondi.yaml` can arrive there at all. The value reported as what the server had is the server's own answer, flattened onto one line and, if it is long, cut with a note of how many bytes there were. The value reported as what Bondi applied is the value Bondi declares for itself. Beyond those three, nothing is enforced: these lines are built from ordinary strings, and a reading added later could carry a declared value into one. None of the readings above does, which is a fact about them rather than something the format prevents.
+The account is meant to be safe to paste into a ticket, and it is worth knowing exactly how far that goes. The file or the container a line names is one of Bondi's own constants, picked from the reading itself — there is no parameter for it, so nothing out of your `bondi.yaml` can arrive there at all. The value reported as what the server had is the server's own answer, flattened onto one line and, if it is long, cut with a note of how many bytes there were. The value reported as what Bondi applied is the value Bondi declares for itself. Beyond those three, nothing is enforced: these lines are built from ordinary strings, and a reading added later could carry a declared value into one. None of the readings above does, which is a fact about them rather than something the format prevents. The closing line names only the server, container names, versions and Bondi's own reasons. Two of those come from your `bondi.yaml`: a managed container's declared name and the orchestrator version it asks for. The version the orchestrator was running is read from the box, and is flattened onto one line like the other values the server reports.
 
 #### Restart policy
 
@@ -424,7 +498,7 @@ Bondi sends the deployment to the orchestrator running on the server, which:
 
 1. Pulls the image (a failed pull leaves the old container running)
 2. Stops the old container (if any)
-3. Starts the new container with Traefik labels for automatic HTTPS routing
+3. Starts the new container with Traefik labels for automatic HTTPS routing, or with none for a [service with no proxy](#a-service-with-no-proxy)
 
 ### Check the status
 
@@ -444,13 +518,15 @@ This shows a table with your service, cron jobs, infrastructure components (orch
 
 The simple strategy is the default. It pulls the new image first, so a failed pull leaves the old container running, then stops the old container and starts the new one. There is a brief period of downtime during the switch.
 
-Set `deployment_strategy: simple` to use it whatever the image declares. If you omit `deployment_strategy`, Bondi chooses for you after it pulls the image: blue-green when the image's `HEALTHCHECK` runs a command (`CMD` or `CMD-SHELL`), simple otherwise. An image with no `HEALTHCHECK`, or with `HEALTHCHECK NONE`, is deployed with simple.
+Set `deployment_strategy: simple` to use it whatever the image declares. If you omit `deployment_strategy`, Bondi chooses for you. A service with no `traefik:` block is deployed with simple, whatever its image declares (see [A service with no proxy](#a-service-with-no-proxy)). Otherwise Bondi chooses after it pulls the image: blue-green when the image's `HEALTHCHECK` runs a command (`CMD` or `CMD-SHELL`), simple otherwise. An image with no `HEALTHCHECK`, or with `HEALTHCHECK NONE`, is deployed with simple.
 
 ### Blue-Green
 
 Blue-green deployments avoid the stop-then-start gap of the simple strategy. Bondi starts the new container alongside the old one and waits for it to pass its health check. It then gives Traefik a moment to route to the new container, and stops the old one while it is still on Traefik's network.
 
 > **Important:** Your Docker image must define a `HEALTHCHECK` instruction. Blue-green deployments rely on Docker's health check to decide when the new container is ready. If you set `deployment_strategy: blue-green` for an image without one, the new container never reports `healthy`, so the deploy fails and rolls back once `health_timeout` has passed. Until then Traefik sends it a share of your traffic, because Traefik routes to a container that reports no health status.
+
+Blue-green switches traffic through Traefik, so it needs a `traefik:` block. `deployment_strategy: blue-green` on a service without one is refused before any server is contacted, naming the service.
 
 Enable it by adding `deployment_strategy: blue-green` to your service:
 
@@ -509,7 +585,7 @@ service:
 | `health_timeout` | `120` | Maximum seconds to wait for the new container to become healthy. If exceeded, Bondi rolls back. |
 | `poll_interval` | `1` | Seconds between health check polls. |
 
-> **Retired:** `drain_grace_period` no longer has any effect. Bondi used to detach the old container from the network and wait this many seconds before stopping it. Detaching it did not take it out of Traefik's routing, and it cut the container off from DNS and its database while it was still serving. The old container is now stopped while still attached, after the fixed 3-second wait described above, which is not configurable. A `bondi.yaml` that still sets the field is ignored for now: `bondi deploy` prints a warning saying so. A later release will refuse the field instead, so remove it from your `bondi.yaml`.
+> **Retired:** `drain_grace_period` no longer has any effect. Bondi used to detach the old container from the network and wait this many seconds before stopping it. Detaching it did not take it out of Traefik's routing, and it cut the container off from DNS and its database while it was still serving. The old container is now stopped while still attached, after the fixed 3-second wait described above, which is not configurable. A `bondi.yaml` that still sets the field is ignored for now: `bondi deploy` prints a warning on stderr saying so. A later release will refuse the field instead, so remove it from your `bondi.yaml`.
 
 ### Retried requests
 
@@ -1079,6 +1155,18 @@ Crontab
 
 Managed containers appear in the Infrastructure section, discovered on the server by label. A container you have declared in `bondi.yaml` that neither source reports shows as `not found` — that usually means `bondi setup` has not been run since you added it.
 
+#### When a server can't be read
+
+`bondi status` exits 1 when it could not list the containers on any declared server. That covers a server it never reached, one with no `ssh` block, and one that answered with something other than a listing, for example because Docker was not running. It still prints the full report to stdout first, for every server, including what it read from the others. Then it names each such server on stderr, one line each, with the reason:
+
+```
+status could not read server 203.0.113.10: the host was not reached (255): Permission denied (publickey).
+```
+
+`--output json` follows the same rule, and the stderr lines are never part of the JSON. A `bondi.yaml` that cannot be read also exits 1, and the stderr line is what tells the two apart.
+
+A server whose containers were listed leaves the exit code alone, even if its orchestrator or its crontab could not be read. Those show as cells in the report (`not reachable: …`, `not read: …`), because the listing still says what runs there.
+
 #### The SOURCE column
 
 The table is read from two places and they are never blended into one answer:
@@ -1297,6 +1385,14 @@ Step 3 before step 4 is the part that is easy to get wrong, because step 3 looks
   ```
 
   A deploy that declares no volumes is unaffected by this. Create each host directory before that first deploy too — see [Create the host directory first](#create-the-host-directory-first).
+
+- **A service with no `traefik:` block needs orchestrator `0.32.0` or later, so run `bondi setup` first.** An older orchestrator pulls the image and then fails, because it cannot run a service without Traefik labels. `bondi deploy` reads each server's version first and refuses before anything is sent:
+
+  ```
+  Error on server 203.0.113.10: the server is running bondi-server 0.31.0, but the service declares no traefik: block, which requires 0.32.0 or later. An older server pulls the image and then fails, because it cannot run a service without Traefik labels. Set bondi_server.version in bondi.yaml to 0.32.0 or later, run bondi setup, then deploy again.
+  ```
+
+  A service with `traefik:` is unaffected by this. See [A service with no proxy](#a-service-with-no-proxy).
 
 - **A service with no `deployment_strategy` whose image has a `HEALTHCHECK` moves to blue-green on its next deploy.** Two containers of the service run at once during the switch. If they share a volume or an SQLite database, read [Blue-green: both containers mount the same directory](#blue-green-both-containers-mount-the-same-directory) before that deploy, or set `deployment_strategy: simple`.
 

@@ -11,13 +11,15 @@ The fixtures are removed first so the file is re-runnable in a directory a
 previous run has already written to.
 
   $ ROOT="$PWD"
-  $ rm -rf box ssh-argv.log first.log second.log third.log
+  $ rm -rf box ssh-argv.log first.log second.log third.log acme.log
 
 The box, as files the stub reads and writes. `registry` is the image id the
 registry's tag names. `tag` is the image id the box's own copy of the tag names,
 written by a pull. `container` is the orchestrator, when there is one: the
 digest label it was created with and the id of the image it was created from,
-both written by the `docker run` that created it.
+both written by the `docker run` that created it. `acme` is the ACME file's
+owner and mode, when the box was given one by hand; without it the file is at
+root:root 600, and setup's chown writes that.
 
 So the digest the listing reports is never written by this file. It is the one
 setup stamped on the container it created, on the first run below, and the
@@ -70,9 +72,9 @@ fixture chose.
   >   'docker --version') echo 'Docker version 27.0.0, build deadbeef' ;;
   >   'curl --version') echo 'curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0' ;;
   >   *BONDI_CRON_DOCKER_PRESENT*) echo 'BONDI_CRON_DOCKER_PRESENT /usr/bin/docker' ;;
-  >   *BONDI_ACME_PRESENT*) echo BONDI_ACME_PRESENT ;;
-  >   'sudo chown root:root /etc/traefik/acme/acme.json'*) : ;;
-  >   'docker network inspect'*) : ;;
+  >   *BONDI_ACME_PRESENT*) echo "BONDI_ACME_PRESENT $(cat "$BOX/acme" 2>/dev/null || echo 'root:root 600')" ;;
+  >   "sudo chown root:root '/etc/traefik/acme/acme.json'"*) echo 'root:root 600' > "$BOX/acme" ;;
+  >   *BONDI_NETWORK_PRESENT*) echo BONDI_NETWORK_PRESENT ;;
   >   # The probe's listing and the version read are disjoint by construction:
   >   # the probe's format names a state, and the version read's pattern is
   >   # anchored on the whole of `--format '{{.Image}}'`.
@@ -140,6 +142,10 @@ that directory out first.
   >         user: deploy
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
+  > traefik:
+  >   domain_name: app.example.com
+  >   image: traefik:v3.6.8
+  >   acme_email: ops@example.com
   > bondi_server:
   >   version: "0.25.0"
   > cron_jobs:
@@ -206,6 +212,37 @@ stop`, the job that might be running inside the container goes on running.
   $ grep -c -F -- 'Preserved the cron payload' second.log
   0
   [1]
+
+So the run changed nothing, and its closing line says so. The ACME file was
+already root:root 600 and the network was there, so neither was written to and
+neither is listed.
+
+  $ grep -F -- 'setup changed' second.log
+  setup changed nothing on server 127.0.0.1
+  $ grep -c -F -- 'ACME file permissions' second.log
+  0
+  [1]
+  $ grep -c -F -- 'sudo chown' ssh-argv.log
+  0
+  [1]
+
+The affirmative arm, on the same box and the same configuration: the ACME file
+is now at 644. It is set back to root:root 600 and read again, the account says
+what the box had, and the closing line lists the correction and nothing else.
+
+  $ echo 'root:root 644' > "$BOX/acme"
+  $ : > "$SSH_ARGV_LOG"
+  $ bondi-client setup > acme.log 2>&1
+  $ echo $?
+  0
+  $ grep -c -x -F -- "sudo chown root:root '/etc/traefik/acme/acme.json' && sudo chmod 600 '/etc/traefik/acme/acme.json'" ssh-argv.log
+  1
+  $ grep -c -F -- 'BONDI_ACME_PRESENT' ssh-argv.log
+  2
+  $ grep -F -- 'acme.json on server' acme.log
+  /etc/traefik/acme/acme.json on server 127.0.0.1 was owner and mode root:root 644, applied root:root 600
+  $ grep -F -- 'setup changed' acme.log
+  setup changed on server 127.0.0.1: ACME file permissions corrected
 
 The affirmative arm, on the same box and the same configuration: the registry's
 tag now names a new image, as an updated `latest` would. The digest still

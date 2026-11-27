@@ -70,6 +70,10 @@ listing.
   >         user: deploy
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
+  > traefik:
+  >   domain_name: app.example.com
+  >   image: traefik:v3.6.8
+  >   acme_email: ops@example.com
   > bondi_server:
   >   version: "0.15.0"
   > EOF
@@ -84,7 +88,7 @@ and are taken whether or not the plan ran.
   Setting up the servers...
   Processing server: 127.0.0.1
   Error: server 127.0.0.1: could not list the bondi-orchestrator container on the server, so setup will not act on whether it is running: the host was not reached (255): Connection closed by 10.0.0.1 port 22
-  setup corrected nothing on server 127.0.0.1
+  setup changed nothing on server 127.0.0.1
   
   Server: 127.0.0.1
   
@@ -96,6 +100,8 @@ and are taken whether or not the plan ran.
   Infrastructure
     NAME                   SOURCE  IMAGE                            TAG          STATUS        RESTARTS  HEALTH
     bondi-orchestrator     docker  -                                -            not found     -         -
+                           orch    not reachable: <detail>
+    bondi-traefik          docker  -                                -            not found     -         -
                            orch    not reachable: <detail>
   
   Crontab
@@ -144,6 +150,10 @@ cannot tell a line that names its server from one that had no need to.
   >         user: deploy
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
+  > traefik:
+  >   domain_name: app.example.com
+  >   image: traefik:v3.6.8
+  >   acme_email: ops@example.com
   > bondi_server:
   >   version: "0.15.0"
   > EOF
@@ -156,8 +166,8 @@ cannot tell a line that names its server from one that had no need to.
   Processing server: 127.0.0.2
   Error: server 127.0.0.1: could not list the bondi-orchestrator container on the server, so setup will not act on whether it is running: the host was not reached (255): Connection closed by 10.0.0.1 port 22
   Error: server 127.0.0.2: could not list the bondi-orchestrator container on the server, so setup will not act on whether it is running: the host was not reached (255): Connection closed by 10.0.0.1 port 22
-  setup corrected nothing on server 127.0.0.1
-  setup corrected nothing on server 127.0.0.2
+  setup changed nothing on server 127.0.0.1
+  setup changed nothing on server 127.0.0.2
 
 Both accounts are printed before the table, which is the arrangement the wording
 assumes: an account read after the table would be read beside the box it is about
@@ -165,7 +175,7 @@ and the server in the sentence would be the thing said twice. Pinned by line
 position, because a report that printed the accounts underneath each server's
 section would carry the same two sentences.
 
-  $ LAST_ACCOUNT=$(grep -n -F -- 'setup corrected nothing on server 127.0.0.2' out.log | head -1 | cut -d: -f1)
+  $ LAST_ACCOUNT=$(grep -n -F -- 'setup changed nothing on server 127.0.0.2' out.log | head -1 | cut -d: -f1)
   $ FIRST_TABLE=$(grep -n -F -- 'Server: 127.0.0.1' out.log | head -1 | cut -d: -f1)
   $ test "$LAST_ACCOUNT" -lt "$FIRST_TABLE" && echo "every account precedes the table"
   every account precedes the table

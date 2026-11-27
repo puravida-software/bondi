@@ -26,7 +26,8 @@ let action_string = function
   | Setup.CheckOrchestratorImage _ -> "CheckOrchestratorImage"
   | Setup.StopOrchestrator -> "StopOrchestrator"
   | Setup.RemoveOrchestrator -> "RemoveOrchestrator"
-  | Setup.RunServer -> "RunServer"
+  | Setup.RunServer _ -> "RunServer"
+  | Setup.AwaitOrchestratorReady -> "AwaitOrchestratorReady"
   | Setup.EnsureJournalStorage -> "EnsureJournalStorage"
   | Setup.EnsureAlloyState -> "EnsureAlloyState"
   | Setup.RequireAlloyCurl -> "RequireAlloyCurl"
@@ -36,20 +37,30 @@ let action_string = function
   | Setup.CorrectAlloyConfigMode -> "CorrectAlloyConfigMode"
   | Setup.EnsureAlloyConfig -> "EnsureAlloyConfig"
   | Setup.WriteAlloyEnv -> "WriteAlloyEnv"
-  | Setup.RunAlloy -> "RunAlloy"
+  | Setup.RunAlloy _ -> "RunAlloy"
   | Setup.AwaitAlloyHealthy -> "AwaitAlloyHealthy"
   | Setup.StopAlloy -> "StopAlloy"
   | Setup.RemoveAlloy -> "RemoveAlloy"
   | Setup.CleanAlloyConfig -> "CleanAlloyConfig"
   | Setup.WriteManagedEnv spec ->
       "WriteManagedEnv " ^ Managed_container.name spec
-  | Setup.RunManaged spec -> "RunManaged " ^ Managed_container.name spec
+  | Setup.RunManaged { spec; _ } -> "RunManaged " ^ Managed_container.name spec
   | Setup.StopManaged name -> "StopManaged " ^ name
   | Setup.RemoveManaged name -> "RemoveManaged " ^ name
   | Setup.CleanManagedConfig name -> "CleanManagedConfig " ^ name
 
 let check_actions ~expected actions =
   check (list string) "actions" expected (List.map action_string actions)
+
+(* The one planned action of this name, for a test that needs the action itself
+   rather than its name: the start and removal actions carry the change they
+   report, so the action a test would otherwise spell out is the one the plan
+   built. *)
+let named name actions =
+  match List.filter (fun action -> action_string action = name) actions with
+  | [ action ] -> action
+  | [] -> fail (name ^ " was not planned")
+  | _ :: _ :: _ -> fail (name ^ " was planned more than once")
 
 let is_ensure_network = function
   | Setup.EnsureNetwork _ -> true
@@ -62,7 +73,8 @@ let is_ensure_network = function
   | Setup.CheckOrchestratorImage _
   | Setup.StopOrchestrator
   | Setup.RemoveOrchestrator
-  | Setup.RunServer
+  | Setup.RunServer _
+  | Setup.AwaitOrchestratorReady
   | Setup.EnsureJournalStorage
   | Setup.EnsureAlloyState
   | Setup.RequireAlloyCurl
@@ -73,7 +85,7 @@ let is_ensure_network = function
   | Setup.EnsureAlloyConfig
   | Setup.WriteAlloyEnv
   | Setup.AwaitAlloyHealthy
-  | Setup.RunAlloy
+  | Setup.RunAlloy _
   | Setup.StopAlloy
   | Setup.RemoveAlloy
   | Setup.CleanAlloyConfig
@@ -88,8 +100,8 @@ let is_ensure_network = function
    precede every one of these. An image check is one: what it may run next is a
    replacement that starts the container again. *)
 let joins_network = function
-  | Setup.RunServer
-  | Setup.RunAlloy
+  | Setup.RunServer _
+  | Setup.RunAlloy _
   | Setup.RunManaged _
   | Setup.CheckOrchestratorImage _
   | Setup.CheckAlloyImage _ ->
@@ -103,6 +115,7 @@ let joins_network = function
   | Setup.PullOrchestrator
   | Setup.StopOrchestrator
   | Setup.RemoveOrchestrator
+  | Setup.AwaitOrchestratorReady
   | Setup.EnsureJournalStorage
   | Setup.EnsureAlloyState
   | Setup.RequireAlloyCurl
@@ -140,7 +153,8 @@ let is_managed = function
   | Setup.CheckOrchestratorImage _
   | Setup.StopOrchestrator
   | Setup.RemoveOrchestrator
-  | Setup.RunServer
+  | Setup.RunServer _
+  | Setup.AwaitOrchestratorReady
   | Setup.EnsureJournalStorage
   | Setup.EnsureAlloyState
   | Setup.RequireAlloyCurl
@@ -151,7 +165,7 @@ let is_managed = function
   | Setup.EnsureAlloyConfig
   | Setup.WriteAlloyEnv
   | Setup.AwaitAlloyHealthy
-  | Setup.RunAlloy
+  | Setup.RunAlloy _
   | Setup.StopAlloy
   | Setup.RemoveAlloy
   | Setup.CleanAlloyConfig ->
@@ -174,7 +188,7 @@ let minimal_user_service =
   {
     Config_file.name = Test_helpers.router_name "my-service";
     Config_file.image = Test_helpers.image_reference "app";
-    Config_file.port = 8080;
+    Config_file.port = Some 8080;
     Config_file.registry_user = None;
     Config_file.registry_pass = None;
     Config_file.env_vars = [];
@@ -187,13 +201,24 @@ let minimal_user_service =
     Config_file.volumes = None;
   }
 
-let make_config ?(alloy = None) ?(managed_containers = None) ~user_service
-    ~cron_jobs ~version () =
+let minimal_traefik : Config_file.traefik =
+  {
+    Config_file.domain_name = "example.com";
+    image =
+      (match Bondi_common.Image_reference.of_string "traefik:v3.1" with
+      | Ok reference -> reference
+      | Error _ -> failwith "traefik:v3.1 is a valid image reference");
+    acme_email = "ops@example.com";
+    acme_ca_server = None;
+  }
+
+let make_config ?(alloy = None) ?(managed_containers = None) ?(traefik = None)
+    ~user_service ~cron_jobs ~version () =
   {
     Config_file.user_service;
     Config_file.bondi_server =
       { Config_file.version; bind_address = None; api_token = None };
-    Config_file.traefik = None;
+    Config_file.traefik;
     Config_file.cron_jobs;
     Config_file.alloy;
     managed_containers;
@@ -827,66 +852,6 @@ let test_cron_docker_probe_command_clears_the_environment () =
   check bool "offers the absent marker" true
     (says Setup.cron_docker_absent_marker)
 
-(* ------------------------------------------------------------------------- *)
-(* ACME file probe                                                            *)
-(* ------------------------------------------------------------------------- *)
-
-(* [test -f] reports an absent file by exiting non-zero, which is the channel a
-   dropped connection arrives on as well, so the answer and the failure to get
-   one were the same value. A blip on the read was answered with mkdir, touch,
-   chown and chmod against a file the host may already have had. The probe says
-   which it is on standard output, leaving the exit status to mean "the command
-   could be run on that host". *)
-let test_acme_probe_error_is_not_an_absent_file () =
-  match Setup.acme_file_state_of_probe (Error transport_error) with
-  | Setup.Acme_file_absent ->
-      fail "a read that never happened is not an absent file"
-  | Setup.Acme_file_present -> fail "nor a file the host said it has"
-  | Setup.Acme_file_undetermined message ->
-      check bool "carries the probe's own text" true
-        (Bondi_common.String_utils.contains
-           ~needle:"Connection closed by 203.0.113.9 port 22" message)
-
-(* The affirmative arms on the same builder: the host does say which, and the
-   two answers are told apart. Without them the assertion above would hold for a
-   probe that is never able to answer at all. *)
-let test_acme_probe_reports_what_the_host_said () =
-  (match
-     Setup.acme_file_state_of_probe (Ok (Setup.acme_file_present_marker ^ "\n"))
-   with
-  | Setup.Acme_file_present -> ()
-  | Setup.Acme_file_absent
-  | Setup.Acme_file_undetermined _ ->
-      fail "the host saying it has the file is the file being there");
-  match
-    Setup.acme_file_state_of_probe (Ok (Setup.acme_file_absent_marker ^ "\n"))
-  with
-  | Setup.Acme_file_absent -> ()
-  | Setup.Acme_file_present
-  | Setup.Acme_file_undetermined _ ->
-      fail "the host saying it does not have the file is the file being absent"
-
-(* An answer carrying neither marker never said which. Read as absence it
-   becomes a write against a host that was never asked. *)
-let test_acme_probe_without_a_marker_is_undetermined () =
-  match Setup.acme_file_state_of_probe (Ok "") with
-  | Setup.Acme_file_absent -> fail "silence is not an absent file"
-  | Setup.Acme_file_present -> fail "nor a present one"
-  | Setup.Acme_file_undetermined _ -> ()
-
-(* The command carries the whole distinction, so it is pinned here rather than
-   left to the one caller: it names the file, offers both answers, and the
-   client's reading of it is only as good as the command asking the question. *)
-let test_acme_probe_command_asks_for_both_answers () =
-  let command = Setup.acme_probe_command ~path:"/etc/traefik/acme/acme.json" in
-  let carries needle = Bondi_common.String_utils.contains ~needle command in
-  check bool "names the file it is asking about" true
-    (carries "/etc/traefik/acme/acme.json");
-  check bool "can say the host has it" true
-    (carries Setup.acme_file_present_marker);
-  check bool "and can say the host does not" true
-    (carries Setup.acme_file_absent_marker)
-
 let test_plan_always_includes_ensure_docker () =
   let config =
     make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
@@ -915,8 +880,9 @@ let test_plan_no_user_service_skips_acme () =
 
 let test_plan_with_user_service_includes_acme () =
   let config =
-    make_config ~user_service:(Some minimal_user_service) ~cron_jobs:None
-      ~version:"1.0.0" ()
+    make_config ~traefik:(Some minimal_traefik)
+      ~user_service:(Some minimal_user_service) ~cron_jobs:None ~version:"1.0.0"
+      ()
   in
   let context =
     ctx ~orchestrator:Setup.Orchestrator_absent ~docker_probe:docker_present ()
@@ -925,6 +891,21 @@ let test_plan_with_user_service_includes_acme () =
   check bool "EnsureAcmeFile when user_service present"
     (List.mem Setup.EnsureAcmeFile actions)
     true
+
+(* A service that declares no traefik: block is deployed without a proxy, and
+   nothing reads an ACME file on its box: setup neither plans nor reports one. *)
+let test_plan_proxyless_service_skips_acme () =
+  let config =
+    make_config ~user_service:(Some minimal_user_service) ~cron_jobs:None
+      ~version:"1.0.0" ()
+  in
+  let context =
+    ctx ~orchestrator:Setup.Orchestrator_absent ~docker_probe:docker_present ()
+  in
+  let actions = plan config context in
+  check bool "no EnsureAcmeFile for a proxy-less service"
+    (List.mem Setup.EnsureAcmeFile actions)
+    false
 
 let test_plan_skip_server_when_up_to_date () =
   let config =
@@ -937,7 +918,7 @@ let test_plan_skip_server_when_up_to_date () =
   in
   let actions = plan config context in
   check bool "no RunServer when version matches and no cron"
-    (List.mem Setup.RunServer actions)
+    (List.mem "RunServer" (List.map action_string actions))
     false;
   check bool "no StopOrchestrator when skipping"
     (List.mem Setup.StopOrchestrator actions)
@@ -952,7 +933,7 @@ let test_plan_fresh_install_runs_server () =
   in
   let actions = plan config context in
   check bool "RunServer when no running orchestrator"
-    (List.mem Setup.RunServer actions)
+    (List.mem "RunServer" (List.map action_string actions))
     true;
   check bool "no StopOrchestrator on fresh install"
     (List.mem Setup.StopOrchestrator actions)
@@ -1156,7 +1137,7 @@ let test_an_image_at_the_command_surface_floor_still_runs_the_server () =
   | Error message -> failf "the floor itself was refused: %s" message
   | Ok actions ->
       check bool "the server is planned at the floor" true
-        (List.mem Setup.RunServer actions)
+        (List.mem "RunServer" (List.map action_string actions))
 
 (* ------------------------------------------------------------------------- *)
 (* What a rejected reading is reported as                                    *)
@@ -1209,7 +1190,7 @@ let test_a_rejected_reading_reports_the_account_and_the_phases_left_unrun () =
   in
   let actions = plan ~specs config context in
   check bool "the fixture plans the run that is rejected" true
-    (List.mem Setup.RunServer actions);
+    (List.mem "RunServer" (List.map action_string actions));
   let rejected =
     Remote_exec.Command_failed
       {
@@ -1228,8 +1209,10 @@ let test_a_rejected_reading_reports_the_account_and_the_phases_left_unrun () =
         reason
   in
   let report =
-    Setup.action_failure_report ~server:"1.2.3.4" ~failed:Setup.RunServer
-      ~remaining:(actions_after actions ~failed:Setup.RunServer)
+    Setup.action_failure_report ~server:"1.2.3.4"
+      ~failed:(named "AwaitOrchestratorReady" actions)
+      ~remaining:
+        (actions_after actions ~failed:(named "AwaitOrchestratorReady" actions))
       ~reason:
         (Bondi_client.Orchestrator_probe.failure_message ~ip_address:"1.2.3.4"
            ~image:"mlopez1506/bondi-server:1.0.0" ~reason
@@ -1294,6 +1277,7 @@ let test_plan_preserve_precedes_the_orchestrator_recreate () =
       "StopOrchestrator";
       "RemoveOrchestrator";
       "RunServer";
+      "AwaitOrchestratorReady";
     ]
     (orchestrator_phase (plan config context))
 
@@ -1314,7 +1298,11 @@ let test_plan_no_preserve_without_a_section () =
   in
   check (list string) "orchestrator phase"
     [
-      "PullOrchestrator"; "StopOrchestrator"; "RemoveOrchestrator"; "RunServer";
+      "PullOrchestrator";
+      "StopOrchestrator";
+      "RemoveOrchestrator";
+      "RunServer";
+      "AwaitOrchestratorReady";
     ]
     (orchestrator_phase (plan config context))
 
@@ -1338,6 +1326,7 @@ let test_plan_preserve_precedes_a_stopped_orchestrator_recreate () =
       "PreserveCronPayloads nightly-report";
       "RemoveOrchestrator";
       "RunServer";
+      "AwaitOrchestratorReady";
     ]
     (orchestrator_phase (plan config context))
 
@@ -1368,7 +1357,14 @@ let test_plan_preserve_for_a_crontab_that_could_not_be_understood () =
                  { version = Some "0.9.0"; spec_hash = None })
             ~crontab ~docker_probe:docker_present ()))
   in
-  let recreate = [ "StopOrchestrator"; "RemoveOrchestrator"; "RunServer" ] in
+  let recreate =
+    [
+      "StopOrchestrator";
+      "RemoveOrchestrator";
+      "RunServer";
+      "AwaitOrchestratorReady";
+    ]
+  in
   List.iter
     (fun (label, crontab) ->
       check (list string) label
@@ -1489,7 +1485,7 @@ let test_plan_version_mismatch_stops_and_runs () =
     (List.mem Setup.StopOrchestrator actions)
     true;
   check bool "RunServer after version mismatch"
-    (List.mem Setup.RunServer actions)
+    (List.mem "RunServer" (List.map action_string actions))
     true
 
 (* The orchestrator no longer runs with --rm, so a container that died on
@@ -1513,6 +1509,7 @@ let test_plan_exited_orchestrator_is_removed_before_running () =
         "PullOrchestrator";
         "RemoveOrchestrator";
         "RunServer";
+        "AwaitOrchestratorReady";
         "CleanAlloyConfig";
       ]
     actions
@@ -1539,6 +1536,7 @@ let test_plan_running_orchestrator_is_removed_after_stopping () =
         "StopOrchestrator";
         "RemoveOrchestrator";
         "RunServer";
+        "AwaitOrchestratorReady";
         "CleanAlloyConfig";
       ]
     actions
@@ -1562,13 +1560,14 @@ let test_plan_cron_jobs_added_replace_a_container_without_their_mounts () =
     (List.mem Setup.StopOrchestrator actions)
     true;
   check bool "RunServer when adding cron jobs"
-    (List.mem Setup.RunServer actions)
+    (List.mem "RunServer" (List.map action_string actions))
     true
 
 let test_plan_action_order () =
   let config =
-    make_config ~user_service:(Some minimal_user_service) ~cron_jobs:None
-      ~version:"1.0.0" ()
+    make_config ~traefik:(Some minimal_traefik)
+      ~user_service:(Some minimal_user_service) ~cron_jobs:None ~version:"1.0.0"
+      ()
   in
   let context =
     ctx
@@ -1587,6 +1586,7 @@ let test_plan_action_order () =
         "StopOrchestrator";
         "RemoveOrchestrator";
         "RunServer";
+        "AwaitOrchestratorReady";
         "CleanAlloyConfig";
       ]
     actions
@@ -1627,6 +1627,7 @@ let test_plan_cron_only_no_acme () =
         "RequireCronCurl";
         "PullOrchestrator";
         "RunServer";
+        "AwaitOrchestratorReady";
         "CleanAlloyConfig";
       ]
     actions
@@ -1671,7 +1672,9 @@ let test_plan_requires_curl_when_cron_jobs_declared () =
     in
     find 0 actions
   in
-  match (index_of Setup.RequireCronCurl, index_of Setup.RunServer) with
+  match
+    (index_of Setup.RequireCronCurl, index_of (named "RunServer" actions))
+  with
   | None, _ -> fail "a config declaring cron jobs must verify the host's curl"
   | _, None -> fail "the plan must still run the server"
   | Some curl, Some server ->
@@ -1729,7 +1732,9 @@ let test_plan_requires_cron_docker_when_cron_jobs_declared () =
     in
     find 0 actions
   in
-  match (index_of Setup.RequireCronDocker, index_of Setup.RunServer) with
+  match
+    (index_of Setup.RequireCronDocker, index_of (named "RunServer" actions))
+  with
   | None, _ ->
       fail
         "a config declaring cron jobs must verify docker is on the PATH cron \
@@ -2064,7 +2069,7 @@ let test_plan_alloy_enabled () =
     (List.mem Setup.EnsureAlloyConfig actions)
     true;
   check bool "RunAlloy when alloy configured"
-    (List.mem Setup.RunAlloy actions)
+    (List.mem "RunAlloy" (List.map action_string actions))
     true
 
 let test_plan_alloy_disabled () =
@@ -2079,7 +2084,7 @@ let test_plan_alloy_disabled () =
     (List.mem Setup.EnsureAlloyConfig actions)
     false;
   check bool "no RunAlloy when alloy not configured"
-    (List.mem Setup.RunAlloy actions)
+    (List.mem "RunAlloy" (List.map action_string actions))
     false
 
 let test_plan_alloy_removed () =
@@ -2097,7 +2102,7 @@ let test_plan_alloy_removed () =
     (List.mem Setup.StopAlloy actions)
     true;
   check bool "RemoveAlloy when alloy removed from config"
-    (List.mem Setup.RemoveAlloy actions)
+    (List.mem "RemoveAlloy" (List.map action_string actions))
     true
 
 (* A declared image does not change the plan: unlike the orchestrator, alloy is
@@ -2282,7 +2287,7 @@ let test_alloy_env_is_planned_before_the_run () =
       let actions = alloy_run_branch_actions ~alloy_state in
       let config_at = index_of Setup.EnsureAlloyConfig actions in
       let env_at = index_of Setup.WriteAlloyEnv actions in
-      let run_at = index_of Setup.RunAlloy actions in
+      let run_at = index_of (named "RunAlloy" actions) actions in
       check bool
         (label ^ ": credentials written after the config that names them")
         true (config_at < env_at);
@@ -2314,7 +2319,7 @@ let test_withdrawn_alloy_still_removes_the_config_directory () =
   in
   let actions = plan config context in
   check bool "the removal that carries the credentials off is planned"
-    (List.mem Setup.RemoveAlloy actions)
+    (List.mem "RemoveAlloy" (List.map action_string actions))
     true;
   check bool "no credentials are written for an alloy nothing declares"
     (List.mem Setup.WriteAlloyEnv actions)
@@ -2460,6 +2465,7 @@ let test_plan_for_config_allows_undetermined_alloy_without_declaration () =
             "StopOrchestrator";
             "RemoveOrchestrator";
             "RunServer";
+            "AwaitOrchestratorReady";
           ]
         actions
 
@@ -2483,6 +2489,7 @@ let test_plan_for_config_proceeds_when_probes_succeed () =
             "StopOrchestrator";
             "RemoveOrchestrator";
             "RunServer";
+            "AwaitOrchestratorReady";
             "PullAlloy";
             "RequireAlloyCurl";
             "EnsureJournalStorage";
@@ -2564,7 +2571,7 @@ let test_orchestrator_pull_precedes_stop_and_remove () =
   (* No container to tear down, and still a pull ahead of the run: an image
      that cannot be fetched fails here, before anything else in the phase. *)
   check (list string) "an absent container"
-    [ "PullOrchestrator"; "RunServer" ]
+    [ "PullOrchestrator"; "RunServer"; "AwaitOrchestratorReady" ]
     (orchestrator_phase
        (plan
           (make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ())
@@ -2642,7 +2649,8 @@ let orchestrator_check actions =
       | Setup.PullOrchestrator
       | Setup.StopOrchestrator
       | Setup.RemoveOrchestrator
-      | Setup.RunServer
+      | Setup.RunServer _
+      | Setup.AwaitOrchestratorReady
       | Setup.EnsureJournalStorage
       | Setup.EnsureAlloyState
       | Setup.RequireAlloyCurl
@@ -2653,7 +2661,7 @@ let orchestrator_check actions =
       | Setup.EnsureAlloyConfig
       | Setup.WriteAlloyEnv
       | Setup.AwaitAlloyHealthy
-      | Setup.RunAlloy
+      | Setup.RunAlloy _
       | Setup.StopAlloy
       | Setup.RemoveAlloy
       | Setup.CleanAlloyConfig
@@ -2679,7 +2687,8 @@ let alloy_check actions =
       | Setup.CheckOrchestratorImage _
       | Setup.StopOrchestrator
       | Setup.RemoveOrchestrator
-      | Setup.RunServer
+      | Setup.RunServer _
+      | Setup.AwaitOrchestratorReady
       | Setup.EnsureJournalStorage
       | Setup.EnsureAlloyState
       | Setup.RequireAlloyCurl
@@ -2689,7 +2698,7 @@ let alloy_check actions =
       | Setup.EnsureAlloyConfig
       | Setup.WriteAlloyEnv
       | Setup.AwaitAlloyHealthy
-      | Setup.RunAlloy
+      | Setup.RunAlloy _
       | Setup.StopAlloy
       | Setup.RemoveAlloy
       | Setup.CleanAlloyConfig
@@ -2716,6 +2725,7 @@ let orchestrator_teardown =
     "StopOrchestrator";
     "RemoveOrchestrator";
     "RunServer";
+    "AwaitOrchestratorReady";
   ]
 
 (* A second setup on a cron host where nothing changed. Recreating the
@@ -3138,7 +3148,8 @@ let as_run ~verdict actions =
       | Setup.PullOrchestrator
       | Setup.StopOrchestrator
       | Setup.RemoveOrchestrator
-      | Setup.RunServer
+      | Setup.RunServer _
+      | Setup.AwaitOrchestratorReady
       | Setup.EnsureJournalStorage
       | Setup.EnsureAlloyState
       | Setup.RequireAlloyCurl
@@ -3148,7 +3159,7 @@ let as_run ~verdict actions =
       | Setup.EnsureAlloyConfig
       | Setup.WriteAlloyEnv
       | Setup.AwaitAlloyHealthy
-      | Setup.RunAlloy
+      | Setup.RunAlloy _
       | Setup.StopAlloy
       | Setup.RemoveAlloy
       | Setup.CleanAlloyConfig
@@ -3247,7 +3258,7 @@ let test_kept_alloy_file_modes_are_changed_in_place () =
   in
   let chmods = function
     | Setup.Alloy_files_chmod commands -> commands
-    | Setup.Alloy_files_replace -> fail "a file that is there was replaced"
+    | Setup.Alloy_files_replace _ -> fail "a file that is there was replaced"
   in
   check
     (list (pair string string))
@@ -3290,7 +3301,7 @@ let test_kept_alloy_with_a_missing_file_is_replaced () =
       ~env:(Setup.alloy_config_pre_write_mode_of_probe ~expected:"0600" env)
   in
   let is_replace = function
-    | Setup.Alloy_files_replace -> true
+    | Setup.Alloy_files_replace _ -> true
     | Setup.Alloy_files_chmod _ -> false
   in
   check bool "config absent" true
@@ -3470,13 +3481,13 @@ let test_plan_alloy_already_running () =
     (List.mem Setup.StopAlloy actions)
     true;
   check bool "RemoveAlloy to converge config"
-    (List.mem Setup.RemoveAlloy actions)
+    (List.mem "RemoveAlloy" (List.map action_string actions))
     true;
   check bool "EnsureAlloyConfig to converge config"
     (List.mem Setup.EnsureAlloyConfig actions)
     true;
   check bool "RunAlloy to converge config"
-    (List.mem Setup.RunAlloy actions)
+    (List.mem "RunAlloy" (List.map action_string actions))
     true
 
 (* Addressed at 192.0.2.1, which RFC 5737 reserves as unroutable: were the
@@ -3515,7 +3526,7 @@ let unroutable_server : Config_file.server =
    exact number of commands a setup run issues would make every change to the
    plan a failure here. *)
 let test_a_servers_setup_run_stages_the_key_once () =
-  let (corrections, outcome), staged =
+  let (corrections, changes, outcome), staged =
     Client_fixtures.staged_keys_during (fun () ->
         Setup.setup_server (Client_fixtures.mk_config ()) unroutable_server)
   in
@@ -3532,6 +3543,11 @@ let test_a_servers_setup_run_stages_the_key_once () =
      applied. *)
   check int "a run that converged nothing corrected nothing" 0
     (List.length corrections);
+  (* The changes list is deliberately not asserted empty: this fixture is
+     naturally empty, so such an assertion would pass against code that never
+     records a change. What a run records is pinned where a fixture can record
+     one. *)
+  ignore changes;
   check bool "the run made more than one remote call" true
     (List.length staged > 1);
   check int "over one staged key" 1
@@ -3819,6 +3835,340 @@ let test_alloy_run_command_carries_spec_label () =
     (offset ~needle:spec_label_flag command
     < offset ~needle:" 'grafana/alloy:v1.8.0'" command)
 
+(* ------------------------------------------------------------------------- *)
+(* What each start reports                                                   *)
+(* ------------------------------------------------------------------------- *)
+
+module Setup_changes = Bondi_client.Setup_changes
+
+(* A change is read as the line it renders: two changes that render alike say
+   the same thing to the operator, which is the only thing a change is for. *)
+let change =
+  testable
+    (fun ppf change ->
+      Fmt.string ppf (Setup_changes.closing_line ~server:"-" [ change ]))
+    ( = )
+
+(* What the actions of a list report once they all succeed, settled the way the
+   run's account is: a removal followed by the start of the same container is
+   the replacement, said once. An image check reports nothing of its own: what
+   it may run next is one of its two lists, read by the tests below on their
+   own. *)
+let reported actions =
+  Setup_changes.settled (List.filter_map Setup.reported_change actions)
+
+(* The two lists the one image check in [actions] carries, kept and
+   replacement, or a failure when the plan made no check or more than one. *)
+let image_check_lists actions =
+  match orchestrator_check actions @ alloy_check actions with
+  | [ check ] -> check
+  | [] -> fail "no image check was planned"
+  | _ :: _ :: _ -> fail "more than one image check was planned"
+
+let orchestrator_reported orchestrator =
+  let config =
+    make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ()
+  in
+  plan config (ctx ~orchestrator ~docker_probe:docker_present ())
+  |> List.filter (fun action ->
+      Setup.phase_of_action action = Setup_phases.Orchestrator)
+
+(* Each listing the plan can be given names why the orchestrator is started, or
+   that it is created, and a container this setup would create as it stands is
+   started by nothing the plan issues directly. The kept container's check
+   still carries a replacement, and that replacement says the image moved: it
+   is the one route to a restart that only a reading after the pull can
+   choose. *)
+let test_orchestrator_start_reasons () =
+  let cases =
+    [
+      ( "absent",
+        Setup.Orchestrator_absent,
+        [ Setup_changes.Orchestrator_created "1.0.0" ] );
+      ( "running another version",
+        orchestrator_created_by_setup ~cron_payload_needed:false
+          ~version:"0.9.0" (),
+        [
+          Setup_changes.Orchestrator_recreated
+            (Setup_changes.Version
+               {
+                 running = Bondi_client.Host_answer.of_host_output "0.9.0";
+                 wanted = "1.0.0";
+               });
+        ] );
+      ( "running with another digest",
+        Setup.Orchestrator_running
+          {
+            version = Some "1.0.0";
+            spec_hash = Some "a-digest-of-another-spec";
+          },
+        [
+          Setup_changes.Orchestrator_recreated
+            (Setup_changes.Reason Setup_changes.Config_changed);
+        ] );
+      ( "running with no digest",
+        orchestrator_created_by_setup ~label:false ~cron_payload_needed:false
+          ~version:"1.0.0" (),
+        [
+          Setup_changes.Orchestrator_recreated
+            (Setup_changes.Reason Setup_changes.No_digest);
+        ] );
+      ( "running an image its tag no longer names",
+        Setup.Orchestrator_running
+          { version = None; spec_hash = Some "a-digest-of-another-spec" },
+        [
+          Setup_changes.Orchestrator_recreated
+            (Setup_changes.Reason Setup_changes.Image_moved);
+        ] );
+      ( "not running",
+        Setup.Orchestrator_not_running,
+        [
+          Setup_changes.Orchestrator_recreated
+            (Setup_changes.Reason Setup_changes.Not_running);
+        ] );
+      ( "running as this setup would create it",
+        orchestrator_created_by_setup ~cron_payload_needed:false
+          ~version:"1.0.0" (),
+        [] );
+    ]
+  in
+  List.iter
+    (fun (label, orchestrator, expected) ->
+      check (list change) label expected
+        (reported (orchestrator_reported orchestrator)))
+    cases;
+  let { Setup.kept; replacement } =
+    image_check_lists
+      (orchestrator_reported
+         (orchestrator_created_by_setup ~cron_payload_needed:false
+            ~version:"1.0.0" ()))
+  in
+  check (list change) "kept: nothing is started" [] (reported kept);
+  check (list change) "the image moved: replaced, saying so"
+    [
+      Setup_changes.Orchestrator_recreated
+        (Setup_changes.Reason Setup_changes.Image_moved);
+    ]
+    (reported replacement);
+  (* A replacement that stops after the old container is removed and before
+     its successor runs has still changed the box, and says what it took. *)
+  let before_the_run =
+    let rec until_run = function
+      | [] -> []
+      | Setup.RunServer _ :: _ -> []
+      | action :: rest -> action :: until_run rest
+    in
+    until_run replacement
+  in
+  check (list change) "stopped before the run: the removal is reported"
+    [ Setup_changes.Orchestrator_removed ]
+    (reported before_the_run)
+
+let alloy_phase_actions ~running ~declared =
+  alloy_plan ~running ~declared
+  |> List.filter (fun action ->
+      Setup.phase_of_action action = Setup_phases.Alloy)
+
+let alloy_reported ?(declared = Some minimal_alloy) alloy_state =
+  plan
+    (make_config ~alloy:declared ~user_service:None ~cron_jobs:None
+       ~version:"1.0.0" ())
+    (ctx ~alloy_state ~orchestrator:Setup.Orchestrator_absent
+       ~docker_probe:docker_present ())
+  |> List.filter (fun action ->
+      Setup.phase_of_action action = Setup_phases.Alloy)
+
+(* The same for Alloy, which adds two routes the orchestrator does not have: a
+   kept container missing a file it mounts, and a withdrawal. *)
+let test_alloy_start_reasons () =
+  let prod = alloy_declaration ~labels:(Some [ ("env", "prod") ]) () in
+  let staging = alloy_declaration ~labels:(Some [ ("env", "staging") ]) () in
+  let cases =
+    [
+      ( "absent",
+        alloy_reported Setup.Alloy_absent,
+        [ Setup_changes.Alloy_created ] );
+      ( "running with another digest",
+        alloy_phase_actions ~running:prod ~declared:staging,
+        [ Setup_changes.Alloy_recreated Setup_changes.Config_changed ] );
+      ( "running with no digest",
+        alloy_reported (Setup.Alloy_running { spec_hash = None }),
+        [ Setup_changes.Alloy_recreated Setup_changes.No_digest ] );
+      ( "not running",
+        alloy_reported Setup.Alloy_not_running,
+        [ Setup_changes.Alloy_recreated Setup_changes.Not_running ] );
+      ( "running as this setup would create it",
+        alloy_phase_actions ~running:prod ~declared:prod,
+        [] );
+      ( "withdrawn, running",
+        alloy_reported ~declared:None (Setup.Alloy_running { spec_hash = None }),
+        [ Setup_changes.Alloy_removed ] );
+      ( "withdrawn, stopped",
+        alloy_reported ~declared:None Setup.Alloy_not_running,
+        [ Setup_changes.Alloy_removed ] );
+      ( "withdrawn, nothing on the box",
+        alloy_reported ~declared:None Setup.Alloy_absent,
+        [] );
+    ]
+  in
+  List.iter
+    (fun (label, actions, expected) ->
+      check (list change) label expected (reported actions))
+    cases;
+  let { Setup.kept; replacement } =
+    image_check_lists (alloy_phase_actions ~running:prod ~declared:prod)
+  in
+  check (list change) "kept: nothing is started" [] (reported kept);
+  check (list change) "the image moved: replaced, saying so"
+    [ Setup_changes.Alloy_recreated Setup_changes.Image_moved ]
+    (reported replacement);
+  let absent = Setup.alloy_config_mode_absent_marker ^ "\n" in
+  match
+    Setup.alloy_kept_files_course
+      ~config:
+        (Setup.alloy_config_pre_write_mode_of_probe ~expected:"0640" absent)
+      ~env:
+        (Setup.alloy_config_pre_write_mode_of_probe ~expected:"0600" "0600\n")
+  with
+  | Setup.Alloy_files_replace replacement ->
+      check (list change) "a mounted file missing: replaced, saying so"
+        [ Setup_changes.Alloy_recreated Setup_changes.Mounted_file_missing ]
+        (reported replacement)
+  | Setup.Alloy_files_chmod _ -> fail "a missing file was not a replacement"
+
+(* And for the declared containers: created, replaced because their spec
+   differs, removed once undeclared, and left alone when they match. *)
+let test_managed_start_reasons () =
+  let specs = specs_of_entries [ managed_entry ~name:"gateway" () ] in
+  let gateway = spec_named "gateway" specs in
+  let reported_for managed =
+    plan ~specs
+      (make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ())
+      (ctx ~managed ~orchestrator:Setup.Orchestrator_absent
+         ~docker_probe:docker_present ())
+    |> List.filter is_managed
+    |> reported
+  in
+  List.iter
+    (fun (label, managed, expected) ->
+      check (list change) label expected (reported_for managed))
+    [
+      ("absent", observed [], [ Setup_changes.Managed_created "gateway" ]);
+      ( "another digest",
+        observed [ ("gateway", "a-digest-of-another-spec") ],
+        [ Setup_changes.Managed_recreated "gateway" ] );
+      ( "the declared digest",
+        observed [ ("gateway", Managed_container.spec_hash gateway) ],
+        [] );
+      ( "undeclared",
+        observed
+          [
+            ("gateway", Managed_container.spec_hash gateway);
+            ("relay", "a-digest");
+          ],
+        [ Setup_changes.Managed_removed "relay" ] );
+    ]
+
+(* A stop that succeeded and was followed by a removal that failed leaves a
+   stopped container on the box, so the run's changes name it. The interpreter
+   records a change when an action succeeds, so what a run that stopped after
+   the stop reports is the changes of the actions up to the stop. The
+   completed sequence is still said once, by the removal or the recreation. *)
+let test_a_stop_is_reported_and_settled () =
+  let until_removal actions =
+    let rec go = function
+      | [] -> []
+      | (Setup.RemoveOrchestrator | Setup.RemoveAlloy | Setup.RemoveManaged _)
+        :: _ ->
+          []
+      | action :: rest -> action :: go rest
+    in
+    go actions
+  in
+  let specs = specs_of_entries [ managed_entry ~name:"gateway" () ] in
+  let managed_actions =
+    plan ~specs
+      (make_config ~user_service:None ~cron_jobs:None ~version:"1.0.0" ())
+      (ctx
+         ~managed:(observed [ ("gateway", "a-digest-of-another-spec") ])
+         ~orchestrator:Setup.Orchestrator_absent ~docker_probe:docker_present ())
+    |> List.filter is_managed
+  in
+  check (list change) "managed: stopped, then the removal failed"
+    [ Setup_changes.Managed_stopped "gateway" ]
+    (reported (until_removal managed_actions));
+  check (list change) "managed: the completed replacement is said once"
+    [ Setup_changes.Managed_recreated "gateway" ]
+    (reported managed_actions);
+  let alloy_actions =
+    alloy_reported ~declared:None (Setup.Alloy_running { spec_hash = None })
+  in
+  check (list change) "alloy: stopped, then the removal failed"
+    [ Setup_changes.Alloy_stopped ]
+    (reported (until_removal alloy_actions));
+  check (list change) "alloy: the completed withdrawal is said once"
+    [ Setup_changes.Alloy_removed ]
+    (reported alloy_actions);
+  let orchestrator_actions =
+    orchestrator_reported
+      (Setup.Orchestrator_running
+         { version = Some "0.9.0"; spec_hash = Some "x" })
+  in
+  check (list change) "orchestrator: stopped, then the removal failed"
+    [ Setup_changes.Orchestrator_stopped ]
+    (reported (until_removal orchestrator_actions))
+
+(* What the clean-up of an undeclared Alloy's configuration directory changed
+   is read from what the host says it deleted. [rm -rfv] prints a line per
+   deleted path and nothing when there was nothing to delete, so silence is
+   positively "nothing was there"; any other answer is not read as a deletion,
+   since an answer this run cannot read is not a change. *)
+let test_alloy_config_clean_is_a_change_only_when_something_was_deleted () =
+  let classify output = Setup.alloy_config_clean_changes output in
+  check (list change) "a directory with files is a change"
+    [ Setup_changes.Alloy_config_removed ]
+    (classify
+       "removed '/etc/bondi/alloy/config.alloy'\n\
+        removed '/etc/bondi/alloy/env'\n\
+        removed directory '/etc/bondi/alloy'\n");
+  check (list change) "silence is nothing there" [] (classify "");
+  check (list change) "noise that is not a deletion is not a change" []
+    (classify "mesg: ttyname failed: Inappropriate ioctl for device\n");
+  check (list change) "a line that merely mentions removal is not a change" []
+    (classify "was removed '/etc/bondi/alloy'\n");
+  check bool "the command asks for the deleted paths" true
+    (contains ~needle:"rm -rfv" Setup.alloy_clean_config_command);
+  check bool "and names the directory the writes use" true
+    (contains
+       ~needle:(Filename.quote Setup.alloy_config_dir)
+       Setup.alloy_clean_config_command)
+
+(* The order an action's changes are recorded in. A correction an action's
+   follow-up made -- the kept list of an image check, a correction at a file
+   the verdict read -- is made before the action's own change is, so the
+   closing line, which lists changes in the order the run made them, names it
+   first; and what the action's own arm reported by the host's answer comes
+   between the two. *)
+let test_a_correction_lands_before_the_actions_own_change () =
+  let corrected =
+    Setup_phases.config_mode_corrected
+      ~found:(Bondi_client.Host_answer.of_host_output "0644")
+      ~applied:"0640"
+  in
+  check (list change) "the correction, then what the arm reported, then its own"
+    [
+      Setup_changes.Corrected Setup_changes.Alloy_config_mode;
+      Setup_changes.Journal_provisioned;
+      Setup_changes.Alloy_removed;
+    ]
+    (Setup.changes_of_action ~corrections:[ corrected ]
+       ~reported_by_arm:[ Setup_changes.Journal_provisioned ]
+       Setup.RemoveAlloy);
+  check (list change) "an action with no change of its own adds none"
+    [ Setup_changes.Corrected Setup_changes.Alloy_config_mode ]
+    (Setup.changes_of_action ~corrections:[ corrected ] ~reported_by_arm:[]
+       Setup.CorrectAlloyConfigMode)
+
 let () =
   run "Setup.plan"
     [
@@ -3862,6 +4212,8 @@ let () =
             test_plan_no_user_service_skips_acme;
           test_case "included when user_service present" `Quick
             test_plan_with_user_service_includes_acme;
+          test_case "skipped for a proxy-less service" `Quick
+            test_plan_proxyless_service_skips_acme;
           test_case "skipped when cron-only" `Quick test_plan_cron_only_no_acme;
         ] );
       ( "server",
@@ -4007,17 +4359,6 @@ let () =
             `Quick
             test_cron_curl_transport_failure_that_says_not_found_is_undetermined;
         ] );
-      ( "acme probe",
-        [
-          test_case "a failed probe is not an absent file" `Quick
-            test_acme_probe_error_is_not_an_absent_file;
-          test_case "present and absent are told apart" `Quick
-            test_acme_probe_reports_what_the_host_said;
-          test_case "an answer with no marker is undetermined" `Quick
-            test_acme_probe_without_a_marker_is_undetermined;
-          test_case "the command asks for both answers" `Quick
-            test_acme_probe_command_asks_for_both_answers;
-        ] );
       ( "orchestrator readiness",
         [
           test_case "the phase waits for running and then reads once" `Quick
@@ -4137,6 +4478,18 @@ let () =
           test_case "with labels" `Quick test_alloy_river_config_with_labels;
           test_case "excludes service with logs=false" `Quick
             test_alloy_river_config_excludes_service;
+        ] );
+      ( "what each start reports",
+        [
+          test_case "the orchestrator" `Quick test_orchestrator_start_reasons;
+          test_case "alloy" `Quick test_alloy_start_reasons;
+          test_case "managed containers" `Quick test_managed_start_reasons;
+          test_case "alloy config clean is a change only when it deleted" `Quick
+            test_alloy_config_clean_is_a_change_only_when_something_was_deleted;
+          test_case "a correction lands before the action's own change" `Quick
+            test_a_correction_lands_before_the_actions_own_change;
+          test_case "a stop is reported and settled" `Quick
+            test_a_stop_is_reported_and_settled;
         ] );
       ( "spec label",
         [

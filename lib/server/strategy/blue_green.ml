@@ -178,9 +178,8 @@ let plan (config : blue_green_config) (context : blue_green_context) :
              its [die] event [observed -- Traefik v3.6.8, engine 29.10.0, the
              hand-run swap recorded in scripts/deploy-arms.sh], and until then
              it keeps DNS and its database. Detaching it first reloads nothing
-             in Traefik [assumed -- from the Traefik v3.6.8 source and docs
-             read for feature 0041 FR-4; no run records it] and cuts it off
-             mid-shutdown. *)
+             in Traefik [assumed -- from the Traefik v3.6.8 source and docs;
+             no run records it] and cuts it off mid-shutdown. *)
             StopAndRemoveContainer { container_id = workload.id };
             RenameContainer
               {

@@ -31,6 +31,10 @@ A manifest whose service image is written as the given one, on one server.
   >     - ip_address: 127.0.0.1
   >       ssh:
   >         user: deploy
+  > traefik:
+  >   domain_name: web.example.com
+  >   image: traefik:v3.6.8
+  >   acme_email: ops@example.com
   > bondi_server:
   >   version: "0.23.0"
   > EOF

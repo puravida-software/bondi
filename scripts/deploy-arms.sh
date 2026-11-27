@@ -110,16 +110,18 @@ alloy_image="$(spelling_of "$here/../lib/common/defaults.ml" alloy_image)"
 alloy_config="$here/alloy-config.alloy"
 
 # The host path a Traefik the server creates binds its certificate store from,
-# taken from the server's bind list for the reason the names above are: a file the
+# taken from the single definition the server's bind list reads, for the reason the names above are: a file the
 # gate made anywhere else would leave the deploy's bind to make a directory in its
 # place. It must be a file two directories below /etc, because the gate reads and
 # removes it through /etc bound into a container, and removes at most those two
 # directories after it.
 acme_path_of() {
-    local source value
+    local source dir file value
     source="$1"
-    value="$(sed -n 's|^ *"\(/[^:"]*\):/acme/acme\.json";$|\1|p' "$source")"
-    if [ -z "$value" ] || [ "$(printf '%s\n' "$value" | wc -l)" -ne 1 ]; then
+    dir="$(spelling_of "$source" acme_dir)" || return 1
+    file="$(sed -n 's|^let acme_file_path = acme_dir ^ "\(/[^"]*\)"$|\1|p' "$source")"
+    value="$dir$file"
+    if [ -z "$file" ] || [ "$(printf '%s\n' "$file" | wc -l)" -ne 1 ]; then
         echo "error: could not derive the acme.json bind's host path from $source" >&2
         return 1
     fi
@@ -143,7 +145,7 @@ acme_path_of() {
 # request reaches a backend.
 dial_timeout_flag="$(spelling_of "$here/../lib/server/docker/traefik.ml" dial_timeout_flag)"
 
-acme_host_path="$(acme_path_of "$here/../lib/server/docker/traefik.ml")"
+acme_host_path="$(acme_path_of "$here/../lib/common/defaults.ml")"
 # The same three paths relative to /etc, as the probe below is given them: the
 # file, then its directory, then that directory's, so the directories are deepest
 # first, the order they are removed in.
@@ -177,7 +179,7 @@ deploy_arms=(arm_simple arm_blue_green arm_blue_green_first_fails
 # nor a Traefik, before the fixture makes either: the registry, the workload
 # images and Pebble are up, and nothing a deploy would adopt is. Each tears down
 # what its deploys created before the fixture's network and Traefik come up.
-fresh_box_arms=(arm_blue_green_fresh)
+fresh_box_arms=(arm_blue_green_fresh arm_proxyless)
 
 # The host ports the fixture needs free: 80 and 443, which a Traefik the server
 # creates publishes on every interface, and the two registries'.
@@ -358,6 +360,10 @@ healthcheck_repo="localhost:$registry_port/bondi-check-workload-healthcheck"
 # run's.
 unhealthy_repo="localhost:$registry_port/bondi-check-workload-unhealthy"
 unhealthy_marker="bondi-check-unhealthy-started-$$"
+# A fourth, pushed at one tag, whose image declares `traefik.enable=true` and the
+# port it serves, as an image built for some other Traefik would: the proxy-less
+# arm deploys it and shows Traefik leaves it alone.
+routed_repo="localhost:$registry_port/bondi-check-workload-routed"
 workload_tags=(v1 v2)
 workload_port=8080
 # The drain workload, pushed at the same two tags, which the swap and upload arms
@@ -754,8 +760,12 @@ push_workload() {
                 first_line="echo $unhealthy_marker && "
                 ;;
             no-healthcheck) : ;;
+            routed)
+                printf 'LABEL traefik.enable=true\n'
+                printf 'EXPOSE %s\n' "$workload_port"
+                ;;
             *)
-                echo "error: push_workload: expected healthcheck, unhealthy or no-healthcheck, got '$healthcheck'" >&2
+                echo "error: push_workload: expected healthcheck, unhealthy, routed or no-healthcheck, got '$healthcheck'" >&2
                 return 1
                 ;;
         esac
@@ -945,6 +955,7 @@ deploy_fixture_up() {
     done
     build_drain_client
     push_workload "$unhealthy_repo" v1 unhealthy
+    push_workload "$routed_repo" v1 routed
     push_missing_layer
     build_traefik_copy
     start_pebble
@@ -2529,6 +2540,282 @@ arm_blue_green_fresh() {
     docker image rm "$reference" "$copy" > /dev/null
     expect_image_absent "$reference"
     expect_image_absent "$copy"
+}
+
+# The service the proxy-less arm deploys, named apart from the other arms' for
+# the reasons the `simple` arm's is. It has no host: nothing routes to it.
+proxyless_service="bondi-check-proxyless-$$"
+
+# One deploy of a service that declares no proxy, through `$container`, with its
+# status and streams where `run_subcommand` leaves them. The payload names the
+# service and the image and, unless the strategy is `auto`, the strategy, and
+# nothing else: no domain, no port and no Traefik setting, as a manifest with no
+# `traefik:` block and no `port` sends. Values are guarded as `deploy_service`
+# guards them, for the same reason.
+deploy_proxyless() {
+    local service reference strategy payload member
+    service="$1"
+    reference="$2"
+    strategy="$3"
+    for member in "$service" "$reference" "$strategy"; do
+        case "$member" in
+            *\"* | *\\*)
+                echo "error: deploy_proxyless was given a value containing a quote or backslash: $member" >&2
+                return 1
+                ;;
+        esac
+    done
+    payload="$work/deploy-$service-${reference##*:}-$strategy.json"
+    {
+        printf '{"service_name": "%s", "image": "%s"' "$service" "$reference"
+        case "$strategy" in
+            auto) ;;
+            *) printf ', "deployment_strategy": "%s"' "$strategy" ;;
+        esac
+        printf '}'
+    } > "$payload"
+    run_subcommand "$payload" deploy
+}
+
+# The container's one label under `traefik.` is `traefik.enable=false`, so
+# Traefik, which routes a container labelled `traefik.enable=true` and, with
+# `exposedbydefault=false`, no other, makes no router for it whatever its image
+# declares: a label given at create replaces the image's of the same key. The
+# labels are read whole, and the same read must hold `bondi.type=service`, so a
+# read that came back empty, or of some other container, cannot pass as an
+# absence.
+expect_no_traefik_labels() {
+    local id labels traefik_labels
+    id="$1"
+    require_full_id "$id" expect_no_traefik_labels || return 1
+    if ! labels="$(docker container inspect --format '{{range $key, $value := .Config.Labels}}{{$key}}={{$value}}{{println}}{{end}}' "$id")"; then
+        echo "error: expected to read the labels of $id, and the engine has no such container" >&2
+        return 1
+    fi
+    if ! grep -qxF -- "bondi.type=service" <<< "$labels"; then
+        {
+            echo "error: expected $id to carry bondi.type=service, and its labels are:"
+            printf '%s\n' "$labels"
+        } >&2
+        return 1
+    fi
+    traefik_labels="$(grep -E '^traefik\.' <<< "$labels" || true)"
+    if [ "$traefik_labels" != "traefik.enable=false" ]; then
+        {
+            echo "error: expected $id to carry traefik.enable=false and no other traefik. label, and it carries:"
+            printf '%s\n' "$traefik_labels"
+        } >&2
+        return 1
+    fi
+    echo "ok: $id carries bondi.type=service and traefik.enable=false, and no other traefik. label"
+}
+
+# An image that declares `traefik.enable=true` is not routed when it is deployed
+# with no proxy. A Traefik is started on the arm's network, as one left on a box
+# would be. The control comes first: a container run from the same image with no
+# label of its own is routed (its default rule is its name, asked over TLS, which
+# its `tls` label asks for), so Traefik is shown to have read the engine and a
+# 404 below is not a Traefik that was not up. Then the deployed container, which
+# the same Traefik was running beside, is asked for by its name over both
+# schemes, and neither answers with the page the container serves.
+expect_image_label_not_routed() {
+    local service id reference control control_id attempt body short scheme
+    service="$1"
+    id="$2"
+    reference="$3"
+    require_full_id "$id" expect_image_label_not_routed || return 1
+    control="$service-control"
+    start_traefik
+    control_id="$(docker run --detach --name "$control" --label "$fixture_label" \
+        --label "traefik.http.routers.$control.tls=true" \
+        --network "$fixture_network" "$reference")"
+    attempt=0
+    body=""
+    while [ "$attempt" -lt "$attempts" ]; do
+        probe_request "$control"
+        body="$(cat "$work/probe-body")"
+        if [ "$probe_status" = 0 ] && [ "$body" = "${control_id:0:12}" ]; then
+            echo "ok: $fixture_traefik routes $control, which carries the image's traefik.enable=true"
+            break
+        fi
+        attempt=$((attempt + 1))
+        sleep 1
+    done
+    if [ "$attempt" -ge "$attempts" ]; then
+        {
+            echo "error: expected $fixture_traefik to route $control, answered by ${control_id:0:12}, and the last body is '$body'"
+            cat "$work/probe-stderr"
+        } >&2
+        return 1
+    fi
+    short="${id:0:12}"
+    for scheme in http https; do
+        body="$(docker run --rm --label "$fixture_label" --network "$fixture_network" "$busybox_image" \
+            wget -q -T 5 --no-check-certificate -O - --header "Host: $service" "$scheme://$fixture_traefik/" 2> /dev/null || true)"
+        if [ "$body" = "$short" ]; then
+            echo "error: expected $fixture_traefik not to route $service over $scheme, and $id answered" >&2
+            return 1
+        fi
+    done
+    echo "ok: a request through $fixture_traefik for $service did not reach $id, over http or https"
+    docker rm --force "$control_id" > /dev/null
+    docker rm --force "$fixture_traefik" > /dev/null
+    expect_no_container_named "$fixture_traefik" "$control"
+}
+
+# A container on the network asks the service by its name for the page its
+# container serves, which is that container's short id. Retried, because the
+# deploy returns once the container has started, and its `httpd` may not be
+# listening yet.
+expect_reached_on_network() {
+    local service id short body attempt
+    service="$1"
+    id="$2"
+    require_full_id "$id" expect_reached_on_network || return 1
+    short="${id:0:12}"
+    body=""
+    attempt=0
+    while [ "$attempt" -lt 10 ]; do
+        if body="$(docker run --rm --label "$fixture_label" --network "$fixture_network" "$busybox_image" \
+            wget -q -T 5 -O - "http://$service:$workload_port/" 2> "$work/reach-stderr")" \
+            && [ "$body" = "$short" ]; then
+            echo "ok: a container on $fixture_network reached http://$service:$workload_port/, answered by $id"
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        sleep 1
+    done
+    {
+        echo "error: expected a container on $fixture_network to reach http://$service:$workload_port/, answered by $short"
+        echo "  last body: '$body'"
+        echo "--- wget stderr ---"
+        cat "$work/reach-stderr"
+    } >&2
+    return 1
+}
+
+# Nothing on the host reaches the container: `docker port` lists no mapping and
+# the container was created with no port binding. Each read must succeed, so an
+# engine that did not answer cannot read as an absence. The affirmative half is
+# `expect_reached_on_network` on the same container: the port is served, only
+# not published. A deploy's container with no binding prints its bindings as
+# `{}` [observed -- 2026-11-26, Docker Engine 29.10.1]; `null` is accepted as
+# the same absence [assumed -- the engine's spelling of a binding set the create
+# body left unset, not observed here].
+expect_no_host_port() {
+    local id ports bindings
+    id="$1"
+    require_full_id "$id" expect_no_host_port || return 1
+    if ! ports="$(docker port "$id")"; then
+        echo "error: docker port could not list the mappings of $id" >&2
+        return 1
+    fi
+    if [ -n "$ports" ]; then
+        {
+            echo "error: expected $id to publish no port on the host, and docker port lists:"
+            printf '%s\n' "$ports"
+        } >&2
+        return 1
+    fi
+    if ! bindings="$(docker container inspect --format '{{json .HostConfig.PortBindings}}' "$id")"; then
+        echo "error: expected to read the port bindings of $id, and the engine has no such container" >&2
+        return 1
+    fi
+    case "$bindings" in
+        "{}" | null) ;;
+        *)
+            echo "error: expected $id to be created with no port binding, and it has $bindings" >&2
+            return 1
+            ;;
+    esac
+    echo "ok: $id publishes no port on the host (port bindings: $bindings)"
+}
+
+# On an engine with neither the network a deploy attaches to nor a Traefik, a
+# service that declares no proxy and no strategy deploys under `simple`, though
+# its image declares a health check: there is no proxy for blue-green to switch.
+# The deploy creates the network, which nothing else on its path would, and no
+# Traefik. The next tag replaces the container, the container carries only
+# `traefik.enable=false`, which keeps even an image that declares `true` unrouted
+# (the last deploy shows it), and it is reached by name from the network and from nowhere else. The
+# same service asking for blue-green is refused, naming it, and the container it
+# runs is left running. Teardown removes the container, the network and the
+# images, so the fixture's network is made on an engine as it found it.
+arm_proxyless() {
+    local v1 v2 routed v1_id v2_id v3_id current_id reference
+    v1="$healthcheck_repo:v1"
+    v2="$healthcheck_repo:v2"
+    routed="$routed_repo:v1"
+
+    echo "==> $image: a deploy of $v1 with no proxy and no strategy named, on an engine with no $fixture_network and no $fixture_traefik"
+    expect_no_network "$fixture_network"
+    expect_no_container_named "$fixture_traefik" "$proxyless_service"
+    deploy_proxyless "$proxyless_service" "$v1" auto
+    # Recorded for teardown as soon as the deploy ends, before anything is
+    # asserted of it: the arm saw no network of that name before the deploy, so
+    # it is the one this run's deploy made, and an assertion failing below must
+    # not leave it on the engine.
+    if ! fixture_network_id="$(network_id_of "$fixture_network")"; then
+        echo "error: the network could not be looked up after the deploy" >&2
+        return 1
+    fi
+    expect_code "deploy $v1" 0
+    expect_stream_contains "deploy $v1" stdout '"strategy":"simple"'
+    expect_stream_contains "deploy $v1" stdout '"strategy_reason":"no traefik: block"'
+    v1_id="$(container_id_of "$proxyless_service")"
+    expect_running_at "$v1_id" "$v1"
+    if [ -z "$fixture_network_id" ]; then
+        echo "error: expected the deploy to create the network $fixture_network, and there is none" >&2
+        return 1
+    fi
+    echo "ok: the deploy created the network $fixture_network ($fixture_network_id)"
+
+    echo "==> $image: a deploy of $v2 to the same service"
+    deploy_proxyless "$proxyless_service" "$v2" auto
+    expect_code "deploy $v2" 0
+    expect_stream_contains "deploy $v2" stdout '"strategy":"simple"'
+    v2_id="$(container_id_of "$proxyless_service")"
+    expect_running_at "$v2_id" "$v2"
+    expect_gone "$v1_id"
+    expect_no_traefik_labels "$v2_id"
+    expect_no_container_named "$fixture_traefik"
+    expect_reached_on_network "$proxyless_service" "$v2_id"
+    expect_no_host_port "$v2_id"
+
+    echo "==> $image: a blue-green deploy of $v2 to the same service, which declares no proxy"
+    deploy_proxyless "$proxyless_service" "$v2" blue-green
+    expect_code "deploy $v2 under blue-green" 2
+    expect_stream_contains "deploy $v2 under blue-green" stderr \
+        "service $proxyless_service declares deployment_strategy blue-green and no traefik: block"
+    current_id="$(container_id_of "$proxyless_service")"
+    if [ "$current_id" != "$v2_id" ]; then
+        echo "error: expected $proxyless_service to still be $v2_id after the refusal, and it is '$current_id'" >&2
+        return 1
+    fi
+    expect_running_at "$v2_id" "$v2"
+    expect_no_container_named "$fixture_traefik" "$proxyless_service-new"
+
+    echo "==> $image: a deploy of an image declaring traefik.enable=true to the same service, with no proxy"
+    deploy_proxyless "$proxyless_service" "$routed" auto
+    expect_code "deploy $routed" 0
+    v3_id="$(container_id_of "$proxyless_service")"
+    expect_running_at "$v3_id" "$routed"
+    expect_gone "$v2_id"
+    expect_no_traefik_labels "$v3_id"
+    expect_image_label_not_routed "$proxyless_service" "$v3_id" "$routed"
+
+    echo "==> $image: removing what the deploys of $proxyless_service created"
+    docker rm --force "$v3_id" > /dev/null
+    expect_gone "$v3_id"
+    docker network rm "$fixture_network_id" > /dev/null
+    fixture_network_id=""
+    expect_no_network "$fixture_network"
+    for reference in "$v1" "$v2" "$routed"; do
+        if docker image inspect "$reference" > /dev/null 2>&1; then
+            docker image rm "$reference" > /dev/null
+        fi
+        expect_image_absent "$reference"
+    done
 }
 
 # Remove what the fixture made: every container carrying this run's label (the

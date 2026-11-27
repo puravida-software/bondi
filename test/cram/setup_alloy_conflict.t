@@ -27,7 +27,8 @@ succeeds, so the failure is genuinely mid-plan.
   >     printf 'Status: Image is up to date for %s\n%s\n' "$ref" "$ref" ;;
   >   *BONDI_ALLOY_CURL_PRESENT*) echo BONDI_ALLOY_CURL_PRESENT ;;
   >   *BONDI_ALLOY_PORT_FREE*) echo "${ALLOY_PORT:-BONDI_ALLOY_PORT_FREE}" ;;
-  >   *BONDI_ACME_PRESENT*) echo BONDI_ACME_PRESENT ;;
+  >   *BONDI_NETWORK_PRESENT*) echo BONDI_NETWORK_PRESENT ;;
+  >   *BONDI_ACME_PRESENT*) echo 'BONDI_ACME_PRESENT root:root 600' ;;
   >   # The journal probe, answered present: this box's journald already stores
   >   # under /var/log/journal, so the alloy phase reads it once and goes on.
   >   # Without this arm the probe falls through to *) and answers nothing, which
@@ -149,6 +150,10 @@ reads as not found — which is what a host this run never reached looks like.
   >         user: deploy
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
+  > traefik:
+  >   domain_name: app.example.com
+  >   image: traefik:v3.6.8
+  >   acme_email: ops@example.com
   > bondi_server:
   >   version: "0.25.0"
   > alloy:
@@ -175,7 +180,7 @@ rather than a phase name they have to translate into one.
   Processing server: 127.0.0.1
   Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 127.0.0.1
-  ACME file permissions updated on server 127.0.0.1: /etc/traefik/acme/acme.json
+  ACME file is already root:root 600 on server 127.0.0.1: /etc/traefik/acme/acme.json
   Pulled mlopez1506/bondi-server:0.25.0 on server 127.0.0.1
   bondi-orchestrator container is already running on server 127.0.0.1: 0.25.0, skipping...
   Pulled grafana/alloy:v1.8.0 on server 127.0.0.1
@@ -186,7 +191,7 @@ rather than a phase name they have to translate into one.
   Wrote Alloy credentials file on server 127.0.0.1: /etc/bondi/alloy/env
   Error: command failed (125): docker: Error response from daemon: Conflict. The container name "/bondi-alloy" is already in use by container "d671990dc231".
   setup stopped part-way through the alloy phase on server 127.0.0.1, so these phases did not run: managed containers.
-  setup corrected nothing on server 127.0.0.1
+  setup changed nothing on server 127.0.0.1
   
   Server: 127.0.0.1
   
@@ -198,6 +203,8 @@ rather than a phase name they have to translate into one.
   Infrastructure
     NAME                   SOURCE  IMAGE                            TAG          STATUS        RESTARTS  HEALTH
     bondi-orchestrator     docker  -                                -            not found     -         -
+                           orch    not reachable: <detail>
+    bondi-traefik          docker  -                                -            not found     -         -
                            orch    not reachable: <detail>
     bondi-alloy            docker  -                                -            not found     -         -
                            orch    not reachable: <detail>
@@ -231,6 +238,10 @@ never declared it.
   >         user: deploy
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
+  > traefik:
+  >   domain_name: app.example.com
+  >   image: traefik:v3.6.8
+  >   acme_email: ops@example.com
   > bondi_server:
   >   version: "0.25.0"
   > managed_containers:
@@ -264,6 +275,10 @@ correction is reported beside the failure rather than lost with it.
   >         user: deploy
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
+  > traefik:
+  >   domain_name: app.example.com
+  >   image: traefik:v3.6.8
+  >   acme_email: ops@example.com
   > bondi_server:
   >   version: "0.25.0"
   > alloy:
@@ -282,14 +297,17 @@ correction is reported beside the failure rather than lost with it.
   [1]
   $ grep -c -F -- '/etc/bondi/alloy/config.alloy on server 127.0.0.1 was mode 0644, applied 0640' out.log
   1
-  $ grep -c -F -- 'setup corrected nothing on server 127.0.0.1' out.log
+  $ grep -c -F -- 'setup changed nothing on server 127.0.0.1' out.log
   0
   [1]
+  $ grep -F -- 'setup changed' out.log
+  setup changed on server 127.0.0.1: Alloy config mode corrected
 
 Its affirmative arm is the run at the top of this file, which fails at the same
-action and whose account says the run corrected nothing -- so the line above is
-there because a correction was applied and carried out of a run that stopped, not
-because the account prints something on every failure.
+action and whose closing line reads `setup changed nothing on server
+127.0.0.1` -- so the absence above is there because a correction was applied and
+carried out of a run that stopped, not because the closing line never says so on
+a failure.
 
 The three registers stay in the order an operator reads them: what failed, then
 what was corrected, then what is on the box now. Pinned by position rather than by

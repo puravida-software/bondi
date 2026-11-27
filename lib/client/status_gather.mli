@@ -118,6 +118,16 @@ val health_waits :
     own length would report a container that used its whole budget as a call
     that was given up on. *)
 
+val unreadable_listing : reading -> Remote_exec.failure option
+(** The failure that kept this reading's container listing from being taken, if
+    one did.
+
+    Only the listing decides it. Without it the report cannot say what runs on
+    the box; with it, an orchestrator that could not be consulted or a crontab
+    that could not be read still leaves an accurate account of the containers,
+    and those stay cells in the report rather than a failed run. A listing that
+    ran and found nothing is a listing, not a failure. *)
+
 val report_of_reading :
   config:Config_file.t ->
   address:string ->

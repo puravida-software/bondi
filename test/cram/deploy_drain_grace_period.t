@@ -48,14 +48,23 @@ already written to.
   >   acme_email: ops@example.com
   > EOF
 
-The deploy succeeds and says the setting is ignored, on the same stream as
-every other notice about a field Bondi parses and no longer acts on.
+The deploy succeeds and says the setting is ignored, on stderr like every other
+notice about a field Bondi parses and no longer acts on.
 
   $ bondi-client deploy web:v1 2>&1
   Deployment process initiated...
   service.drain_grace_period is set to 5 and is ignored: a blue-green deploy stops the old container while it is still attached to the network, and no longer waits for it to drain. Remove it from bondi.yaml.
   Deploying to server: 127.0.0.1
   Deployment initiated on server 127.0.0.1
+
+Stdout carries no notice; stderr carries the one naming the field.
+
+  $ bondi-client deploy web:v1 2>/dev/null
+  Deployment process initiated...
+  Deploying to server: 127.0.0.1
+  Deployment initiated on server 127.0.0.1
+  $ bondi-client deploy web:v1 >/dev/null
+  service.drain_grace_period is set to 5 and is ignored: a blue-green deploy stops the old container while it is still attached to the network, and no longer waits for it to drain. Remove it from bondi.yaml.
 
 The payload is the service's, and carries no drain_grace_period key.
 

@@ -11,7 +11,7 @@ The fixtures are removed first so the file is re-runnable in a directory a
 previous run has already written to.
 
   $ ROOT="$PWD"
-  $ rm -rf box ssh-argv.log first.log second.log third.log mode-config.log mode-env.log missing-config.log missing-env.log retry-changed.log retry-unchanged.log retry-before.alloy retry-after.alloy
+  $ rm -rf box ssh-argv.log first.log second.log third.log acme-wide.log mode-config.log mode-env.log missing-config.log missing-env.log retry-changed.log retry-unchanged.log retry-before.alloy retry-after.alloy
 
 The box, as files the stub reads and writes, one set per container setup runs
 by name. `<name>.registry` is the image id the registry's tag names.
@@ -98,9 +98,13 @@ fixture chose.
   >   'docker --version') echo 'Docker version 27.0.0, build deadbeef' ;;
   >   *BONDI_ALLOY_CURL_PRESENT*) echo BONDI_ALLOY_CURL_PRESENT ;;
   >   *BONDI_ALLOY_PORT_FREE*) echo "${ALLOY_PORT:-BONDI_ALLOY_PORT_FREE}" ;;
-  >   *BONDI_ACME_PRESENT*) echo BONDI_ACME_PRESENT ;;
-  >   'sudo chown root:root /etc/traefik/acme/acme.json'*) : ;;
-  >   'docker network inspect'*) : ;;
+  >   # The ACME file's owner and mode, as the box has them: root:root 600 until a
+  >   # file says otherwise, and root:root 600 again once setup has run its chown,
+  >   # which is what a correction followed by its read-back finds.
+  >   *BONDI_ACME_PRESENT*)
+  >     echo "BONDI_ACME_PRESENT $(cat "$BOX/acme.answer" 2>/dev/null || echo 'root:root 600')" ;;
+  >   "sudo chown root:root '/etc/traefik/acme/acme.json'"*) rm -f "$BOX/acme.answer" ;;
+  >   *BONDI_NETWORK_PRESENT*) echo BONDI_NETWORK_PRESENT ;;
   >   # The probe's listing and the version read are disjoint by construction:
   >   # the probe's format names a state, and the version read's pattern is
   >   # anchored on the whole of `--format '{{.Image}}'`.
@@ -177,6 +181,10 @@ fixture chose.
   >         user: deploy
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
+  > traefik:
+  >   domain_name: app.example.com
+  >   image: traefik:v3.6.8
+  >   acme_email: ops@example.com
   > bondi_server:
   >   version: "0.25.0"
   > alloy:
@@ -232,6 +240,19 @@ first run wrote.
   [1]
   $ cmp first-config.alloy "$BOX/config.alloy" && echo 'the config on the box is the first run'"'"'s'
   the config on the box is the first run's
+
+So the run changed nothing, and its closing line says so. The ACME file was
+already root:root 600 and the network was there, so neither was written to and
+neither is listed.
+
+  $ grep -F -- 'setup changed' second.log
+  setup changed nothing on server 127.0.0.1
+  $ grep -c -F -- 'ACME file permissions' second.log
+  0
+  [1]
+  $ grep -c -F -- 'sudo chown' ssh-argv.log
+  0
+  [1]
 
 A kept Alloy's files are checked, not rewritten. A config file at 0644 is
 brought to the declared 0640 with a chmod, in place, and the mode is read back:
@@ -379,3 +400,21 @@ container, so Alloy is pulled and left running, and nothing is written.
   [1]
   $ cmp retry-after.alloy "$BOX/config.alloy" && echo 'the config on the box is the one the limit change wrote'
   the config on the box is the one the limit change wrote
+
+The two absences above (no `ACME file permissions` line, no `sudo chown`) are
+only worth something if the same stub can produce them. It can: the box's ACME
+file is now at root:root 644, as one left readable by hand would be. The run
+corrects it with the chown, reads the answer back, and the account and the
+closing line say so.
+
+  $ echo 'root:root 644' > "$BOX/acme.answer"
+  $ : > "$SSH_ARGV_LOG"
+  $ bondi-client setup > acme-wide.log 2>&1
+  $ echo $?
+  0
+  $ grep -c -F -- 'sudo chown' ssh-argv.log
+  1
+  $ grep -F -- 'acme.json on server' acme-wide.log
+  /etc/traefik/acme/acme.json on server 127.0.0.1 was owner and mode root:root 644, applied root:root 600
+  $ grep -F -- 'setup changed' acme-wide.log
+  setup changed on server 127.0.0.1: ACME file permissions corrected

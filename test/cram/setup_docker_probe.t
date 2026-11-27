@@ -54,10 +54,11 @@ only have stopped on the probe that arm broke.
   >     printf '%s: Pulling from %s\n' "${ref##*:}" "${ref%:*}"
   >     printf 'Digest: sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4\n'
   >     printf 'Status: Image is up to date for %s\n%s\n' "$ref" "$ref" ;;
+  >   *BONDI_NETWORK_PRESENT*) echo BONDI_NETWORK_PRESENT ;;
   >   *BONDI_ACME_PRESENT*)
   >     [ -n "$ACME_DROPS" ] && drop
   >     [ -n "$ACME_HALF_ANSWERS" ] && half_answered
-  >     echo BONDI_ACME_PRESENT ;;
+  >     echo 'BONDI_ACME_PRESENT root:root 600' ;;
   >   *BONDI_CRON_DOCKER_PRESENT*)
   >     [ -n "$CRON_DOCKER_DROPS" ] && drop
   >     echo 'BONDI_CRON_DOCKER_PRESENT /usr/bin/docker' ;;
@@ -141,6 +142,10 @@ only have stopped on the probe that arm broke.
   >         user: deploy
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
+  > traefik:
+  >   domain_name: app.example.com
+  >   image: traefik:v3.6.8
+  >   acme_email: ops@example.com
   > bondi_server:
   >   version: "0.15.0"
   > EOF
@@ -157,7 +162,7 @@ the report's own reads, so every row reads as not found.
   Processing server: 127.0.0.1
   Error: could not read the Docker version, so Docker will not be installed: the host was not reached (255): Connection closed by 10.0.0.1 port 22
   setup stopped part-way through the Docker phase on server 127.0.0.1, so these phases did not run: network, ACME file, orchestrator, alloy.
-  setup corrected nothing on server 127.0.0.1
+  setup changed nothing on server 127.0.0.1
   
   Server: 127.0.0.1
   
@@ -169,6 +174,8 @@ the report's own reads, so every row reads as not found.
   Infrastructure
     NAME                   SOURCE  IMAGE                            TAG          STATUS        RESTARTS  HEALTH
     bondi-orchestrator     docker  -                                -            not found     -         -
+                           orch    not reachable: <detail>
+    bondi-traefik          docker  -                                -            not found     -         -
                            orch    not reachable: <detail>
   
   Crontab
@@ -211,6 +218,10 @@ cron is perfectly able to run the line.
   >         user: deploy
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
+  > traefik:
+  >   domain_name: app.example.com
+  >   image: traefik:v3.6.8
+  >   acme_email: ops@example.com
   > bondi_server:
   >   version: "0.15.0"
   > cron_jobs:
@@ -267,6 +278,10 @@ Connection closed by 10.0.0.1 port 22" but 7.76.0 is required.
   >         user: deploy
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
+  > traefik:
+  >   domain_name: app.example.com
+  >   image: traefik:v3.6.8
+  >   acme_email: ops@example.com
   > bondi_server:
   >   version: "0.15.0"
   > cron_jobs:
@@ -319,13 +334,17 @@ chown and chmod against a host that was never asked.
   >         user: deploy
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
+  > traefik:
+  >   domain_name: app.example.com
+  >   image: traefik:v3.6.8
+  >   acme_email: ops@example.com
   > bondi_server:
   >   version: "0.15.0"
   > EOF
   $ bondi-client setup > out.log 2>&1
   [1]
   $ grep -A1 '^Error:' out.log
-  Error: could not read whether /etc/traefik/acme/acme.json exists on the server, so setup will not act on whether it does: the host was not reached (255): Connection closed by 10.0.0.1 port 22
+  Error: could not read whether /etc/traefik/acme/acme.json exists, or its owner and mode, on the server, so setup will not act on it: the host was not reached (255): Connection closed by 10.0.0.1 port 22
   setup stopped part-way through the ACME file phase on server 127.0.0.1, so these phases did not run: orchestrator, alloy.
 
 Nothing was written. The probe did run, so the absence below is the refusal to
@@ -354,7 +373,7 @@ that says what the host actually found.
   $ bondi-client setup > out.log 2>&1
   [1]
   $ grep -A2 '^Error:' out.log
-  Error: could not read whether /etc/traefik/acme/acme.json exists on the server, so setup will not act on whether it does: command failed (1): BONDI_ACME_ABSENT
+  Error: could not read whether /etc/traefik/acme/acme.json exists, or its owner and mode, on the server, so setup will not act on it: command failed (1): BONDI_ACME_ABSENT
   mesg: ttyname failed: Inappropriate ioctl for device
   setup stopped part-way through the ACME file phase on server 127.0.0.1, so these phases did not run: orchestrator, alloy.
 
@@ -393,11 +412,11 @@ container terminates TLS for every site on the box.
   Processing server: 127.0.0.1
   Docker is already installed on server 127.0.0.1: Docker version 29.2.1, build deadbeef
   Network bondi-network is present on server 127.0.0.1
-  ACME file permissions updated on server 127.0.0.1: /etc/traefik/acme/acme.json
+  ACME file is already root:root 600 on server 127.0.0.1: /etc/traefik/acme/acme.json
   Pulled mlopez1506/bondi-server:0.15.0 on server 127.0.0.1
   bondi-orchestrator container is already running on server 127.0.0.1: 0.15.0, skipping...
   No alloy is configured for server 127.0.0.1: /etc/bondi/alloy is not on the host
-  setup corrected nothing on server 127.0.0.1
+  setup changed nothing on server 127.0.0.1
   
   Server: 127.0.0.1
   
@@ -409,6 +428,8 @@ container terminates TLS for every site on the box.
   Infrastructure
     NAME                   SOURCE  IMAGE                            TAG          STATUS        RESTARTS  HEALTH
     bondi-orchestrator     docker  -                                -            not found     -         -
+                           orch    not reachable: <detail>
+    bondi-traefik          docker  -                                -            not found     -         -
                            orch    not reachable: <detail>
   
   Crontab

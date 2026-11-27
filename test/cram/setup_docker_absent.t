@@ -43,7 +43,8 @@ succeed, so the run reaches the install rather than stopping earlier.
   >   # Without this arm the command falls through to *) and answers nothing,
   >   # which setup reads as a host that could not be asked, and the run stops
   >   # in the ACME phase -- before the convergence this file now asserts.
-  >   *BONDI_ACME_PRESENT*) echo BONDI_ACME_PRESENT ;;
+  >   *BONDI_NETWORK_PRESENT*) echo BONDI_NETWORK_PRESENT ;;
+  >   *BONDI_ACME_PRESENT*) echo 'BONDI_ACME_PRESENT root:root 600' ;;
   >   # The restart-policy reading the run takes after it has started the
   >   # container. This box reports the policy setup asked for, so the reading
   >   # is the whole of the convergence: nothing is corrected, and the count
@@ -97,6 +98,10 @@ succeed, so the run reaches the install rather than stopping earlier.
   >         user: deploy
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
+  > traefik:
+  >   domain_name: app.example.com
+  >   image: traefik:v3.6.8
+  >   acme_email: ops@example.com
   > bondi_server:
   >   version: "0.15.0"
   > EOF
@@ -113,10 +118,13 @@ stopped part-way would still print the four lines below.
   Docker not found on server 127.0.0.1
   Installing Docker...
 
-The installer was issued exactly once.
+The installer was issued exactly once, and the run's closing line names the
+install first, in the order the run made its changes.
 
   $ grep -c 'get.docker.com' ssh-argv.log
   1
+  $ grep -F -- 'setup changed' out.log
+  setup changed on server 127.0.0.1: Docker installed, orchestrator 0.15.0 created
 
 Both probes ran: the gather probe and the interpreter's own re-probe. Neither
 was read as a transport failure.

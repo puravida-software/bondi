@@ -12,6 +12,12 @@ let alloy_config_path = alloy_config_dir ^ "/config.alloy"
 let alloy_env_path = alloy_config_dir ^ "/env"
 let journal_path = "/var/log/journal"
 
+(* The file Traefik keeps its certificates in, named here for the same reason:
+   setup writes and reads it, the account of what a run corrected names it, and
+   the server's Traefik mount reads it from here. *)
+let acme_dir = "/etc/traefik/acme"
+let acme_file_path = acme_dir ^ "/acme.json"
+
 (* Under /var/lib rather than beside the config in /etc/bondi/alloy: it is state
    Alloy writes, not configuration Bondi writes. The config directory is also
    deleted whole and rewritten on every setup, and a read position deleted with

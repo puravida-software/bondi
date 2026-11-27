@@ -153,12 +153,15 @@ val validate_deployments :
 
 val version_gate :
   read_version:(unit -> (string, string) result) ->
+  service_name:string option ->
+  traefik_domain_name:string option ->
   volumes:Config_file.volumes option ->
   deploy_cron_job list option ->
   (unit, string) result
-(** [version_gate ~read_version ~volumes cron_jobs] decides whether one server's
-    orchestrator is new enough for the work it is about to be given: the
-    [volumes] and [cron_jobs] its payload carries.
+(** [version_gate ~read_version ~service_name ~traefik_domain_name ~volumes
+     cron_jobs] decides whether one server's orchestrator is new enough for the
+    work it is about to be given: the service, domain, [volumes] and [cron_jobs]
+    its payload carries.
 
     Every server is held to a floor, because a deploy reaches a box by running a
     subcommand inside the orchestrator's container and a binary from before
@@ -171,7 +174,9 @@ val version_gate :
     the operator to an image which is still going to be refused. A server whose
     payload mounts a volume is held to the volume floor alone, for the same
     reason: it is the highest, and the release that carries it clears the other
-    two. An empty list mounts nothing and is held as [None] is.
+    two. An empty list mounts nothing and is held as [None] is. A payload that
+    carries a service and no domain is held to the proxy-less floor alone, the
+    highest of all, whatever else it carries.
 
     [read_version] is a parameter rather than something called ahead of the
     decision so that this is a decision made from a value, testable against a
@@ -254,9 +259,9 @@ val deploy_servers :
     is the whole of what this command does to the servers it was given: every
     one of them is gated, and only then is any one of them deployed to.
 
-    Each server is gated on the payload it is about to be sent — its volumes and
-    its cron jobs — so the floor it is held to is the floor of what it receives,
-    not of what the configuration declares elsewhere.
+    Each server is gated on the payload it is about to be sent — its service and
+    domain, its volumes and its cron jobs — so the floor it is held to is the
+    floor of what it receives, not of what the configuration declares elsewhere.
 
     A server whose payload mounts volumes, and whose version passed, is then
     asked whether their host paths exist: [check_volumes] runs
@@ -275,6 +280,42 @@ val deploy_servers :
     that from one run, and the terminal these lines are printed to shows all of
     them. Every server is still attempted, because a box that has already been
     deployed to is not made better by abandoning the next. *)
+
+val proxyless_blue_green : deploy_payload -> (unit, string) result
+(** [proxyless_blue_green payload] refuses a payload whose service declares
+    [deployment_strategy: blue-green] and names no domain, naming the service.
+
+    Blue-green switches traffic through the proxy, and without [traefik:] there
+    is none to switch, so the orchestrator refuses such a payload too. Asked
+    here so the refusal arrives before any server is reached, rather than after
+    a session has been opened and a version read. A payload that carries no
+    service, or one that names a domain, passes. *)
+
+val proxyless_auto_notice : Config_file.t -> string option
+(** [proxyless_auto_notice config] is what this command says when [config]'s
+    service declares no [deployment_strategy] and there is no [traefik:] block:
+    the orchestrator resolves [auto] to simple there, and the operator is told.
+    Decided from the manifest alone, through
+    {!Bondi_common.Proxyless_strategy.auto_without_proxy_notice}. [None] when a
+    strategy is declared, when [traefik:] is, or when there is no service. *)
+
+val service_notices :
+  Config_file.t -> deployments:(string * string) list -> string list
+(** [service_notices config ~deployments] is {!proxyless_port_notice} and
+    {!proxyless_auto_notice}, in that order, for a run that deploys the service.
+    A run whose [deployments] name only cron jobs says neither: it does not
+    deploy the service, so the sentences would describe a deploy that is not
+    happening. *)
+
+val proxyless_port_notice : Config_file.t -> string option
+(** [proxyless_port_notice config] is what this command says when [config]'s
+    service declares [port] and there is no [traefik:] block: nothing routes to
+    that port and no host port is published, so the value is used for nothing.
+    [None] when the service declares no port, when [traefik:] is declared, or
+    when there is no service.
+
+    A value for the reason {!deprecation_notices} is one. The deploy still
+    proceeds and the port is still sent. *)
 
 val deprecation_notices : Config_file.t -> string list
 (** [deprecation_notices config] is what this command says about fields [config]

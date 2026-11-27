@@ -1088,6 +1088,25 @@ let test_a_host_that_answered_unreadably_is_not_understood () =
   check bool "carrying what the host said" true
     (contains line ~needle:"Cannot connect to the Docker daemon")
 
+(* The line names the server, so a run over several says which one it could not
+   read, and carries the failure in [Remote_exec.explain]'s words, which is what
+   keeps the two kinds of failure apart. The sentences below are the ones the
+   table already prints for these failures in the cram fixtures, so the stderr
+   line and the cell cannot drift into two accounts of one failure. *)
+let test_unreadable_line () =
+  check string "a host that was never reached"
+    "status could not read server 10.0.0.2: the host was not reached (255): \
+     Permission denied (publickey)."
+    (Report.unreadable_line ~address:"10.0.0.2"
+       (Remote_exec.Ssh_failed
+          { code = 255; output = "Permission denied (publickey).\n" }));
+  check string "a host that ran the listing and refused it"
+    "status could not read server 10.0.0.2: the container listing ran on the \
+     host and failed: command failed (1): Cannot connect to the Docker daemon"
+    (Report.unreadable_line ~address:"10.0.0.2"
+       (Remote_exec.Command_failed
+          { code = 1; output = "Cannot connect to the Docker daemon" }))
+
 let () =
   run "Status_report"
     [
@@ -1176,5 +1195,7 @@ let () =
             test_a_host_that_could_not_be_reached_is_not_consulted;
           test_case "a host that answered unreadably is not understood" `Quick
             test_a_host_that_answered_unreadably_is_not_understood;
+          test_case "an unreadable server's line names it and why" `Quick
+            test_unreadable_line;
         ] );
     ]

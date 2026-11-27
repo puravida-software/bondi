@@ -34,4 +34,10 @@ val orchestrator_reading :
     opening and closing a session of its own. *)
 
 val cmd : unit Cmdliner.Cmd.t
-(** The command as [bondi status]. *)
+(** The command as [bondi status].
+
+    It prints the whole report for every configured server first. Then, for each
+    server whose container listing could not be obtained, it writes one line to
+    standard error naming that server and exits 1. An orchestrator or a crontab
+    that could not be read is a cell in the report and leaves the exit code at
+    0. *)

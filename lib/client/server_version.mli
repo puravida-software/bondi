@@ -135,7 +135,7 @@ val mounts_volumes : string -> (unit, string) result
 
 val minimum_for_journald_capture : string
 (** The oldest orchestrator release whose server sends a cron job's container
-    output to the host journal. The highest of the floors. *)
+    output to the host journal. *)
 
 val captures_cron_to_journald : string -> (unit, string) result
 (** [captures_cron_to_journald version] decides whether an orchestrator
@@ -143,3 +143,17 @@ val captures_cron_to_journald : string -> (unit, string) result
     configuration reads them. Refuses in the same shape as {!writes_exec_lines}.
     An older server loses every cron line silently, which is why setup takes
     this gate before it writes that configuration. *)
+
+val minimum_for_proxyless_service : string
+(** The oldest orchestrator release whose server deploys a service that has no
+    [traefik:] block. The highest of the floors. *)
+
+val deploys_proxyless_service : string -> (unit, string) result
+(** [deploys_proxyless_service version] decides whether an orchestrator
+    reporting [version] deploys a service whose payload names no domain.
+
+    An older server pulls the service's image and only then fails, because it
+    cannot build a service container without Traefik labels, so the failure
+    arrives after the box has done work and names a field rather than a release.
+    This gate is taken before anything is sent, and refuses in the same shape as
+    {!writes_exec_lines}. *)

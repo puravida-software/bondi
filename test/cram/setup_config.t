@@ -38,3 +38,14 @@ declares one is set up rather than refused.
   bondi_server.api_token is set and no longer does anything: the orchestrator serves no HTTP, so there is no request to authenticate. Remove it from bondi.yaml, and rotate it if it was ever a real secret -- a credential that sat in a configuration file is compromised whether or not anything still reads it.
   Error: no servers configured. Add servers to bondi.yaml or configure a service with servers.
   [1]
+
+The notices are written to stderr, as deploy writes the same sentences. Stdout
+carries none of them.
+
+  $ bondi-client setup 2>/dev/null
+  [1]
+  $ bondi-client setup >/dev/null
+  bondi_server.bind_address is set to 0.0.0.0 and no longer does anything: the orchestrator serves no HTTP, so there is no socket to bind. Remove it from bondi.yaml.
+  bondi_server.api_token is set and no longer does anything: the orchestrator serves no HTTP, so there is no request to authenticate. Remove it from bondi.yaml, and rotate it if it was ever a real secret -- a credential that sat in a configuration file is compromised whether or not anything still reads it.
+  Error: no servers configured. Add servers to bondi.yaml or configure a service with servers.
+  [1]

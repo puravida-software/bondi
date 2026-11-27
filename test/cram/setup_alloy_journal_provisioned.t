@@ -41,7 +41,8 @@ probe on its own would pass against a run that never restarted anything.
   >     printf '%s\n' "$JOURNAL_AFTER_RESTART" > "$JOURNAL_FILE" ;;
   >   *BONDI_ALLOY_CURL_PRESENT*) echo BONDI_ALLOY_CURL_PRESENT ;;
   >   *BONDI_ALLOY_PORT_FREE*) echo "${ALLOY_PORT:-BONDI_ALLOY_PORT_FREE}" ;;
-  >   *BONDI_ACME_PRESENT*) echo BONDI_ACME_PRESENT ;;
+  >   *BONDI_NETWORK_PRESENT*) echo BONDI_NETWORK_PRESENT ;;
+  >   *BONDI_ACME_PRESENT*) echo 'BONDI_ACME_PRESENT root:root 600' ;;
   >   'docker --version') echo 'Docker version 27.0.0, build deadbeef' ;;
   >   # The orchestrator this file's box already runs, carrying the digest setup
   >   # stamps on a 0.25.0 orchestrator created without the cron payload mounts:
@@ -96,6 +97,10 @@ probe on its own would pass against a run that never restarted anything.
   >         user: deploy
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
+  > traefik:
+  >   domain_name: app.example.com
+  >   image: traefik:v3.6.8
+  >   acme_email: ops@example.com
   > bondi_server:
   >   version: "0.25.0"
   > alloy:
@@ -115,7 +120,7 @@ journal, says so as it goes, and goes on to replace Alloy.
   Processing server: 127.0.0.1
   Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 127.0.0.1
-  ACME file permissions updated on server 127.0.0.1: /etc/traefik/acme/acme.json
+  ACME file is already root:root 600 on server 127.0.0.1: /etc/traefik/acme/acme.json
   Pulled mlopez1506/bondi-server:0.25.0 on server 127.0.0.1
   bondi-orchestrator container is already running on server 127.0.0.1: 0.25.0, skipping...
   Pulled grafana/alloy:v1.8.0 on server 127.0.0.1
@@ -127,14 +132,13 @@ journal, says so as it goes, and goes on to replace Alloy.
   Alloy config written on server 127.0.0.1: /etc/bondi/alloy/config.alloy
 
 What it changed is a line of the run's account, worded the way every other
-correction is: what the box had, then what the run applied. The run that
-corrected it does not also say it corrected nothing.
+correction is: what the box had, then what the run applied. The closing line
+lists it among the run's changes, ahead of the Alloy it replaced after it.
 
   $ grep -c -F -- '/var/log/journal on server 127.0.0.1 was storage volatile, applied persistent' out.log
   1
-  $ grep -c -F -- 'setup corrected nothing on server 127.0.0.1' out.log
-  0
-  [1]
+  $ grep -F -- 'setup changed' out.log
+  setup changed on server 127.0.0.1: journal made persistent, Alloy recreated (no config digest)
 
 The commands that reached the host, spelled out rather than derived, in the
 order they run: the directory, journald's ownership and mode on it, then the
@@ -166,7 +170,8 @@ reading again would pass every line above.
 
 A box whose journal is already persistent is the same stub with the file
 starting at present. It is read once, nothing is provisioned, the run says the
-journal is already where Alloy reads it, and there is nothing to account for.
+journal is already where Alloy reads it, and there is nothing to account for:
+the closing line names the Alloy it replaced and not the journal.
 
   $ : > "$SSH_ARGV_LOG"
   $ printf 'BONDI_JOURNAL_PRESENT\n' > "$JOURNAL_FILE"
@@ -178,7 +183,7 @@ journal is already where Alloy reads it, and there is nothing to account for.
   $ grep -c -F -- 'systemd-journald' ssh-argv.log
   0
   [1]
-  $ grep -c -F -- 'setup corrected nothing on server 127.0.0.1' out.log
-  1
+  $ grep -F -- 'setup changed' out.log
+  setup changed on server 127.0.0.1: Alloy recreated (no config digest)
   $ grep -c -F -- 'docker run -d --name bondi-alloy' ssh-argv.log
   1

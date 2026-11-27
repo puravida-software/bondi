@@ -557,27 +557,31 @@ done
 # so each way a source can fail it is planted, and the one way it passes.
 plant_traefik_source() {
     mkdir -p "$scratch/case/src"
-    printf '%s' "$1" > "$scratch/case/src/traefik.ml"
+    printf '%s' "$1" > "$scratch/case/src/defaults.ml"
 }
-acme_line() { printf '    "%s:/acme/acme.json";\n' "$1"; }
+acme_line() { printf 'let acme_dir = "%s"\nlet acme_file_path = acme_dir ^ "/acme.json"\n' "$1"; }
 run_acme_case() {
     local name="$1" source="$2" want_rc="$3" want_text="$4"
     new_case
     plant_traefik_source "$source"
     # shellcheck disable=SC2016
-    run_refusal_body "$name" 'acme_path_of "$STUB_DIR/src/traefik.ml"' "$want_rc" "$want_text"
+    run_refusal_body "$name" 'acme_path_of "$STUB_DIR/src/defaults.ml"' "$want_rc" "$want_text"
 }
-run_acme_case "acme_path_of refuses a source with no acme.json bind" \
-    'let binds = [];' 1 "error: could not derive the acme.json bind's host path from"
-run_acme_case "acme_path_of refuses a source with two acme.json binds" \
-    "$(acme_line /etc/traefik/acme/acme.json)$(acme_line /etc/other/acme/acme.json)" 1 \
+run_acme_case "acme_path_of refuses a source with no acme_dir" \
+    'let binds = [];' 1 "error: could not derive 'acme_dir' from"
+run_acme_case "acme_path_of refuses a source with two acme_dir definitions" \
+    "$(acme_line /etc/traefik/acme)
+$(acme_line /etc/other/acme)" 1 \
+    "error: could not derive 'acme_dir' from"
+run_acme_case "acme_path_of refuses a source that does not build the file path from acme_dir" \
+    'let acme_dir = "/etc/traefik/acme"' 1 \
     "error: could not derive the acme.json bind's host path from"
 run_acme_case "acme_path_of refuses a path one directory below /etc" \
-    "$(acme_line /etc/a/b)" 1 "is not a file two directories below /etc"
+    "$(acme_line /etc/a)" 1 "is not a file two directories below /etc"
 run_acme_case "acme_path_of refuses a path three directories below /etc" \
-    "$(acme_line /etc/a/b/c/d)" 1 "is not a file two directories below /etc"
+    "$(acme_line /etc/a/b/c)" 1 "is not a file two directories below /etc"
 run_acme_case "acme_path_of answers a path two directories below /etc" \
-    "$(acme_line /etc/traefik/acme/acme.json)" 0 "/etc/traefik/acme/acme.json"
+    "$(acme_line /etc/traefik/acme)" 0 "/etc/traefik/acme/acme.json"
 
 # The registry fixture's own refusals, driven by a stub `docker` and `curl`. Every
 # answer is well-formed but for the one the case plants.

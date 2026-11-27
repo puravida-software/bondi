@@ -143,11 +143,44 @@ type deploy_input = {
 }
 [@@deriving yojson]
 
+(* The proxy the request declares, decoded once, or [None]. A domain is what
+   makes a service proxied: the router labels, blue-green's traffic switch and
+   the network all follow from it. The Traefik image and ACME email, which the
+   client sends with it, are what let the deploy converge the proxy itself;
+   without them the request adopts the Traefik already on the box, and
+   [converge] is [None]. Every decision about the proxy reads this one value, so
+   no place can take a domain alone for "no proxy" while another takes it for
+   one. *)
+type proxy_request = { domain_name : string; converge : Proxy.input option }
+
+let proxy_request (input : deploy_input) : proxy_request option =
+  Option.map
+    (fun domain_name ->
+      let converge =
+        match (input.traefik_image, input.traefik_acme_email) with
+        | Some image, Some acme_email ->
+            Some
+              {
+                Proxy.image;
+                domain_name;
+                acme_email;
+                acme_ca_server = input.traefik_acme_ca_server;
+                force_redeploy =
+                  Option.value ~default:false input.force_traefik_redeploy;
+              }
+        | None, _
+        | _, None ->
+            None
+      in
+      { domain_name; converge })
+    input.traefik_domain_name
+
 (* The workload alone: the proxy is converged by the deploy, ahead of this
    strategy and of every other. *)
 type deploy_context = { current_workload : Docker.Client.container option }
 
 type action =
+  | EnsureNetwork of { network_name : string }
   | StopAndRemoveContainer of Docker.Client.container
   | PullImage of { image : Image_reference.t; with_auth : bool }
   | RunWorkload of {
@@ -184,82 +217,98 @@ let router_middlewares_label name =
 
 (** The service's name, as checked, with the container config built for it. The
     name comes back with the config so that a caller needing both holds one that
-    cannot be missing. *)
+    cannot be missing. The Traefik labels are written only when a domain is
+    declared, and only then is a port required: without a proxy nothing routes
+    to the port, so the service keeps its [bondi.*] labels alone. *)
 let service_config (input : deploy_input) :
     (service_name * Docker.Client.container_config, string) result =
   match input.image with
   | None -> Error "image is required when deploying a service (got null)"
   | Some image -> (
-      match input.port with
-      | None -> Error "port is required when deploying a service (got null)"
-      | Some port -> (
-          match input.traefik_domain_name with
-          | None -> Error "missing traefik_domain_name for service labels"
-          | Some domain_name -> (
-              match input.service_name with
-              | None -> Error "service_name required when deploying a service"
-              | Some name ->
-                  let new_image = service_image_reference image in
-                  (* The service name, not the container name: blue-green
-                     starts the incoming colour under a temporary name. The
-                     router and its load-balancer service are named after it
-                     too, so two services behind one Traefik are two routers
-                     feeding two load balancers. The name was checked to be a
-                     router name at decode. *)
-                  let name_string = Bondi_common.Router_name.to_string name in
-                  let router = "traefik.http.routers." ^ name_string in
-                  (* Each service's router retries a request its old container
-                     refused while exiting, against the one still serving.
-                     A request a backend had read, in full or in part, is not
-                     retried, so none an application received is sent twice
-                     [observed -- 2026-11-22, traefik v3.6.8: a POST read in
-                     full and an upload cut off mid-body each answered 502 with
-                     no retry, and the other backend received nothing]. The
-                     interval
-                     is Traefik v3.6's documented default, 0 (retry at once),
-                     written out so a change of that default changes nothing
-                     here. Named after the service: two services sharing one
-                     name would declare one middleware twice. *)
-                  let retry =
-                    "traefik.http.middlewares." ^ name_string ^ "-retry"
-                  in
-                  let labels : string_map =
-                    [
-                      ("bondi.managed", "true");
-                      ("bondi.type", "service");
-                      ( "bondi.logs",
-                        string_of_bool (Option.value ~default:true input.logs)
-                      );
-                      ("traefik.enable", "true");
-                      ( router ^ ".rule",
-                        Printf.sprintf "Host(`%s`) || Host(`www.%s`)"
-                          domain_name domain_name );
-                      (router ^ ".entrypoints", "websecure");
-                      (router ^ ".tls", "true");
-                      (router ^ ".tls.certresolver", "bondi_resolver");
-                      (router_middlewares_label name, name_string ^ "-retry");
-                      (retry ^ ".retry.attempts", retry_attempts);
-                      (retry ^ ".retry.initialinterval", "0");
-                      ( "traefik.http.services." ^ name_string
-                        ^ ".loadbalancer.server.port",
-                        string_of_int port );
-                      ("bondi.name", name_string);
-                    ]
-                  in
-                  let env = Option.map env_vars_to_list input.env_vars in
-                  let config : Docker.Client.container_config =
-                    {
-                      image = Some new_image;
-                      env;
-                      cmd = None;
-                      entrypoint = None;
-                      hostname = None;
-                      working_dir = None;
-                      labels = Some labels;
-                      exposed_ports = None;
-                    }
-                  in
-                  Ok (name, config))))
+      match input.service_name with
+      | None -> Error "service_name required when deploying a service"
+      | Some name ->
+          let new_image = service_image_reference image in
+          (* The service name, not the container name: blue-green starts the
+             incoming colour under a temporary name. The router and its
+             load-balancer service are named after it too, so two services
+             behind one Traefik are two routers feeding two load balancers. The
+             name was checked to be a router name at decode. *)
+          let name_string = Bondi_common.Router_name.to_string name in
+          let* traefik_labels =
+            match proxy_request input with
+            | None ->
+                (* Docker merges an image's labels into the container's, and a
+                   label given at create replaces the image's of the same key
+                   [docs.docker.com/engine/manage-resources/labels/,
+                   Containers: "Override or add labels when starting a
+                   container"; observed -- 2026-11-22, Docker Engine 29.10.0].
+                   A Traefik on the box would otherwise route an image that
+                   ships [traefik.enable=true], reaching a service that is to
+                   be unreachable from outside. *)
+                Ok [ ("traefik.enable", "false") ]
+            | Some { domain_name; converge = _ } -> (
+                match input.port with
+                | None ->
+                    Error "port is required when deploying a service (got null)"
+                | Some port ->
+                    let router = "traefik.http.routers." ^ name_string in
+                    (* Each service's router retries a request its old
+                       container refused while exiting, against the one still
+                       serving. A request a backend had read, in full or in
+                       part, is not retried, so none an application received is
+                       sent twice [observed -- 2026-11-22, traefik v3.6.8: a
+                       POST read in full and an upload cut off mid-body each
+                       answered 502 with no retry, and the other backend
+                       received nothing]. The interval is Traefik v3.6's
+                       documented default, 0 (retry at once), written out so a
+                       change of that default changes nothing here. Named after
+                       the service: two services sharing one name would declare
+                       one middleware twice. *)
+                    let retry =
+                      "traefik.http.middlewares." ^ name_string ^ "-retry"
+                    in
+                    Ok
+                      [
+                        ("traefik.enable", "true");
+                        ( router ^ ".rule",
+                          Printf.sprintf "Host(`%s`) || Host(`www.%s`)"
+                            domain_name domain_name );
+                        (router ^ ".entrypoints", "websecure");
+                        (router ^ ".tls", "true");
+                        (router ^ ".tls.certresolver", "bondi_resolver");
+                        (router_middlewares_label name, name_string ^ "-retry");
+                        (retry ^ ".retry.attempts", retry_attempts);
+                        (retry ^ ".retry.initialinterval", "0");
+                        ( "traefik.http.services." ^ name_string
+                          ^ ".loadbalancer.server.port",
+                          string_of_int port );
+                      ])
+          in
+          let labels : string_map =
+            [
+              ("bondi.managed", "true");
+              ("bondi.type", "service");
+              ( "bondi.logs",
+                string_of_bool (Option.value ~default:true input.logs) );
+            ]
+            @ traefik_labels
+            @ [ ("bondi.name", name_string) ]
+          in
+          let env = Option.map env_vars_to_list input.env_vars in
+          let config : Docker.Client.container_config =
+            {
+              image = Some new_image;
+              env;
+              cmd = None;
+              entrypoint = None;
+              hostname = None;
+              working_dir = None;
+              labels = Some labels;
+              exposed_ports = None;
+            }
+          in
+          Ok (name, config))
 
 (* ------------------------------------------------------------------------- *)
 (* Phase 1: Gather context (read-only)                                       *)
@@ -282,16 +331,30 @@ let gather_context ~client ~net (input : deploy_input) :
 
 let workload_actions (input : deploy_input) (context : deploy_context) :
     (action list, string) result =
-  match input.traefik_domain_name with
+  match input.service_name with
   | None -> Ok []
   | Some _ -> (
       match input.image with
       | None ->
           Error
-            "image is required when deploying a service (traefik_domain_name \
-             is set but image is null)"
+            "image is required when deploying a service (service_name is set \
+             but image is null)"
       | Some image ->
           let* name, service_cfg = service_config input in
+          (* When the deploy converges a proxy it does so first and the proxy plan
+             creates the network. Otherwise, with no proxy declared or one
+             adopted from the box, nothing else on the deploy path does, and the service joins that network all the same, so its
+             plan makes sure of it before anything is pulled or stopped. *)
+          let network =
+            match proxy_request input with
+            | Some { converge = Some _; _ } -> []
+            | Some { converge = None; _ }
+            | None ->
+                [
+                  EnsureNetwork
+                    { network_name = Bondi_common.Defaults.network_name };
+                ]
+          in
           (* The pull comes before the stop, so a pull that fails leaves the
              old service running and the outage is only the stop, remove and
              start. It is planned on every service deploy: the reference parsed
@@ -303,8 +366,10 @@ let workload_actions (input : deploy_input) (context : deploy_context) :
             | Some container -> [ StopAndRemoveContainer container ]
           in
           Ok
-            (PullImage { image; with_auth = Option.is_some input.registry_user }
-             :: stop
+            (network
+            @ PullImage
+                { image; with_auth = Option.is_some input.registry_user }
+              :: stop
             @ [
                 RunWorkload
                   {
@@ -326,6 +391,11 @@ let plan (input : deploy_input) (context : deploy_context) :
 let interpret ~client ~net (actions : action list) : (unit, string) result =
   let rec run = function
     | [] -> Ok ()
+    | EnsureNetwork { network_name } :: rest ->
+        let* () =
+          Docker.Client.create_network_if_not_exists client ~net ~network_name
+        in
+        run rest
     | StopAndRemoveContainer container :: rest ->
         let* () =
           Docker.Client.stop_container client ~net ~container_id:container.id

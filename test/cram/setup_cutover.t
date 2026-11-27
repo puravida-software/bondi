@@ -78,9 +78,9 @@ chose.
   >   'docker --version') echo 'Docker version 27.0.0, build deadbeef' ;;
   >   'curl --version') echo 'curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0' ;;
   >   *BONDI_CRON_DOCKER_PRESENT*) echo 'BONDI_CRON_DOCKER_PRESENT /usr/bin/docker' ;;
-  >   *BONDI_ACME_PRESENT*) echo BONDI_ACME_PRESENT ;;
-  >   'sudo chown root:root /etc/traefik/acme/acme.json'*) : ;;
-  >   'docker network inspect'*) : ;;
+  >   *BONDI_ACME_PRESENT*) echo 'BONDI_ACME_PRESENT root:root 600' ;;
+  >   "sudo chown root:root '/etc/traefik/acme/acme.json'"*) : ;;
+  >   *BONDI_NETWORK_PRESENT*) echo BONDI_NETWORK_PRESENT ;;
   >   # The box's own account of its orchestrator, from the file this fixture
   >   # keeps that image in. The two reads are disjoint by construction: the
   >   # probe's format names a state and the version read's pattern is anchored
@@ -148,6 +148,10 @@ chose.
   >         user: deploy
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
+  > traefik:
+  >   domain_name: web.example.com
+  >   image: traefik:v3.6.8
+  >   acme_email: ops@example.com
   > bondi_server:
   >   version: "0.20.0"
   > cron_jobs:

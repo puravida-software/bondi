@@ -151,18 +151,30 @@ catch.
   0
   [1]
 
-A failed read never empties the table and never changes the exit code: the report
-is what an operator loses exactly when it is needed.
+A failed read never empties the table: the report is what an operator loses
+exactly when it is needed. An orchestrator that cannot answer, or a crontab that
+cannot be read, does not change the exit code either. The host's own container
+listing was taken, and that listing is what says what runs on the box, so the
+report above is an accurate account of it and the run says nothing on stderr.
 
-  $ bondi-client status > /dev/null 2>&1
+  $ bondi-client status > /dev/null 2> err.log
   $ echo $?
   0
+  $ cat err.log
 
 The affirmative arm on the same fixture. With SSH failing too, both sources say
 so on every row and no row disappears — a source that could not be consulted is a
 line, never a silence.
 
-  $ SSH_BROKEN=1 bondi-client status > out.log 2>&1
+This time the container listing could not be taken, so the report cannot say what
+runs on the box. The whole table is still printed, and then the run names the
+server it could not read on stderr and exits 1. That is the code a configuration
+that cannot be read also exits with, and the stderr line is what tells them apart.
+
+  $ SSH_BROKEN=1 bondi-client status > out.log 2> err.log
+  [1]
+  $ cat err.log
+  status could not read server 127.0.0.1: the host was not reached (255): Permission denied (publickey).
   $ sed -e 's/not reachable: .*/not reachable: <detail>/' -e 's/not read: .*/not read: <detail>/' out.log
   Server: 127.0.0.1
   
@@ -204,7 +216,7 @@ exits 255 comes back indistinguishable from ssh's own failure and is reported as
 the block above. The code here is 1, and the code is the whole of the
 difference between these two blocks.
 
-  $ SSH_DAEMON_DOWN=1 bondi-client status 2>&1 | sed 's/not reachable: .*/not reachable: <detail>/'
+  $ SSH_DAEMON_DOWN=1 bondi-client status 2> err.log | sed 's/not reachable: .*/not reachable: <detail>/'
   Server: 127.0.0.1
   
   Service
@@ -221,22 +233,37 @@ difference between these two blocks.
     bondi section          docker  not read: the read ran on the host and failed: command failed (1): Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?
     which cron jobs on server 127.0.0.1 are scheduled to run could not be read, and neither could which of them still hold their files: the listing ran on the host and failed: command failed (1): Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?
 
-The exit code is still zero, and the machine-readable form keeps the two apart
-in a field rather than in a sentence: on the same run, the two host readings say
-they could not be read and the two orchestrator readings say they could not be
-consulted.
+A host that answered the listing unreadably has not said what runs on it any more
+than one that was never reached, so this run exits 1 as well. Its stderr line
+words the failure the way the row does: the listing ran on the host and failed.
 
+  $ cat err.log
+  status could not read server 127.0.0.1: the container listing ran on the host and failed: command failed (1): Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?
   $ SSH_DAEMON_DOWN=1 bondi-client status > /dev/null 2>&1
-  $ echo $?
-  0
-  $ SSH_DAEMON_DOWN=1 bondi-client status --output json > out.json 2>&1
+  [1]
+
+The machine-readable form follows the same exit rule, and keeps the two failures
+apart in a field rather than in a sentence: on the same run, the two host
+readings say they could not be read and the two orchestrator readings say they
+could not be consulted. The stderr line stays on stderr, so the JSON on stdout
+is the report alone.
+
+  $ SSH_DAEMON_DOWN=1 bondi-client status --output json > out.json 2> err.log
+  [1]
   $ grep -c '"reason": "not_understood"' out.json
   2
   $ grep -c '"reason": "not_consulted"' out.json
   2
+  $ grep -c 'status could not read server' out.json
+  0
+  [1]
+  $ grep -c 'status could not read server 127.0.0.1' err.log
+  1
 
 A server with no ssh block in its configuration is a source that cannot be
-consulted, not an error: the run still exits zero and still prints its table.
+consulted, not a configuration this command refuses to read: the run still prints
+its table. Nothing could be listed on it, so it is also a server this run could
+not read, named on stderr, and the run exits 1.
 
   $ cat > bondi.yaml <<'EOF'
   > service:
@@ -250,7 +277,8 @@ consulted, not an error: the run still exits zero and still prints its table.
   > bondi_server:
   >   version: "0.10.3"
   > EOF
-  $ bondi-client status > out.log 2>&1
+  $ bondi-client status > out.log 2> err.log
+  [1]
   $ sed 's/not reachable: .*/not reachable: <detail>/' out.log | head -6
   Server: 127.0.0.1
   
@@ -258,9 +286,8 @@ consulted, not an error: the run still exits zero and still prints its table.
     NAME                   SOURCE  IMAGE                            TAG          STATUS        RESTARTS  HEALTH
     my-service             docker  not read: Missing ssh configuration for server 127.0.0.1
                            orch    not reachable: <detail>
-  $ bondi-client status > /dev/null 2>&1
-  $ echo $?
-  0
+  $ cat err.log
+  status could not read server 127.0.0.1: Missing ssh configuration for server 127.0.0.1
 
 The same report as JSON. A consumer of this is no more able to read a single
 reconciled value than a reader of the table: each source keeps its own object on

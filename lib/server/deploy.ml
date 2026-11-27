@@ -11,16 +11,12 @@ type deploy_response = {
 }
 [@@deriving yojson]
 
-type deployment_strategy = Simple | Blue_green
+type deployment_strategy = Bondi_common.Proxyless_strategy.t =
+  | Simple
+  | Blue_green
 
-let string_of_deployment_strategy = function
-  | Simple -> "simple"
-  | Blue_green -> "blue-green"
-
-let deployment_strategy_of_string = function
-  | "blue-green" -> Some Blue_green
-  | "simple" -> Some Simple
-  | _ -> None
+let string_of_deployment_strategy = Bondi_common.Proxyless_strategy.to_string
+let deployment_strategy_of_string = Bondi_common.Proxyless_strategy.of_string
 
 (* ------------------------------------------------------------------------- *)
 (* Pure helpers (testable)                                                   *)
@@ -333,28 +329,12 @@ let gather_box_names ~client ~net (input : Simple.deploy_input) :
       in
       Ok (managed_container_names containers, service_names_of containers)
 
-(* The proxy's input, when the request declares a proxy: a domain, a Traefik
-   image and an ACME email, which the client sends together or not at all. A
-   request without them converges no proxy, so there is nothing here that can
-   be missing and no proxy plan that can fail. *)
+(* The proxy's input, when the request carries all it takes to converge one.
+   It is read off [Simple.proxy_request], which the strategy choice and the
+   workload plan consult too. *)
 let proxy_input (input : Simple.deploy_input) : Proxy.input option =
-  match
-    (input.traefik_image, input.traefik_domain_name, input.traefik_acme_email)
-  with
-  | Some image, Some domain_name, Some acme_email ->
-      Some
-        {
-          Proxy.image;
-          domain_name;
-          acme_email;
-          acme_ca_server = input.traefik_acme_ca_server;
-          force_redeploy =
-            Option.value ~default:false input.force_traefik_redeploy;
-        }
-  | None, _, _
-  | _, None, _
-  | _, _, None ->
-      None
+  Option.bind (Simple.proxy_request input) (fun request ->
+      request.Simple.converge)
 
 (* The proxy is a property of the box, not of how the service is rolled
    forward, so it is converged here, from the request, under every strategy. *)
@@ -566,6 +546,48 @@ let auto_selection (inspect : Docker.Client.image_inspect_response) =
 
 let auto_strategy inspect = fst (auto_selection inspect)
 
+(* Decided from the request alone, so every refusal is made before the image is
+   pulled; only [auto] with a proxy waits for the image. Without a domain there
+   is no router for blue-green to repoint, so declaring it is refused and [auto]
+   is simple, whatever the image's health check says. An unknown strategy keeps
+   the class and wording it had before this was a function of its own. *)
+let strategy_choice (input : Simple.deploy_input) :
+    ( Docker.Client.image_inspect_response -> deployment_strategy * string,
+      Handler_error.t )
+    result =
+  let* declared =
+    match input.deployment_strategy with
+    | None -> Ok None
+    | Some s -> (
+        match deployment_strategy_of_string s with
+        | None ->
+            Error
+              (Handler_error.Orchestrator_failure
+                 (Printf.sprintf
+                    "unknown deployment_strategy: %s (valid values: %s)" s
+                    Bondi_common.Proxyless_strategy.valid_values))
+        | Some declared -> Ok (Some declared))
+  in
+  let domain =
+    Option.map
+      (fun (request : Simple.proxy_request) -> request.domain_name)
+      (Simple.proxy_request input)
+  in
+  let refusal =
+    Option.bind declared (fun strategy ->
+        Bondi_common.Proxyless_strategy.blue_green_refusal
+          ~service:
+            (Option.map Bondi_common.Router_name.to_string input.service_name)
+          ~domain strategy)
+  in
+  match (refusal, declared, domain) with
+  | Some sentence, _, _ -> Error (Handler_error.Invalid_request sentence)
+  | None, Some declared, _ ->
+      Ok (fun _ -> (declared, "configured in bondi.yaml"))
+  | None, None, None ->
+      Ok (fun _ -> (Simple, Bondi_common.Proxyless_strategy.no_proxy_reason))
+  | None, None, Some _ -> Ok auto_selection
+
 let try_pull_main_image ~client ~net input =
   match input.Simple.image with
   | None -> Error "image is required for service deployment"
@@ -581,42 +603,39 @@ let try_pull_main_image ~client ~net input =
    whether or not the request declares a strategy, because the label check needs
    it either way, so [pull_plan] is told the workload is already pulled. An
    inspect that fails is not folded into a strategy: it fails the deploy, as the
-   label check would have on the same error. A declared strategy that is not one
-   is refused before the pull, so nothing is fetched for a request that cannot
-   run. *)
+   label check would have on the same error. Every refusal [strategy_choice]
+   makes, a declared strategy that is not one and blue-green with no proxy, is
+   made before the pull, so nothing is fetched for a request that cannot run. *)
 type image_gather = {
   selected : deployment_strategy;
   selection_reason : string;
   image_inspect : Docker.Client.image_inspect_response;
 }
 
-let gather_image ~clock ~client ~net input : (image_gather, string) result =
-  let* declared =
-    match input.Simple.deployment_strategy with
-    | None -> Ok None
-    | Some s -> (
-        match deployment_strategy_of_string s with
-        | None ->
-            Error
-              (Printf.sprintf
-                 "unknown deployment_strategy: %s (valid values: blue-green, \
-                  simple)"
-                 s)
-        | Some declared -> Ok (Some declared))
-  in
-  let* () = try_pull_main_image ~client ~net input in
-  match input.image with
-  | None -> Error "image is required for service deployment"
+(* Everything below the plan is Bondi acting on the caller's behalf, so a
+   failure there is Bondi's fault by construction. [cron_plan],
+   [strategy_choice] and [image_label_check] are the steps in [deploy] that can
+   fail on what the caller supplied, and each classifies its own error;
+   [decode_input] refused the rest before [deploy] was called. *)
+let orchestrator_step result =
+  Result.map_error (fun m -> Handler_error.Orchestrator_failure m) result
+
+let gather_image ~clock ~client ~net input :
+    (image_gather, Handler_error.t) result =
+  let* choose = strategy_choice input in
+  let* () = orchestrator_step (try_pull_main_image ~client ~net input) in
+  match input.Simple.image with
+  | None ->
+      Error
+        (Handler_error.Orchestrator_failure
+           "image is required for service deployment")
   | Some image ->
       let* inspect =
-        Docker.Client.inspect_image client ~net ~clock
-          ~image:(Image_reference.to_string image)
+        orchestrator_step
+          (Docker.Client.inspect_image client ~net ~clock
+             ~image:(Image_reference.to_string image))
       in
-      let strategy, strategy_reason =
-        match declared with
-        | Some declared -> (declared, "configured in bondi.yaml")
-        | None -> auto_selection inspect
-      in
+      let strategy, strategy_reason = choose inspect in
       Ok
         {
           selected = strategy;
@@ -711,14 +730,6 @@ let converge_traefik_restart_policy ~clock ~client ~net ~current_traefik input :
 let converge_proxy ~clock ~client ~net ~current_traefik input :
     (unit, string) result =
   Proxy.interpret ~clock ~client ~net (proxy_plan input ~current_traefik)
-
-(* Everything below the plan is Bondi acting on the caller's behalf, so a
-   failure there is Bondi's fault by construction. [cron_plan] and
-   [image_label_check] are the steps in [deploy] that can fail on what the
-   caller supplied, and each classifies its own error; [decode_input] refused
-   the rest before [deploy] was called. *)
-let orchestrator_step result =
-  Result.map_error (fun m -> Handler_error.Orchestrator_failure m) result
 
 (* Bondi writes the router's middlewares itself, to give it the retry
    middleware, and a label set at create replaces the image's [observed --
@@ -844,9 +855,7 @@ let deploy ~clock ~net input : (deploy_response, Handler_error.t) result =
       match input.Simple.service_name with
       | None -> Ok (Simple, "cron-only deploy", None)
       | Some _ ->
-          let* gathered =
-            orchestrator_step (gather_image ~clock ~client ~net input)
-          in
+          let* gathered = gather_image ~clock ~client ~net input in
           Ok
             ( gathered.selected,
               gathered.selection_reason,

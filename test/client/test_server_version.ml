@@ -230,6 +230,33 @@ let test_journald_capture_unreadable_version_refuses () =
     (refused_by Server_version.captures_cron_to_journald
        ~gate_name:"captures_cron_to_journald" "latest")
 
+(* The proxy-less floor is the release that deploys a service with no domain.
+   The release before it is refused, naming both, and the floor and everything
+   above it are accepted, so the refusal is the boundary's and not a gate that
+   refuses everything. *)
+let test_proxyless_refuses_0_31_naming_0_32_0 () =
+  let msg =
+    refused_by Server_version.deploys_proxyless_service
+      ~gate_name:"deploys_proxyless_service" "0.31.0"
+  in
+  names ~what:"the version it refused" "0.31.0" msg;
+  names ~what:"what is required" "0.32.0" msg;
+  names ~what:"the field to set" "bondi_server.version" msg
+
+let test_proxyless_accepts_0_32_0_and_above () =
+  List.iter
+    (fun version ->
+      accepted_by Server_version.deploys_proxyless_service
+        ~gate_name:"deploys_proxyless_service" version)
+    [
+      Server_version.minimum_for_proxyless_service; "0.32.0"; "0.32.3"; "1.0.0";
+    ]
+
+let test_proxyless_unreadable_version_refuses () =
+  names ~what:"what is required" "0.32.0"
+    (refused_by Server_version.deploys_proxyless_service
+       ~gate_name:"deploys_proxyless_service" "latest")
+
 let () =
   Alcotest.run "Server_version"
     [
@@ -284,5 +311,14 @@ let () =
             test_journald_capture_accepts_0_25_0_and_above;
           Alcotest.test_case "an unreadable version is a refusal" `Quick
             test_journald_capture_unreadable_version_refuses;
+        ] );
+      ( "deploys_proxyless_service",
+        [
+          Alcotest.test_case "0.31 is refused, naming 0.32.0" `Quick
+            test_proxyless_refuses_0_31_naming_0_32_0;
+          Alcotest.test_case "0.32.0 and above are accepted" `Quick
+            test_proxyless_accepts_0_32_0_and_above;
+          Alcotest.test_case "an unreadable version is a refusal" `Quick
+            test_proxyless_unreadable_version_refuses;
         ] );
     ]

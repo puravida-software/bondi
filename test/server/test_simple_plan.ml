@@ -44,6 +44,8 @@ let input_with_registry =
   }
 
 let action_string = function
+  | Simple.EnsureNetwork { network_name } ->
+      "EnsureNetwork(" ^ network_name ^ ")"
   | Simple.StopAndRemoveContainer _ -> "StopAndRemoveContainer"
   | Simple.PullImage { image; with_auth } ->
       "PullImage("
@@ -66,8 +68,12 @@ let test_plan_empty_context_no_traefik () =
   match Simple.plan input context with
   | Error _ -> Alcotest.fail "plan should succeed with valid input"
   | Ok actions ->
-      check (list string) "no traefik setup actions"
-        [ "PullImage(myapp:v1,false)"; "RunWorkload(my-service)" ]
+      check (list string) "no traefik setup actions, and the network is made"
+        [
+          "EnsureNetwork(bondi-network)";
+          "PullImage(myapp:v1,false)";
+          "RunWorkload(my-service)";
+        ]
         (List.map action_string actions)
 
 (* A declared proxy is not this strategy's to converge: the deploy converges it
@@ -91,6 +97,7 @@ let test_plan_with_existing_workload () =
         List.exists
           (function
             | Simple.StopAndRemoveContainer _ -> true
+            | Simple.EnsureNetwork _
             | Simple.PullImage _
             | Simple.RunWorkload _ ->
                 false)
@@ -112,12 +119,14 @@ let position_of matches actions =
 let is_pull_of ~image = function
   | Simple.PullImage { image = pulled; _ } ->
       Image_reference.to_string pulled = image
+  | Simple.EnsureNetwork _
   | Simple.StopAndRemoveContainer _
   | Simple.RunWorkload _ ->
       false
 
 let is_run_workload = function
   | Simple.RunWorkload _ -> true
+  | Simple.EnsureNetwork _
   | Simple.StopAndRemoveContainer _
   | Simple.PullImage _ ->
       false
@@ -125,6 +134,7 @@ let is_run_workload = function
 let is_stop_of ~container_id = function
   | Simple.StopAndRemoveContainer container ->
       container.Docker.id = container_id
+  | Simple.EnsureNetwork _
   | Simple.PullImage _
   | Simple.RunWorkload _ ->
       false
@@ -188,6 +198,7 @@ let test_registry_port_reference_pulls_before_stop () =
           (function
             | Simple.PullImage { image; _ } ->
                 Some (Image_reference.name image, Image_reference.pull_tag image)
+            | Simple.EnsureNetwork _
             | Simple.StopAndRemoveContainer _
             | Simple.RunWorkload _ ->
                 None)
@@ -219,40 +230,17 @@ let test_plan_with_registry_auth () =
       match pull with
       | Some (Simple.PullImage { with_auth; _ }) ->
           check bool "PullImage uses auth" true with_auth
+      | Some (Simple.EnsureNetwork _)
       | Some (Simple.StopAndRemoveContainer _)
       | Some (Simple.RunWorkload _)
       | None ->
           Alcotest.fail "expected PullImage with auth")
 
-let test_plan_cron_only_skips_workload () =
-  let input =
-    {
-      minimal_input with
-      traefik_domain_name = None;
-      traefik_image = Some (Test_helpers.image_reference "traefik:v3");
-      traefik_acme_email = Some "a@b.com";
-    }
-  in
-  let context = { Simple.current_workload = None } in
-  match Simple.plan input context with
-  | Error _ -> Alcotest.fail "plan should succeed for cron-only (no workload)"
-  | Ok actions ->
-      let has_workload =
-        List.exists
-          (function
-            | Simple.PullImage _
-            | Simple.RunWorkload _ ->
-                true
-            | Simple.StopAndRemoveContainer _ -> false)
-          actions
-      in
-      check bool "no workload actions when traefik_domain_name is None" false
-        has_workload
-
 let extract_workload_labels actions =
   List.find_map
     (function
       | Simple.RunWorkload { config; _ } -> config.labels
+      | Simple.EnsureNetwork _
       | Simple.StopAndRemoveContainer _
       | Simple.PullImage _ ->
           None)
@@ -262,10 +250,165 @@ let extract_workload_host_config actions =
   List.find_map
     (function
       | Simple.RunWorkload { host_config; _ } -> Some host_config
+      | Simple.EnsureNetwork _
       | Simple.StopAndRemoveContainer _
       | Simple.PullImage _ ->
           None)
     actions
+
+let planned_actions input context =
+  match Simple.plan input context with
+  | Error e -> Alcotest.fail ("plan failed: " ^ e)
+  | Ok actions -> actions
+
+let planned_label_list input context =
+  match extract_workload_labels (planned_actions input context) with
+  | None -> Alcotest.fail "expected labels on workload container"
+  | Some labels -> labels
+
+(* The same service as [minimal_input] with no [traefik:] block: the three proxy
+   fields are sent together or not at all, so all three are absent. *)
+let proxyless_input =
+  {
+    minimal_input with
+    traefik_domain_name = None;
+    traefik_image = None;
+    traefik_acme_email = None;
+  }
+
+let running_workload_context =
+  {
+    Simple.current_workload =
+      Some (mock_container ~id:"workload-1" ~image:"myapp:v0.9");
+  }
+
+(* A service with no proxy is still a service: its running container is
+   replaced, on a network the plan makes sure of first, since nothing else on
+   the deploy path creates it when no proxy is declared. The affirmative arm is
+   the same service behind a proxy, whose router labels are written and whose
+   network is the proxy's to create. *)
+let test_proxyless_plans_replacement () =
+  check (list string) "a proxy-less service is replaced"
+    [
+      "EnsureNetwork(bondi-network)";
+      "PullImage(myapp:v1,false)";
+      "StopAndRemoveContainer";
+      "RunWorkload(my-service)";
+    ]
+    (List.map action_string
+       (planned_actions proxyless_input running_workload_context));
+  let labels = planned_label_list proxyless_input running_workload_context in
+  check (list string) "no Traefik label but the one that opts out"
+    [ "traefik.enable" ]
+    (List.filter
+       (fun key -> String.starts_with ~prefix:"traefik." key)
+       (List.map fst labels));
+  check (option string)
+    "Traefik is told to leave it alone, whatever its image labels say"
+    (Some "false")
+    (List.assoc_opt "traefik.enable" labels);
+  check bool "bondi.type=service" true
+    (List.mem ("bondi.type", "service") labels);
+  check (option string) "bondi.name is the service name" (Some "my-service")
+    (List.assoc_opt "bondi.name" labels);
+  check (list string) "behind a proxy, the network is not this plan's"
+    [
+      "PullImage(myapp:v1,false)";
+      "StopAndRemoveContainer";
+      "RunWorkload(my-service)";
+    ]
+    (List.map action_string
+       (planned_actions minimal_input running_workload_context));
+  check (option string) "behind a proxy, Traefik is enabled" (Some "true")
+    (List.assoc_opt "traefik.enable"
+       (planned_label_list minimal_input running_workload_context))
+
+(* A request with a domain but no Traefik image or email adopts the Traefik the
+   box has: its router is written, and since no proxy plan runs to create the
+   network, this plan makes sure of it, as it does for a service with no proxy
+   at all. The affirmative arm is the complete set, whose proxy plan creates the
+   network. *)
+let test_domain_without_image_ensures_the_network () =
+  let domain_only = { minimal_input with traefik_image = None } in
+  check (list string) "the network is made"
+    [
+      "EnsureNetwork(bondi-network)";
+      "PullImage(myapp:v1,false)";
+      "StopAndRemoveContainer";
+      "RunWorkload(my-service)";
+    ]
+    (List.map action_string
+       (planned_actions domain_only running_workload_context));
+  check (option string) "its router is still written" (Some "true")
+    (List.assoc_opt "traefik.enable"
+       (planned_label_list domain_only running_workload_context));
+  check (list string) "the complete set leaves the network to the proxy plan"
+    [
+      "PullImage(myapp:v1,false)";
+      "StopAndRemoveContainer";
+      "RunWorkload(my-service)";
+    ]
+    (List.map action_string
+       (planned_actions minimal_input running_workload_context))
+
+(* Nothing outside the box reaches a proxy-less service: no port is exposed or
+   bound on the host, and the one network it joins is Bondi's. *)
+let test_proxyless_publishes_nothing () =
+  match
+    List.find_map
+      (function
+        | Simple.RunWorkload { config; host_config; networking_conf; _ } ->
+            Some (config, host_config, networking_conf)
+        | Simple.EnsureNetwork _
+        | Simple.StopAndRemoveContainer _
+        | Simple.PullImage _ ->
+            None)
+      (planned_actions proxyless_input running_workload_context)
+  with
+  | None -> Alcotest.fail "expected a RunWorkload action"
+  | Some (config, host_config, networking_conf) ->
+      check (option (list string)) "no exposed port" None config.exposed_ports;
+      check bool "no host port binding" true
+        (Option.is_none host_config.port_bindings);
+      check
+        (option (list string))
+        "bondi-network is its one endpoint" (Some [ "bondi-network" ])
+        (Option.map (List.map fst) networking_conf.endpoints_config)
+
+(* Without a proxy the port is used for nothing, so a service may leave it out
+   and is planned as one that declares it. Behind a proxy it names the port the
+   router sends to, so leaving it out is still refused. *)
+let test_proxyless_without_port () =
+  check (list string) "the same replacement without a port"
+    [
+      "EnsureNetwork(bondi-network)";
+      "PullImage(myapp:v1,false)";
+      "StopAndRemoveContainer";
+      "RunWorkload(my-service)";
+    ]
+    (List.map action_string
+       (planned_actions
+          { proxyless_input with port = None }
+          running_workload_context));
+  match Simple.service_config { minimal_input with port = None } with
+  | Ok _ -> Alcotest.fail "a proxied service with no port was accepted"
+  | Error msg ->
+      check bool
+        ("the refusal names the port: " ^ msg)
+        true
+        (Bondi_common.String_utils.contains ~needle:"port is required" msg)
+
+(* A deploy is cron-only when it names no service, whatever else it carries.
+   The affirmative arm is the same payload naming its service. *)
+let test_cron_only_is_no_service () =
+  let cron_only = { minimal_input with service_name = None } in
+  check (list string) "no workload action when no service is named" []
+    (List.map action_string
+       (planned_actions cron_only { Simple.current_workload = None }));
+  check (list string) "the same payload naming its service deploys it"
+    [ "PullImage(myapp:v1,false)"; "RunWorkload(my-service)" ]
+    (List.map action_string
+       (planned_actions minimal_input { Simple.current_workload = None }))
 
 let check_planned_restart_policy msg (host_config : Docker.host_config) =
   match host_config.restart_policy with
@@ -449,8 +592,8 @@ let planned_labels_for service_name =
       | Some labels -> labels)
 
 (* The router names its own retry middleware, and the middleware is declared on
-   the same container. Four attempts is the count the swap measurements settled
-   on (feature 0041, NFR-1, Step B).
+   the same container. Four attempts is the count the swap measurements of
+   2026-11-23 settled on (recorded beside [Simple.retry_attempts]).
    The interval is Traefik v3.6's documented default, 0 (retry at once, no
    backoff), which is what those swaps ran with since they left it unset; it is
    written out so a later change of Traefik's default does not change it. *)
@@ -539,8 +682,19 @@ let () =
         ] );
       ( "validation",
         [
-          test_case "skips workload when traefik_domain_name is None" `Quick
-            test_plan_cron_only_skips_workload;
+          test_case "a payload naming no service is cron-only" `Quick
+            test_cron_only_is_no_service;
+        ] );
+      ( "proxy-less",
+        [
+          test_case "plans the replacement" `Quick
+            test_proxyless_plans_replacement;
+          test_case "publishes nothing" `Quick test_proxyless_publishes_nothing;
+          test_case "a domain without an image ensures the network" `Quick
+            test_domain_without_image_ensures_the_network;
+          Alcotest.test_case "a domain without an image ensures the network"
+            `Quick test_domain_without_image_ensures_the_network;
+          test_case "without a port" `Quick test_proxyless_without_port;
         ] );
       ( "restart policy",
         [

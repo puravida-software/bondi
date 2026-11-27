@@ -41,8 +41,9 @@ val deploy_response_to_yojson : deploy_response -> Yojson.Safe.t
 (** Encode a deploy response for the wire. *)
 
 (** How the workload is rolled forward. The request may declare one; when it
-    does not, the presence of a [HEALTHCHECK] on the image decides, because
-    blue-green has nothing to wait for without one. *)
+    does not, a service with no proxy is {!Simple}, and otherwise the presence
+    of a [HEALTHCHECK] on the image decides, because blue-green has nothing to
+    wait for without one. See {!strategy_choice}. *)
 type deployment_strategy =
   | Simple
       (** Pull the new image, then stop the old container and start the new one,
@@ -68,6 +69,26 @@ val auto_selection :
     first word is neither a probe, [NONE] nor empty selects {!Simple} under a
     reason that names the word, and is not reported as the image having no
     [HEALTHCHECK]. *)
+
+val strategy_choice :
+  Strategy.Simple.deploy_input ->
+  ( Docker.Client.image_inspect_response -> deployment_strategy * string,
+    Handler_error.t )
+  result
+(** The strategy a service deploy runs under, and the reason the response gives
+    for it. It is decided from the request first and from the image second, so
+    the result is either a refusal or the choice still to be applied to the
+    image's inspect: every refusal is made before the image is pulled, and no
+    refusal can depend on what the image declares.
+
+    A declared strategy runs as declared, for the reason
+    ["configured in bondi.yaml"], except blue-green on a request with no
+    [traefik_domain_name]: blue-green switches traffic through the proxy, so
+    with none it is refused as [Invalid_request], naming the service. Left to
+    choose, a request with no domain is {!Simple} for the reason
+    ["no traefik: block"], whatever the image's health check, and one with a
+    domain is {!auto_selection} of the image. A declared strategy that is not
+    one is refused as [Orchestrator_failure], naming it. *)
 
 val deployment_strategy_of_string : string -> deployment_strategy option
 (** Read the strategy a request declared. [None] for anything else, which
@@ -319,14 +340,16 @@ val deploy :
     rather than passed in because the registry credentials it carries come out
     of the request.
 
-    Of the steps inside it, two can answer [Invalid_request], because they fail
-    on what the caller supplied: the cron plan, and {!image_label_check} on the
-    image the caller built. Everything else is Bondi acting on the caller's
-    behalf, so its failures are [Orchestrator_failure] by construction, and an
-    exception escaping a gather or a strategy is reported as one too rather than
-    escaping into the transport. [Eio.Cancel.Cancelled] is the exception to
-    that: it propagates rather than being classified, because a cancelled fiber
-    that returned a value would break structured concurrency.
+    Of the steps inside it, three can answer [Invalid_request], because they
+    fail on what the caller supplied: the cron plan, {!strategy_choice} on a
+    service declaring blue-green with no proxy, made before anything is pulled,
+    and {!image_label_check} on the image the caller built. Everything else is
+    Bondi acting on the caller's behalf, so its failures are
+    [Orchestrator_failure] by construction, and an exception escaping a gather
+    or a strategy is reported as one too rather than escaping into the
+    transport. [Eio.Cancel.Cancelled] is the exception to that: it propagates
+    rather than being classified, because a cancelled fiber that returned a
+    value would break structured concurrency.
 
     The other refusals of what the caller wrote, a body that does not decode and
     an image reference that does not parse, are {!decode_input}'s, made before

@@ -35,6 +35,10 @@ Deploy with valid target but no servers.
   >   registry_pass: null
   >   env_vars: {}
   >   servers: []
+  > traefik:
+  >   domain_name: web.example.com
+  >   image: traefik:v3.6.8
+  >   acme_email: ops@example.com
   > bondi_server:
   >   version: "0.1.0"
   > EOF
@@ -56,6 +60,10 @@ reaches anything the file is about.
   >   registry_pass: null
   >   env_vars: {}
   >   servers: []
+  > traefik:
+  >   domain_name: web.example.com
+  >   image: traefik:v3.6.8
+  >   acme_email: ops@example.com
   > bondi_server:
   >   version: "0.1.0"
   >   bind_address: "0.0.0.0"
@@ -63,6 +71,18 @@ reaches anything the file is about.
   > EOF
   $ bondi-client deploy web:v1 2>&1
   Deployment process initiated...
+  bondi_server.bind_address is set to 0.0.0.0 and no longer does anything: the orchestrator serves no HTTP, so there is no socket to bind. Remove it from bondi.yaml.
+  bondi_server.api_token is set and no longer does anything: the orchestrator serves no HTTP, so there is no request to authenticate. Remove it from bondi.yaml, and rotate it if it was ever a real secret -- a credential that sat in a configuration file is compromised whether or not anything still reads it.
+  Error: no servers configured. Add servers to bondi.yaml under service or each cron job.
+  [1]
+
+The notices are written to stderr. Stdout carries none of them, so whatever
+reads a deploy's stdout reads only what the deploy did.
+
+  $ bondi-client deploy web:v1 2>/dev/null
+  Deployment process initiated...
+  [1]
+  $ bondi-client deploy web:v1 >/dev/null
   bondi_server.bind_address is set to 0.0.0.0 and no longer does anything: the orchestrator serves no HTTP, so there is no socket to bind. Remove it from bondi.yaml.
   bondi_server.api_token is set and no longer does anything: the orchestrator serves no HTTP, so there is no request to authenticate. Remove it from bondi.yaml, and rotate it if it was ever a real secret -- a credential that sat in a configuration file is compromised whether or not anything still reads it.
   Error: no servers configured. Add servers to bondi.yaml under service or each cron job.
@@ -202,6 +222,10 @@ relative one mean the run never got that far.
   >         user: deploy
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
+  > traefik:
+  >   domain_name: web.example.com
+  >   image: traefik:v3.6.8
+  >   acme_email: ops@example.com
   > bondi_server:
   >   version: "0.20.0"
   > EOF

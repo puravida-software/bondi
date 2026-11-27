@@ -10,9 +10,9 @@
 # because a subcommand that works under `dune exec` and not in the image is a
 # subcommand nobody can call.
 #
-# Twenty-four assertions. The first seven, with 6a and 6b, are reached with
+# Twenty-five assertions. The first seven, with 6a and 6b, are reached with
 # `docker exec` into a container started from the image passed in by the exact
-# command the client produces; 7a and the eighth to thirteenth, with 9a, 9b, 9c, 11a, 12a, 12b and 13a, are deploys
+# command the client produces; 7a, 7b and the eighth to thirteenth, with 9a, 9b, 9c, 11a, 12a, 12b and 13a, are deploys
 # sent through that same container and judged from outside it, by container id;
 # the fourteenth is asked from outside,
 # because stopping a container is not a thing the container can be asked to do
@@ -50,6 +50,15 @@
 #      Traefik, that Traefik is issued the host's certificate by this run's
 #      Pebble, and a request through it is answered by the new container, by
 #      id. The arm then removes what the deploy created.
+#  7b. a deploy of a service that declares no proxy, `arm_proxyless`, run after
+#      7a on the same fresh engine: with no strategy named, an image that
+#      declares a health check deploys under `simple`, giving that reason; the
+#      server creates the network and no Traefik; the next tag replaces the
+#      container, by id; the container carries `bondi.type=service` and no
+#      `traefik.` label, is reached by name from a container on the network,
+#      and publishes no host port. The same service asking for blue-green exits
+#      2 naming the service, and its container, by id, still runs. The arm then
+#      removes what the deploys created.
 #   8. a `simple` deploy, `arm_simple`. A service is deployed
 #      at one tag and then at the next, into a network, a Traefik and a local
 #      registry this script starts itself and tears down after: the new

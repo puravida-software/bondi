@@ -103,6 +103,7 @@ type site =
   | Alloy_env_mode
   | Orchestrator_restart_policy
   | Journal_storage
+  | Acme_file_permissions
 
 type correction
 (** One thing a run's read-back had to say: a divergence it found and corrected,
@@ -158,6 +159,13 @@ val env_mode_corrected : found:Host_answer.t -> applied:string -> correction
     which this run left at [applied]. Its path is derived from the site, as the
     config file's is. *)
 
+val acme_permissions_corrected :
+  found:Host_answer.t -> applied:string -> correction
+(** Traefik's ACME file, whose owner and mode the host reported as [found] and
+    which this run left at [applied]. Both are one answer, [owner:group mode],
+    because setup sets them with one command and reads them back with one stat.
+    The path is derived from the site, as every subject is. *)
+
 val journal_storage_provisioned : correction
 (** The host journal under {!Alloy_run_args.journal_path}, which the host held
     in memory and which this run left stored persistently.
@@ -186,20 +194,21 @@ val unreadable_reading : site:site -> detail:string -> correction
     bound a property of the whole account rather than of one of its registers.
 *)
 
+val corrected_site : correction -> site option
+(** The site a correction was made at, or [None] for a reading that could not be
+    taken, which corrected nothing. It is how a correction is counted among the
+    changes a run made without this module saying what a change is. *)
+
 val corrections_report : server:string -> correction list -> string list
-(** What a run says it changed on one server.
+(** What a run says it read back and corrected on one server, one line per
+    entry, in the order given.
 
     One line per entry — each is a distinct fact about the box's posture,
     discovered separately, and collapsing two of them into one would throw away
-    the values the line exists to print. One line saying nothing diverged
-    whenever no entry is a correction, so an empty account and an account never
-    taken do not read alike, and so a run that could only say it was unable to
-    look is not read as one that found agreement, which is the same reason
-    {!failure_message} says "no phase was skipped" rather than omitting the
-    sentence. That sentence says only that the list was empty and nothing about
-    why: a run that found a divergence and failed before it could correct it
-    prints it too, so a clause reading the emptiness as agreement would
-    contradict the failure printed beside it.
+    the values the line exists to print. An empty account is no lines at all:
+    what the run says about itself as a whole, including that it changed
+    nothing, is the closing line the caller prints after these, worded over
+    every change the run made and not over its corrections alone.
 
     [server] is named here, in the sentences this module owns, for the reason
     {!failure_message} names it here: the caller prints every server's account
