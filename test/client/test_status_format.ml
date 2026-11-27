@@ -79,7 +79,7 @@ let mk_service name : Config_file.user_service =
   {
     name = Test_helpers.router_name name;
     image = Test_helpers.image_reference "ghcr.io/org/myapp";
-    port = 8080;
+    port = Some 8080;
     registry_user = None;
     registry_pass = None;
     env_vars = [];

@@ -146,7 +146,10 @@ let traefik_acme_ca_server_to_yojson = Bondi_common.Acme_ca_server.to_yojson
 type user_service = {
   name : service_name;
   image : service_image;
-  port : int;
+  (* The port Traefik routes the domain to. Without [traefik:] nothing routes
+     to it and no host port is published, so it may be left out there; with
+     [traefik:] its absence is refused by [validate_service_port]. *)
+  port : int option; [@default None]
   registry_user : string option; [@default None]
   registry_pass : string option; [@default None]
   env_vars : string_map;
@@ -394,7 +397,8 @@ let read_file path =
     close_in ic;
     Ok contents
   with
-  | exn -> Error (Printexc.to_string exn)
+  (* The two the reads raise; an [Out_of_memory] is not a config error. *)
+  | (Sys_error _ | End_of_file) as exn -> Error (Printexc.to_string exn)
 
 let env_map () =
   let entries = Unix.environment () |> Array.to_list in
@@ -434,6 +438,23 @@ let ensure_service_key = ensure_optional_key "service"
 let ensure_traefik_key = ensure_optional_key "traefik"
 let ensure_alloy_key = ensure_optional_key "alloy"
 let ensure_managed_containers_key = ensure_optional_key "managed_containers"
+
+(* With [traefik:] the service's port is the one its router sends traffic to,
+   so a service without one could be deployed and never answer its domain. The
+   decode reads the field as optional, which it is without a proxy, and this
+   pass restores the requirement where it holds, naming the field. A manifest
+   with [traefik:] and no service routes nothing and needs no port. *)
+let validate_service_port config =
+  match (config.traefik, config.user_service) with
+  | Some _, Some { port = None; _ } ->
+      Error
+        "invalid bondi.yaml: service.port is required when traefik: is \
+         declared: it is the port Traefik routes the domain to"
+  | Some _, Some { port = Some _; _ }
+  | Some _, None
+  | None, Some _
+  | None, None ->
+      Ok config
 
 let validate_alloy_collect config =
   match config.alloy with
@@ -594,6 +615,7 @@ let read () =
             of_yojson json
             |> Result.map_error (fun msg -> "invalid bondi.yaml: " ^ msg)
           in
+          let* config = validate_service_port config in
           let* config = validate_alloy_collect config in
           let* config = validate_alloy_credentials config in
           let* config = validate_cron_job_names config in

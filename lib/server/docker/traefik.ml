@@ -76,7 +76,7 @@ let docker_port_bindings : Client.port_bindings =
 let docker_binds =
   [
     "/var/run/docker.sock:/var/run/docker.sock";
-    "/etc/traefik/acme/acme.json:/acme/acme.json";
+    Bondi_common.Defaults.acme_file_path ^ ":/acme/acme.json";
   ]
 
 let get_docker_config (config : config) : docker_config =

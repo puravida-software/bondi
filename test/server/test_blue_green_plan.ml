@@ -124,6 +124,8 @@ let test_plan_success_path_no_existing_workload () =
    blue-green's plan settles before its stop (the affirmative arm) and simple's
    plan is the pull, the stop and the run, with nothing between. *)
 let simple_action_string = function
+  | Simple.EnsureNetwork { network_name } ->
+      "EnsureNetwork(" ^ network_name ^ ")"
   | Simple.PullImage { image; _ } ->
       "PullImage(" ^ Bondi_common.Image_reference.to_string image ^ ")"
   | Simple.StopAndRemoveContainer container ->
@@ -143,6 +145,7 @@ let test_settle_is_blue_green_only () =
   | Ok actions ->
       check (list string) "simple: pull, stop, run, and no settle"
         [
+          "EnsureNetwork(bondi-network)";
           "PullImage(myapp:v1)";
           "StopAndRemoveContainer(old-container-id)";
           "RunWorkload(my-service)";
@@ -627,6 +630,7 @@ let simple_workload_host_config (input : Simple.deploy_input) =
         List.find_map
           (function
             | Simple.RunWorkload { host_config; _ } -> Some host_config
+            | Simple.EnsureNetwork _
             | Simple.StopAndRemoveContainer _
             | Simple.PullImage _ ->
                 None)

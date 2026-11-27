@@ -28,6 +28,7 @@ what reaches argv from what reaches stdin.
   >     printf 'Digest: sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4\n'
   >     printf 'Status: Image is up to date for %s\n%s\n' "$ref" "$ref" ;;
   >   'docker --version') echo 'Docker version 27.0.0, build deadbeef' ;;
+  >   *BONDI_NETWORK_PRESENT*) echo BONDI_NETWORK_PRESENT ;;
   >   *BONDI_CRON_DOCKER_PRESENT*) echo 'BONDI_CRON_DOCKER_PRESENT /usr/bin/docker' ;;
   >   'curl --version') echo 'curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0' ;;
   >   *'label=bondi.type=managed'*)
@@ -69,6 +70,18 @@ what reaches argv from what reaches stdin.
   >   # stand in for it. This box clears the floor, so the report does ask; what
   >   # it is told is a refusal, and every report line this file prints is
   >   # normalised, so the wording is not the subject.
+  >   # What `rm -rfv` prints for a directory that was there, and nothing for one
+  >   # that was not: the answer setup reads to say whether it deleted anything.
+  >   "sudo rm -rfv '/etc/bondi/alloy'")
+  >     if [ -n "$ALLOY_DIR_PRESENT" ]; then
+  >       echo "removed '/etc/bondi/alloy/config.alloy'"
+  >       echo "removed directory '/etc/bondi/alloy'"
+  >     fi ;;
+  >   "docker rm 'bondi-gateway'")
+  >     if [ -n "$GATEWAY_RM_FAILS" ]; then
+  >       echo 'Error response from daemon: cannot remove container' >&2
+  >       exit 1
+  >     fi ;;
   >   *'bondi-server status'*) echo 'this fixture does not answer the report' >&2; exit 1 ;;
   >   *) : ;;
   > esac
@@ -136,10 +149,11 @@ single root-owned command — never written readable and chmod'd afterwards.
   sudo sh -c 'umask 077; mkdir -p '\''/etc/bondi/gateway'\''; cat > '\''/etc/bondi/gateway/env'\'''
 
 The shared network is ensured before anything joins it, and idempotently: the
-inspect is what makes re-running setup a no-op rather than an error.
+inspect is what makes re-running setup a no-op rather than an error, and each
+branch prints its own marker, so the run knows whether it created the network.
 
   $ grep 'network' ssh-argv.log | head -1
-  docker network inspect 'bondi-network' > /dev/null 2>&1 || docker network create 'bondi-network'
+  if docker network inspect 'bondi-network' > /dev/null 2>&1; then echo BONDI_NETWORK_PRESENT; else docker network create 'bondi-network' > /dev/null && echo BONDI_NETWORK_CREATED; fi
 
 The secret value reaches stdin and only stdin. Plain env values are inline by
 design, so the affirmative arm below proves this log is not simply empty.
@@ -200,7 +214,7 @@ directory — which holds its secrets — deleted.
   Removed config directory on server 127.0.0.1: /etc/bondi/gateway
 
   $ grep 'rm -rf' ssh-argv.log
-  sudo rm -rf '/etc/bondi/alloy'
+  sudo rm -rfv '/etc/bondi/alloy'
   sudo rm -rf '/etc/bondi/gateway'
 
 The alloy directory goes on the same run, and nothing here declares alloy or
@@ -208,6 +222,39 @@ runs it -- which is the point. That removal is planned from the configuration
 rather than from a container listing, so the credentials of a sidecar whose
 container was taken off the host by some other hand still leave with it. A
 removal that waited to see a container would send nothing here.
+
+The closing line says what that run changed (the stub has no orchestrator, so
+the first item is its creation), and the clean-up of the alloy
+directory is in it only when the box had one. The run above found none, so the
+line names the removal of the container and nothing of Alloy.
+
+  $ grep -F 'setup changed' out.log
+  setup changed on server 127.0.0.1: orchestrator 0.15.0 created, gateway removed
+
+The affirmative arm, on the same box and manifest: the directory is there, so
+`rm -rfv` lists what it deleted and the line says so.
+
+  $ export ALLOY_DIR_PRESENT=1
+  $ printf 'gateway\tstale-hash\n' > "$MANAGED_PS"
+  $ bondi-client setup > out.log 2>&1
+  $ grep -F 'setup changed' out.log
+  setup changed on server 127.0.0.1: orchestrator 0.15.0 created, Alloy config removed, gateway removed
+  $ unset ALLOY_DIR_PRESENT
+
+A stop that succeeded followed by a removal that failed leaves a stopped
+container on the box. The run ends in failure, and its closing line says what
+it did to the box rather than that it changed nothing.
+
+  $ export GATEWAY_RM_FAILS=1
+  $ printf 'gateway\tstale-hash\n' > "$MANAGED_PS"
+  $ bondi-client setup > out.log 2>&1
+  [1]
+  $ grep -F 'setup changed' out.log
+  setup changed on server 127.0.0.1: orchestrator 0.15.0 created, gateway stopped
+  $ grep -c -F 'setup changed nothing' out.log
+  0
+  [1]
+  $ unset GATEWAY_RM_FAILS
 
 A managed-container lookup that fails is not the same as a server with no
 managed containers. Setup stops and reports it rather than planning a run for a
@@ -250,7 +297,7 @@ either source, which is the state the next run is being asked to converge.
   Setting up the servers...
   Processing server: 127.0.0.1
   Error: server 127.0.0.1: could not list managed containers on the server, so the declared ones cannot be converged: command failed (7): 
-  setup corrected nothing on server 127.0.0.1
+  setup changed nothing on server 127.0.0.1
   
   Server: 127.0.0.1
   

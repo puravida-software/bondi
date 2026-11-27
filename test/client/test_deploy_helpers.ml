@@ -67,7 +67,7 @@ let mk_service name : Config_file.user_service =
   {
     name = Test_helpers.router_name name;
     image = Test_helpers.image_reference "img";
-    port = 8080;
+    port = Some 8080;
     registry_user = None;
     registry_pass = None;
     env_vars = [];
@@ -78,6 +78,17 @@ let mk_service name : Config_file.user_service =
     poll_interval = None;
     logs = None;
     volumes = None;
+  }
+
+(* A traefik: block, for a fixture whose service is meant to be proxied. A
+   service without one is held to the proxy-less floor, so a fixture about some
+   other floor declares it. *)
+let example_traefik : Config_file.traefik =
+  {
+    domain_name = "web.example.com";
+    image = Test_helpers.image_reference "traefik:v3.6.8";
+    acme_email = "ops@example.com";
+    acme_ca_server = None;
   }
 
 let mk_cron_job ?network ?alert_sinks ?exit_code_severities name ip :
@@ -439,7 +450,7 @@ let test_deploy_payload_includes_logs_flag () =
     {
       service_name = Some (Bondi_common.Router_name.to_string service.name);
       image = Some (Bondi_common.Image_reference.to_string service.image ^ ":v1");
-      port = Some service.port;
+      port = service.port;
       env_vars = service.env_vars;
       traefik_domain_name = None;
       traefik_image = None;
@@ -632,7 +643,10 @@ let test_cron_deploy_against_an_under_version_box_is_refused () =
          [ ("backup", "v1") ]
   in
   let read_version () = Ok "0.12.0" in
-  match Deploy.version_gate ~read_version ~volumes:None jobs with
+  match
+    Deploy.version_gate ~read_version ~service_name:None
+      ~traefik_domain_name:None ~volumes:None jobs
+  with
   | Ok () -> Alcotest.fail "expected a cron-declaring deploy to be refused"
   | Error msg ->
       check bool
@@ -648,7 +662,10 @@ let test_cron_deploy_against_an_under_version_box_is_refused () =
    the two. *)
 let test_a_service_only_deploy_is_held_to_the_command_surface () =
   let read_version () = Ok "0.14.0" in
-  match Deploy.version_gate ~read_version ~volumes:None None with
+  match
+    Deploy.version_gate ~read_version ~service_name:None
+      ~traefik_domain_name:None ~volumes:None None
+  with
   | Ok () ->
       Alcotest.fail
         "expected a box with no subcommands to be refused a service deploy"
@@ -671,7 +688,10 @@ let test_a_service_only_deploy_is_not_held_to_the_crontab_floor () =
   let read_version () =
     Ok Bondi_client.Server_version.minimum_for_command_surface
   in
-  match Deploy.version_gate ~read_version ~volumes:None None with
+  match
+    Deploy.version_gate ~read_version ~service_name:None
+      ~traefik_domain_name:None ~volumes:None None
+  with
   | Ok () -> ()
   | Error msg -> Alcotest.fail ("expected the deploy to proceed, got: " ^ msg)
 
@@ -682,7 +702,10 @@ let test_a_deploy_with_an_empty_cron_list_is_held_to_the_lower_floor () =
   let read_version () =
     Ok Bondi_client.Server_version.minimum_for_command_surface
   in
-  match Deploy.version_gate ~read_version ~volumes:None (Some []) with
+  match
+    Deploy.version_gate ~read_version ~service_name:None
+      ~traefik_domain_name:None ~volumes:None (Some [])
+  with
   | Ok () -> ()
   | Error msg -> Alcotest.fail ("expected the deploy to proceed, got: " ^ msg)
 
@@ -693,7 +716,10 @@ let test_a_deploy_with_an_empty_cron_list_is_held_to_the_lower_floor () =
    box that could not answer the first was never going to answer the second. *)
 let test_a_deploy_against_an_unreadable_box_is_refused () =
   let read_version () = Error "the orchestrator's version could not be read" in
-  match Deploy.version_gate ~read_version ~volumes:None None with
+  match
+    Deploy.version_gate ~read_version ~service_name:None
+      ~traefik_domain_name:None ~volumes:None None
+  with
   | Ok () -> Alcotest.fail "expected an unreadable box to refuse a deploy"
   | Error msg ->
       check string "the reader's own words reach the operator"
@@ -713,7 +739,10 @@ let test_cron_deploy_against_a_supported_box_proceeds () =
          [ ("backup", "v1") ]
   in
   let read_version () = Ok Bondi_client.Server_version.minimum_for_exec_lines in
-  match Deploy.version_gate ~read_version ~volumes:None jobs with
+  match
+    Deploy.version_gate ~read_version ~service_name:None
+      ~traefik_domain_name:None ~volumes:None jobs
+  with
   | Ok () -> ()
   | Error msg ->
       Alcotest.fail ("expected a supported box to be deployed to: " ^ msg)
@@ -722,7 +751,9 @@ let test_cron_deploy_against_a_supported_box_proceeds () =
    fixture differing only in what the server's payload mounts, so a refusal is
    shown to come from the volumes and not from the version alone. *)
 let gate_at version ~volumes cron_jobs =
-  Deploy.version_gate ~read_version:(fun () -> Ok version) ~volumes cron_jobs
+  Deploy.version_gate
+    ~read_version:(fun () -> Ok version)
+    ~service_name:None ~traefik_domain_name:None ~volumes cron_jobs
 
 let names_floor ~floor msg =
   check bool
@@ -910,7 +941,10 @@ let test_a_deploy_that_finds_a_divergence_still_proceeds () =
           ~read_crontab:(fun () -> crontab_naming "nightly-report")
           ~read_payloads:(fun () -> empty_payload_directory)
           jobs));
-  match Deploy.version_gate ~read_version ~volumes:None jobs with
+  match
+    Deploy.version_gate ~read_version ~service_name:None
+      ~traefik_domain_name:None ~volumes:None jobs
+  with
   | Ok () -> ()
   | Error msg -> Alcotest.fail ("a divergence became a refusal: " ^ msg)
 
@@ -1161,10 +1195,14 @@ let volume_payloads host =
   in
   let servers = [ gated_server "10.0.0.1"; gated_server "10.0.0.2" ] in
   let config =
-    mk_config
-      ~user_service:
-        { (mk_service "web") with servers; volumes = Some [ mount ] }
-      ()
+    {
+      (mk_config
+         ~user_service:
+           { (mk_service "web") with servers; volumes = Some [ mount ] }
+         ())
+      with
+      traefik = Some example_traefik;
+    }
   in
   List.map
     (fun server ->
@@ -1410,6 +1448,205 @@ let test_drain_grace_period_notice () =
   check (list string) "a service without the field says nothing" []
     (Deploy.deprecation_notices (service None))
 
+(* A service with no traefik: block.
+
+   One service on one server, deployed by name and built by the command's own
+   payload builder. Each fixture differs from its neighbour only in the field
+   the arm is about, so a silence is that field's and not a fixture the code
+   never reached. *)
+
+let web_config ~traefik ~port ~deployment_strategy : Config_file.t =
+  {
+    (mk_config
+       ~user_service:
+         {
+           (mk_service "web") with
+           servers = [ payload_server ];
+           port;
+           deployment_strategy;
+         }
+       ())
+    with
+    traefik;
+  }
+
+let payload_deploying deployments config =
+  composed
+  @@ Deploy.payload_for config ~deployments ~force_traefik_redeploy:false
+       payload_server None
+
+let web_payload config = payload_deploying [ ("web", "v1") ] config
+
+let says ~what needle text =
+  check bool
+    (Printf.sprintf "%s (%s): %s" what needle text)
+    true
+    (Bondi_common.String_utils.contains ~needle text)
+
+(* Blue-green switches traffic through the proxy, so without traefik: there is
+   nothing for it to switch and the deploy is refused, naming the service. The
+   same declaration with traefik: passes, and so do the other strategies
+   without it: the refusal is the pair's, not either half's. A run that does not
+   deploy the service sends no service, so the strategy it declares is not what
+   that run would do and is not refused. *)
+let test_proxyless_blue_green_refused () =
+  let blue_green = Some "blue-green" in
+  (match
+     Deploy.proxyless_blue_green
+       (web_payload
+          (web_config ~traefik:None ~port:None ~deployment_strategy:blue_green))
+   with
+  | Ok () -> fail "expected blue-green without traefik: to be refused"
+  | Error msg ->
+      says ~what:"the refusal names the service" "service web" msg;
+      says ~what:"and the strategy" "blue-green" msg;
+      says ~what:"and what is missing" "traefik:" msg);
+  check (result_testable unit) "the same service with traefik: passes" (Ok ())
+    (Deploy.proxyless_blue_green
+       (web_payload
+          (web_config ~traefik:(Some example_traefik) ~port:(Some 8080)
+             ~deployment_strategy:blue_green)));
+  List.iter
+    (fun deployment_strategy ->
+      check (result_testable unit) "another strategy without traefik: passes"
+        (Ok ())
+        (Deploy.proxyless_blue_green
+           (web_payload
+              (web_config ~traefik:None ~port:None ~deployment_strategy))))
+    [ None; Some "simple" ];
+  check (result_testable unit) "a run that does not deploy the service passes"
+    (Ok ())
+    (Deploy.proxyless_blue_green
+       (payload_deploying []
+          (web_config ~traefik:None ~port:None ~deployment_strategy:blue_green)))
+
+(* Without traefik: nothing routes to the service's port and nothing publishes
+   it, so a declared port is used for nothing and the operator is told. The
+   same service with traefik: is routed to that port and says nothing, and
+   without a port there is nothing to say. *)
+let test_proxyless_port_notice () =
+  (match
+     Deploy.proxyless_port_notice
+       (web_config ~traefik:None ~port:(Some 8080) ~deployment_strategy:None)
+   with
+  | None -> fail "expected a notice for a port declared without traefik:"
+  | Some notice ->
+      says ~what:"the notice names the field" "service.port" notice;
+      says ~what:"and its value" "8080" notice;
+      says ~what:"and what it lacks" "traefik:" notice);
+  check (option string) "the same port with traefik: says nothing" None
+    (Deploy.proxyless_port_notice
+       (web_config ~traefik:(Some example_traefik) ~port:(Some 8080)
+          ~deployment_strategy:None));
+  check (option string) "no port says nothing" None
+    (Deploy.proxyless_port_notice
+       (web_config ~traefik:None ~port:None ~deployment_strategy:None))
+
+(* An orchestrator from before proxy-less services pulls the image and then
+   fails, so a payload carrying a service with no domain is held to the release
+   that deploys one. The release below it is refused, naming both, and the
+   floor itself is accepted. The same service with traefik: is held only to the
+   floors it was held to before, down to the command surface's. Gated through
+   [deploy_servers], so the fields reach the gate from the payload itself. *)
+let test_version_gate_proxyless_floor () =
+  let floor = Bondi_client.Server_version.minimum_for_proxyless_service in
+  let deploy_at version config =
+    Deploy.deploy_servers
+      ~read_version:(fun _ -> Ok version)
+      ~check_volumes:no_check_expected
+      ~deploy:(fun _ _ -> Ok ())
+      [ (payload_server, web_payload config) ]
+  in
+  let proxyless =
+    web_config ~traefik:None ~port:None ~deployment_strategy:None
+  in
+  let proxied =
+    web_config ~traefik:(Some example_traefik) ~port:(Some 8080)
+      ~deployment_strategy:None
+  in
+  (match deploy_at "0.31.0" proxyless with
+  | Ok () -> fail "expected a proxy-less service to refuse 0.31.0"
+  | Error messages ->
+      let said = String.concat " | " messages in
+      says ~what:"the refusal names what the box runs" "0.31.0" said;
+      says ~what:"and what is required" floor said);
+  check
+    (result unit (list string))
+    "the floor deploys it" (Ok ())
+    (deploy_at floor proxyless);
+  List.iter
+    (fun version ->
+      check
+        (result unit (list string))
+        ("a proxied service deploys to " ^ version)
+        (Ok ())
+        (deploy_at version proxied))
+    [ "0.31.0"; Bondi_client.Server_version.minimum_for_command_surface ]
+
+(* A service with no strategy and no traefik: block is deployed with simple, and
+   the operator is told, from the manifest alone. Declaring a strategy, or
+   traefik:, leaves nothing to say. *)
+let test_proxyless_auto_notice () =
+  (match
+     Deploy.proxyless_auto_notice
+       (web_config ~traefik:None ~port:None ~deployment_strategy:None)
+   with
+  | None -> fail "expected a notice for auto without traefik:"
+  | Some notice ->
+      says ~what:"the notice names the service" "service web" notice;
+      says ~what:"and what it deploys with" "simple" notice;
+      says ~what:"and what it lacks" "traefik:" notice);
+  check (option string) "with traefik: says nothing" None
+    (Deploy.proxyless_auto_notice
+       (web_config ~traefik:(Some example_traefik) ~port:(Some 8080)
+          ~deployment_strategy:None));
+  check (option string) "a declared strategy says nothing" None
+    (Deploy.proxyless_auto_notice
+       (web_config ~traefik:None ~port:None ~deployment_strategy:(Some "simple")))
+
+(* The notices describe the service, so a run that deploys only cron jobs says
+   neither: it neither routes the port nor chooses the strategy. The same
+   manifest on a run that deploys the service says both, port first. *)
+let test_service_notices_only_when_the_service_is_deployed () =
+  let config =
+    web_config ~traefik:None ~port:(Some 8080) ~deployment_strategy:None
+  in
+  check int "a run deploying the service says both" 2
+    (List.length (Deploy.service_notices config ~deployments:[ ("web", "v1") ]));
+  (match Deploy.service_notices config ~deployments:[ ("web", "v1") ] with
+  | [ port; auto ] ->
+      says ~what:"the port notice comes first" "service.port" port;
+      says ~what:"then the strategy notice" "deploying with simple" auto
+  | other -> failf "expected two notices, got %d" (List.length other));
+  check (list string) "a cron-only run says neither" []
+    (Deploy.service_notices config ~deployments:[ ("backup", "v1") ]);
+  check (list string) "a run deploying nothing says neither" []
+    (Deploy.service_notices config ~deployments:[])
+
+(* A proxy-less service that also mounts volumes and has cron jobs is held to
+   the proxy-less floor alone: it is the highest of the floors, and the release
+   that carries it clears the volume and crontab floors. The volume floor
+   clears the other two and is still refused. *)
+let test_proxyless_floor_wins_over_volumes_and_cron () =
+  let jobs =
+    composed
+    @@ Deploy.cron_jobs_for_server "1.2.3.4"
+         (Some [ mk_cron_job "backup" "1.2.3.4" ])
+         [ ("backup", "v1") ]
+  in
+  let volumes = Some [ invoices_mount () ] in
+  let floor = Bondi_client.Server_version.minimum_for_proxyless_service in
+  let gate version =
+    Deploy.version_gate
+      ~read_version:(fun () -> Ok version)
+      ~service_name:(Some "web") ~traefik_domain_name:None ~volumes jobs
+  in
+  (match gate Bondi_client.Server_version.minimum_for_volumes with
+  | Ok () -> fail "expected the volume floor to be refused a proxy-less service"
+  | Error msg -> names_floor ~floor msg);
+  check (result_testable unit) "the proxy-less floor proceeds with all three"
+    (Ok ()) (gate floor)
+
 let () =
   run "Deploy_helpers"
     [
@@ -1521,6 +1758,21 @@ let () =
             test_a_declared_api_token_reaches_deploys_output;
           test_case "a declared drain_grace_period is said to be ignored" `Quick
             test_drain_grace_period_notice;
+        ] );
+      ( "a service without traefik:",
+        [
+          test_case "blue-green is refused, naming the service" `Quick
+            test_proxyless_blue_green_refused;
+          test_case "a declared port is said to do nothing" `Quick
+            test_proxyless_port_notice;
+          test_case "the version gate holds it to its own floor" `Quick
+            test_version_gate_proxyless_floor;
+          test_case "auto without traefik: is said to be simple" `Quick
+            test_proxyless_auto_notice;
+          test_case "service notices need the service deployed" `Quick
+            test_service_notices_only_when_the_service_is_deployed;
+          test_case "the proxy-less floor wins over volumes and cron" `Quick
+            test_proxyless_floor_wins_over_volumes_and_cron;
         ] );
       ( "the exec a deploy runs",
         [

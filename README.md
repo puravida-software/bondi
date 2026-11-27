@@ -69,7 +69,7 @@ Edit the `bondi.yaml` file to configure the project.
 
 ```bondi setup```
 
-5. Deploy your workload (this will also start Traefik)
+5. Deploy your workload (this also starts Traefik when the service declares `traefik:`)
 
 Single service:
 

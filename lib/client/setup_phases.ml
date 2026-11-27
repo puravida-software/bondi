@@ -52,6 +52,7 @@ type site =
   | Alloy_env_mode
   | Orchestrator_restart_policy
   | Journal_storage
+  | Acme_file_permissions
 
 (* What the run had to say about one site's reading. Two shapes rather than two
    lists: both are lines of one account, they are accumulated together in the
@@ -83,6 +84,12 @@ let env_mode_corrected ~found ~applied =
     finding = Corrected { found = Host_said found; applied };
   }
 
+let acme_permissions_corrected ~found ~applied =
+  {
+    site = Acme_file_permissions;
+    finding = Corrected { found = Host_said found; applied };
+  }
+
 let journal_storage_provisioned =
   {
     site = Journal_storage;
@@ -90,6 +97,11 @@ let journal_storage_provisioned =
   }
 
 let unreadable_reading ~site ~detail = { site; finding = Unreadable { detail } }
+
+let corrected_site correction =
+  match correction.finding with
+  | Corrected _ -> Some correction.site
+  | Unreadable _ -> None
 
 (* The noun an operator reads the found value as. Exhaustive on purpose and this
    is where the enumerability of the sites has its teeth: a site added without
@@ -101,6 +113,7 @@ let reading = function
       "mode"
   | Orchestrator_restart_policy -> "restart policy"
   | Journal_storage -> "storage"
+  | Acme_file_permissions -> "owner and mode"
 
 (* What each site reads its value off: a path Bondi declares and a container
    Bondi names, both of them this tool's own constants, both read through the
@@ -117,6 +130,7 @@ let subject = function
   | Alloy_env_mode -> Bondi_common.Defaults.alloy_env_path
   | Orchestrator_restart_policy -> Bondi_common.Builtin_container.orchestrator
   | Journal_storage -> Alloy_run_args.journal_path
+  | Acme_file_permissions -> Bondi_common.Defaults.acme_file_path
 
 (* One shape for every site, so that two of them cannot describe the same kind of
    disagreement differently -- which is what happened while each site worded its
@@ -147,32 +161,10 @@ let correction_line ~server correction =
          it found: %s"
         (reading correction.site) (subject correction.site) server detail
 
-(* Said rather than omitted: a run that corrected nothing and a run whose account
-   was never taken are different facts about a box, and an absent sentence is how
-   they came to read alike. It names no site's reading, because the fixtures that
-   assert a converged run reported neither of them search this output for exactly
-   those words.
-
-   It also claims nothing about why, and that is the whole of it: there are three
-   states, not two -- nothing diverged, everything that diverged was corrected,
-   and something diverged that could not be corrected. The third is a run that
-   failed on a read-back, and it prints this sentence too, so a clause explaining
-   the emptiness as agreement would be false two lines under the failure that
-   said otherwise. What the account knows is that its list is empty; why is the
-   failure's to say. *)
-let nothing_diverged ~server =
-  Printf.sprintf "setup corrected nothing on server %s" server
-
-let corrected correction =
-  match correction.finding with
-  | Corrected _ -> true
-  | Unreadable _ -> false
-
-(* The sentence is decided by whether anything was corrected and not by whether
-   the list is empty. A run that could only say it was unable to look corrected
-   nothing, and dropping the sentence there would make the register read as
-   though it had. *)
+(* Only the lines. What a run says about itself as a whole -- that it changed
+   something, and what, or that it changed nothing -- is the closing line that
+   follows these, and it is worded over every change the run made, of which a
+   correction is one kind. A sentence here about the corrections alone would say
+   "nothing" on a run that had just replaced two containers. *)
 let corrections_report ~server corrections =
-  let lines = List.map (correction_line ~server) corrections in
-  if List.exists corrected corrections then lines
-  else lines @ [ nothing_diverged ~server ]
+  List.map (correction_line ~server) corrections

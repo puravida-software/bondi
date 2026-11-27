@@ -26,7 +26,8 @@ inspection says has a healthcheck to answer for. This host's checks pass.
   >     printf '%s: Pulling from %s\n' "${ref##*:}" "${ref%:*}"
   >     printf 'Digest: sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4\n'
   >     printf 'Status: Image is up to date for %s\n%s\n' "$ref" "$ref" ;;
-  >   *BONDI_ACME_PRESENT*) echo BONDI_ACME_PRESENT ;;
+  >   *BONDI_NETWORK_PRESENT*) echo BONDI_NETWORK_PRESENT ;;
+  >   *BONDI_ACME_PRESENT*) echo 'BONDI_ACME_PRESENT root:root 600' ;;
   >   'docker --version') echo 'Docker version 27.0.0, build deadbeef' ;;
   >   *BONDI_CRON_DOCKER_PRESENT*) echo 'BONDI_CRON_DOCKER_PRESENT /usr/bin/docker' ;;
   >   'curl --version') echo 'curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0' ;;
@@ -108,6 +109,10 @@ the source's row is produced, not how the kernel words a refusal.
   >         user: deploy
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
+  > traefik:
+  >   domain_name: app.example.com
+  >   image: traefik:v3.6.8
+  >   acme_email: ops@example.com
   > bondi_server:
   >   version: "0.15.0"
   > cron_jobs:
@@ -140,13 +145,13 @@ lines the run printed on its way there are unchanged.
   Network bondi-network is present on server 127.0.0.1
   cron on server 127.0.0.1 resolves docker at /usr/bin/docker
   curl on server 127.0.0.1 can run the crontab lines an older bondi wrote: curl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0
-  ACME file permissions updated on server 127.0.0.1: /etc/traefik/acme/acme.json
+  ACME file is already root:root 600 on server 127.0.0.1: /etc/traefik/acme/acme.json
   Pulled mlopez1506/bondi-server:0.15.0 on server 127.0.0.1
   bondi-orchestrator is ready on server 127.0.0.1: mlopez1506/bondi-server:0.15.0
   No alloy is configured for server 127.0.0.1: /etc/bondi/alloy is not on the host
   Wrote secret environment file on server 127.0.0.1: /etc/bondi/gateway/env
   bondi-gateway container started on server 127.0.0.1: a1b2c3d4e5f6
-  setup corrected nothing on server 127.0.0.1
+  setup changed on server 127.0.0.1: orchestrator 0.15.0 created, gateway created
   
   Server: 127.0.0.1
   
@@ -163,6 +168,8 @@ lines the run printed on its way there are unchanged.
   Infrastructure
     NAME                   SOURCE  IMAGE                            TAG          STATUS        RESTARTS  HEALTH
     bondi-orchestrator     docker  mlopez1506/bondi-server          0.10.3       running       0         no healthcheck defined
+                           orch    not reachable: <detail>
+    bondi-traefik          docker  -                                -            not found     -         -
                            orch    not reachable: <detail>
     bondi-gateway          docker  example.com/ib-gateway           10.48.1e     running       0         healthy
                            orch    not reachable: <detail>
@@ -181,27 +188,26 @@ a run that succeeded reports about itself.
   $ echo $?
   0
 
-A run whose host agreed everywhere says so, in a sentence of its own. An account
-with nothing in it and an account that was never taken are different facts about
-a box, and an absent sentence is how they came to read alike. The line claims
-nothing about why: a run that found a divergence and failed before it could
-correct it prints this same sentence, beside the failure that says what happened.
-It is said exactly once for the one server, and it changes no exit code -- both
-asserted on the same run, because a sentence printed by a command that then
-failed would be a different fact from this one.
+A run ends its account with one line naming what it changed, here the two
+containers it created and nothing it read back. An account that was never taken
+and one with nothing in it would otherwise read alike. It is said exactly once for
+the one server, and it changes no exit code -- both asserted on the same run,
+because a line printed by a command that then failed would be a different fact
+from this one.
 
   $ : > ssh-argv.log
   $ bondi-client setup > out.log 2>&1
   $ echo $?
   0
-  $ grep -c 'setup corrected nothing on server 127.0.0.1' out.log
-  1
+  $ grep -F -- 'setup changed' out.log
+  setup changed on server 127.0.0.1: orchestrator 0.15.0 created, gateway created
 
-That this run corrected nothing rather than merely failing to say what it
-corrected is pinned by the whole of its output above, where the sentence stands
-between the last line the plan printed and the table. The affirmative arm for a
-run that does correct something is in setup_orchestrator.t, on the same code and
-a host that reports a different policy.
+That this run's account was taken, rather than never printed, is pinned by the
+whole of its output above, where the closing line stands between the last line
+the plan printed and the table. It lists what the run created and nothing it
+read back, and the affirmative arm for a run that does correct something is in
+setup_orchestrator.t, on the same code and a host that reports a different
+policy.
 
 The report is taken after the plan has run, so it is the final state it describes
 rather than the one the plan started from. The three reads are independent and
@@ -224,7 +230,7 @@ declined to look would print a different sentence here, and every row carries
 the source's own account of why it has nothing.
 
   $ grep -c "not reachable: the server is running bondi-server 0.10.3, but this command runs a 'bondi-server' subcommand" out.log
-  5
+  6
 
 Nothing the report printed carries a line of the crontab, or any part of one. The
 fixture's payload holds a secret precisely so this assertion has something to

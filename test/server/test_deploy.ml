@@ -1110,6 +1110,131 @@ let test_auto_picks_simple_for_none_and_absent () =
   Alcotest.check Alcotest.string "empty Test" "simple"
     (auto_strategy_of (Some { test = [] }))
 
+(* --- Deploy.strategy_choice --- *)
+
+(* A service with no proxy: every Traefik field is absent, as the client sends
+   it when [bondi.yaml] has no [traefik:] block. *)
+let proxyless_input =
+  {
+    minimal_input with
+    traefik_domain_name = None;
+    traefik_image = None;
+    traefik_acme_email = None;
+    traefik_acme_ca_server = None;
+    force_traefik_redeploy = None;
+    deployment_strategy = None;
+  }
+
+let cmd_healthcheck_image =
+  image_with_healthcheck
+    (Some { test = [ "CMD"; "curl"; "-f"; "http://localhost:8080/health" ] })
+
+(* The strategy and reason the choice gives for an image, or a failure naming
+   the refusal it made instead. *)
+let chosen ~context input inspect =
+  match Deploy.strategy_choice input with
+  | Ok choose ->
+      let strategy, reason = choose inspect in
+      (Deploy.string_of_deployment_strategy strategy, reason)
+  | Error e ->
+      Alcotest.failf "%s: refused: %s" context (Handler_error.message e)
+
+let strategy_and_reason = Alcotest.(pair string string)
+
+(* Blue-green switches traffic through the proxy, so a service declaring it
+   with no proxy is the caller's mistake, refused naming the service. The
+   affirmative arm is the same service declaring simple, which is accepted. *)
+let test_strategy_choice_proxyless_blue_green_refused () =
+  (match
+     Deploy.strategy_choice
+       { proxyless_input with deployment_strategy = Some "blue-green" }
+   with
+  | Error (Handler_error.Invalid_request msg as e) ->
+      Alcotest.(check bool)
+        ("the refusal names the service: " ^ msg)
+        true
+        (Bondi_common.String_utils.contains ~needle:"my-service" msg);
+      Alcotest.(check bool)
+        ("the refusal names the missing block: " ^ msg)
+        true
+        (Bondi_common.String_utils.contains ~needle:"traefik:" msg);
+      Alcotest.check Alcotest.int "the caller's mistake exits 2" 2
+        (Handler_error.exit_code e)
+  | Error (Handler_error.Orchestrator_failure msg | Handler_error.Not_ready msg)
+    ->
+      Alcotest.failf "refused in a class that is not the caller's: %s" msg
+  | Ok _ -> Alcotest.fail "blue-green with no proxy was accepted");
+  Alcotest.check strategy_and_reason "the same service declaring simple"
+    ("simple", "configured in bondi.yaml")
+    (chosen ~context:"declared simple"
+       { proxyless_input with deployment_strategy = Some "simple" }
+       cmd_healthcheck_image)
+
+(* Left to choose, a service with no proxy runs under simple even though its
+   image has a health check, and the reason says why: blue-green has no proxy
+   to switch. *)
+let test_strategy_choice_proxyless_auto_is_simple () =
+  Alcotest.check strategy_and_reason "auto with no proxy"
+    ("simple", "no traefik: block")
+    (chosen ~context:"auto, no proxy" proxyless_input cmd_healthcheck_image)
+
+(* With a proxy declared nothing changes: the image's health check still picks
+   blue-green, and a declared strategy is still the one that runs. *)
+let test_strategy_choice_with_domain_unchanged () =
+  Alcotest.check strategy_and_reason "auto with a proxy"
+    ("blue-green", "image has HEALTHCHECK")
+    (chosen ~context:"auto, proxy" minimal_input cmd_healthcheck_image);
+  Alcotest.check strategy_and_reason "declared simple with a proxy"
+    ("simple", "configured in bondi.yaml")
+    (chosen ~context:"declared simple, proxy"
+       { minimal_input with deployment_strategy = Some "simple" }
+       cmd_healthcheck_image);
+  Alcotest.check strategy_and_reason "declared blue-green with a proxy"
+    ("blue-green", "configured in bondi.yaml")
+    (chosen ~context:"declared blue-green, proxy"
+       { minimal_input with deployment_strategy = Some "blue-green" }
+       cmd_healthcheck_image)
+
+(* A domain with no Traefik image adopts the box's proxy, and the choice treats
+   it as proxied, as the workload plan does: auto reads the image, and
+   blue-green is accepted. The affirmative arm is the same request with no
+   domain, which the choice treats as proxy-less. *)
+let test_strategy_choice_domain_without_image_has_a_proxy () =
+  let domain_only = { minimal_input with traefik_image = None } in
+  Alcotest.check strategy_and_reason "auto"
+    ("blue-green", "image has HEALTHCHECK")
+    (chosen ~context:"auto, domain only" domain_only cmd_healthcheck_image);
+  Alcotest.check strategy_and_reason "declared blue-green"
+    ("blue-green", "configured in bondi.yaml")
+    (chosen ~context:"blue-green, domain only"
+       { domain_only with deployment_strategy = Some "blue-green" }
+       cmd_healthcheck_image);
+  Alcotest.check strategy_and_reason "no domain, the same request"
+    ("simple", "no traefik: block")
+    (chosen ~context:"auto, no domain"
+       { domain_only with traefik_domain_name = None }
+       cmd_healthcheck_image)
+
+(* A strategy that is not one is refused as it always was, with or without a
+   proxy, and the unknown name is not mistaken for blue-green's refusal. *)
+let test_strategy_choice_unknown_strategy_keeps_its_refusal () =
+  List.iter
+    (fun (context, input) ->
+      match
+        Deploy.strategy_choice
+          { input with deployment_strategy = Some "rolling" }
+      with
+      | Error (Handler_error.Orchestrator_failure msg) ->
+          Alcotest.check Alcotest.string context
+            "unknown deployment_strategy: rolling (valid values: blue-green, \
+             simple)"
+            msg
+      | Error (Handler_error.Invalid_request msg | Handler_error.Not_ready msg)
+        ->
+          Alcotest.failf "%s: refused in another class: %s" context msg
+      | Ok _ -> Alcotest.failf "%s: an unknown strategy was accepted" context)
+    [ ("with a proxy", minimal_input); ("with no proxy", proxyless_input) ]
+
 let test_deploy_input_logs_flag () =
   let input = { minimal_input with logs = Some false } in
   Alcotest.check
@@ -2157,6 +2282,141 @@ let test_a_failed_temp_container_inspect_stops_before_anything_moves () =
        (fun (_, t) -> Bondi_common.String_utils.contains ~needle:"/update" t)
        (Fake_engine.calls engine))
 
+(* A box Bondi never set up: no container, no network, an image whose health
+   check would pick blue-green if a proxy were declared. It answers every
+   request a proxy-less simple deploy makes, so a deploy that it carries to the
+   end shows which requests were made. *)
+let proxyless_engine =
+  let base =
+    engine_with ~containers:"[]"
+      ~image_inspect:
+        ( 200,
+          Server_test_helpers.image_inspect_capture_body ~kind:"healthcheck_cmd"
+            ~version:"v1.45" )
+      ~container_inspect:(fun _ -> (404, "{\"message\":\"no such container\"}"))
+  in
+  fun meth target ->
+    let has needle = Bondi_common.String_utils.contains ~needle target in
+    match meth with
+    | "POST" when has "/networks/create" -> (201, "{\"Id\":\"n1\"}")
+    | "GET" when has "/networks" -> (200, "[]")
+    | "POST" when has "/containers/create" ->
+        (201, "{\"Id\":\"svc1\",\"Warnings\":[]}")
+    | _ -> base meth target
+
+let has_target ~meth ~needle requests =
+  List.exists
+    (fun (m, t) -> m = meth && Bondi_common.String_utils.contains ~needle t)
+    requests
+
+(* Blue-green with no proxy is refused before the image is pulled, so a request
+   that cannot run fetches nothing and moves nothing. The affirmative arm is
+   the same request declaring simple on the same box, which pulls. *)
+let test_proxyless_blue_green_refused_before_the_pull () =
+  Eio_mock.Backend.run @@ fun () ->
+  let context = "proxy-less blue-green" in
+  let engine, result =
+    run_deploy ~respond:proxyless_engine
+      { proxyless_input with deployment_strategy = Some "blue-green" }
+  in
+  (match result with
+  | Error (Handler_error.Invalid_request msg as e) ->
+      Alcotest.(check bool)
+        ("the refusal names the service: " ^ msg)
+        true
+        (Bondi_common.String_utils.contains ~needle:"my-service" msg);
+      Alcotest.check Alcotest.int "the caller's mistake exits 2" 2
+        (Handler_error.exit_code e)
+  | Error (Handler_error.Orchestrator_failure msg | Handler_error.Not_ready msg)
+    ->
+      Alcotest.failf "%s: refused in a class that is not the caller's: %s"
+        context msg
+  | Ok _ -> Alcotest.failf "%s: the deploy was accepted" context);
+  Alcotest.(check bool)
+    "nothing was pulled" false
+    (has_target ~meth:"POST" ~needle:"/images/create" (Fake_engine.calls engine));
+  check_nothing_moved ~context engine;
+  let engine, declared_simple =
+    run_deploy ~respond:proxyless_engine
+      { proxyless_input with deployment_strategy = Some "simple" }
+  in
+  (match declared_simple with
+  | Ok response ->
+      Alcotest.check Alcotest.string "and it deploys under simple" "simple"
+        response.strategy
+  | Error e ->
+      Alcotest.failf "the same request declaring simple failed: %s"
+        (Handler_error.message e));
+  Alcotest.(check bool)
+    "the same request declaring simple pulls" true
+    (has_target ~meth:"POST" ~needle:"/images/create" (Fake_engine.calls engine))
+
+(* A proxy-less service left to choose is deployed under simple on a box with
+   no proxy and no network: the network is made, the service container is
+   created with Bondi's labels and none of Traefik's, and Traefik is never
+   asked for. *)
+let test_proxyless_simple_deploy_creates_service () =
+  Eio_mock.Backend.run @@ fun () ->
+  let engine, result = run_deploy ~respond:proxyless_engine proxyless_input in
+  (match result with
+  | Ok response ->
+      Alcotest.check strategy_and_reason "the response names simple and why"
+        ("simple", "no traefik: block")
+        (response.strategy, response.strategy_reason)
+  | Error e ->
+      Alcotest.failf "the proxy-less deploy failed: %s"
+        (Handler_error.message e));
+  let calls = Fake_engine.calls engine in
+  Alcotest.(check bool)
+    "the network is created" true
+    (has_target ~meth:"POST" ~needle:"/networks/create" calls);
+  let create_body =
+    List.find_map
+      (fun (m, t, body) ->
+        if
+          m = "POST"
+          && Bondi_common.String_utils.contains ~needle:"/containers/create" t
+          && Bondi_common.String_utils.contains ~needle:"my-service" t
+        then Some body
+        else None)
+      (Fake_engine.calls_with_bodies engine)
+  in
+  match create_body with
+  | None ->
+      Alcotest.failf "the service container was not created: %s"
+        (describe_requests calls)
+  | Some body ->
+      Alcotest.(check bool)
+        ("the service carries bondi.type=service: " ^ body)
+        true
+        (Bondi_common.String_utils.contains ~needle:"\"bondi.type\":\"service\""
+           body);
+      Alcotest.(check bool)
+        ("the service is opted out of Traefik, with no router: " ^ body)
+        true
+        (Bondi_common.String_utils.contains
+           ~needle:"\"traefik.enable\":\"false\"" body
+        && not
+             (Bondi_common.String_utils.contains ~needle:"\"traefik.http." body)
+        );
+      Alcotest.(check bool)
+        ("no request names bondi-traefik: " ^ describe_requests calls)
+        false
+        (List.exists
+           (fun (_, t) ->
+             Bondi_common.String_utils.contains ~needle:"bondi-traefik" t)
+           calls);
+      (* The needle is one a proxied deploy through the same engine matches. *)
+      let proxied_engine, _ =
+        run_deploy ~respond:proxyless_engine minimal_input
+      in
+      Alcotest.(check bool)
+        "a proxied deploy names bondi-traefik" true
+        (List.exists
+           (fun (_, t) ->
+             Bondi_common.String_utils.contains ~needle:"bondi-traefik" t)
+           (Fake_engine.calls proxied_engine))
+
 (* The words of a [Test] other than the two that run a probe are not all
    "no HEALTHCHECK": [NONE] and an empty [Test] are, and a word Bondi does not
    know is something else the operator needs to see named. *)
@@ -2380,6 +2640,19 @@ let () =
           Alcotest.test_case "auto picks simple for NONE and absent" `Quick
             test_auto_picks_simple_for_none_and_absent;
         ] );
+      ( "strategy choice",
+        [
+          Alcotest.test_case "proxy-less blue-green is refused" `Quick
+            test_strategy_choice_proxyless_blue_green_refused;
+          Alcotest.test_case "proxy-less auto is simple" `Quick
+            test_strategy_choice_proxyless_auto_is_simple;
+          Alcotest.test_case "with a domain the choice is unchanged" `Quick
+            test_strategy_choice_with_domain_unchanged;
+          Alcotest.test_case "a domain without an image has a proxy" `Quick
+            test_strategy_choice_domain_without_image_has_a_proxy;
+          Alcotest.test_case "an unknown strategy keeps its refusal" `Quick
+            test_strategy_choice_unknown_strategy_keeps_its_refusal;
+        ] );
       ( "traefik restart policy",
         [
           Alcotest.test_case "the wrong policy plans an update" `Quick
@@ -2423,6 +2696,10 @@ let () =
           Alcotest.test_case
             "a failed temp container inspect stops before anything moves" `Quick
             test_a_failed_temp_container_inspect_stops_before_anything_moves;
+          Alcotest.test_case "proxy-less blue-green is refused before the pull"
+            `Quick test_proxyless_blue_green_refused_before_the_pull;
+          Alcotest.test_case "a proxy-less simple deploy creates the service"
+            `Quick test_proxyless_simple_deploy_creates_service;
           Alcotest.test_case "workload refusals and reads precede every change"
             `Quick test_workload_refusals_and_reads_precede_every_change;
           Alcotest.test_case "an unrecognised health check is named" `Quick

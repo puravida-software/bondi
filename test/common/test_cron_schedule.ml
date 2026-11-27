@@ -35,7 +35,7 @@ let check_refused (schedule, expected) =
    3.0pl1-162 and Fedora cronie 1.7.2: both read [*/59] as minutes 0 and 59,
    [1-5/10] as minute 1 alone (a step larger than its range), [007] and
    [*/007] as 7 (a leading zero is decimal, not octal), and [1-5/2,7] as 1, 3,
-   5 and 7. See feature 0043. *)
+   5 and 7. *)
 let test_accepts_documented_forms () =
   List.iter check_accepted
     [

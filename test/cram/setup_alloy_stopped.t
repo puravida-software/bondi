@@ -27,7 +27,8 @@ the declared version, so the run reduces to the alloy phase.
   >     printf 'Status: Image is up to date for %s\n%s\n' "$ref" "$ref" ;;
   >   *BONDI_ALLOY_CURL_PRESENT*) echo BONDI_ALLOY_CURL_PRESENT ;;
   >   *BONDI_ALLOY_PORT_FREE*) echo "${ALLOY_PORT:-BONDI_ALLOY_PORT_FREE}" ;;
-  >   *BONDI_ACME_PRESENT*) echo BONDI_ACME_PRESENT ;;
+  >   *BONDI_NETWORK_PRESENT*) echo BONDI_NETWORK_PRESENT ;;
+  >   *BONDI_ACME_PRESENT*) echo 'BONDI_ACME_PRESENT root:root 600' ;;
   >   # The journal probe, answered present: this box's journald already stores
   >   # under /var/log/journal, so the alloy phase reads it once and goes on.
   >   # Without this arm the probe falls through to *) and answers nothing, which
@@ -165,6 +166,10 @@ host rather than merely to have gone missing.
   >         user: deploy
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
+  > traefik:
+  >   domain_name: app.example.com
+  >   image: traefik:v3.6.8
+  >   acme_email: ops@example.com
   > bondi_server:
   >   version: "0.25.0"
   > alloy:
@@ -190,7 +195,7 @@ wrote leaves the status this line asserts belonging to `bondi-client`.
   Processing server: 127.0.0.1
   Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 127.0.0.1
-  ACME file permissions updated on server 127.0.0.1: /etc/traefik/acme/acme.json
+  ACME file is already root:root 600 on server 127.0.0.1: /etc/traefik/acme/acme.json
   Pulled mlopez1506/bondi-server:0.25.0 on server 127.0.0.1
   bondi-orchestrator container is already running on server 127.0.0.1: 0.25.0, skipping...
   Pulled grafana/alloy:v1.8.0 on server 127.0.0.1
@@ -390,15 +395,16 @@ mode, because there was nothing to correct.
 
 It said nothing about the mode in the account either, and the account was still
 taken: a host that already had the declared mode before the write corrected
-nothing, which is a different fact from a run whose account nobody printed. The
-affirmative arm for both absences is the run at the end of this file, on this
-same stub with one variable changed.
+nothing, so the closing line names the replacement and no mode, which is a
+different fact from a run whose account nobody printed. The affirmative arm for
+both absences is the run at the end of this file, on this same stub with one
+variable changed.
 
   $ grep -c 'was mode' out.log
   0
   [1]
-  $ grep -c -F -- 'setup corrected nothing on server 127.0.0.1' out.log
-  1
+  $ grep -F -- 'setup changed' out.log
+  setup changed on server 127.0.0.1: Alloy recreated (not running)
 
 The affirmative half of that pair: the same stub and the same bondi.yaml,
 differing only in what the host reports the mode to be. Now the read-back
@@ -449,9 +455,8 @@ the command that repairs the host.
   $ ALLOY_MODE_BEFORE=0644 bondi-client setup > out.log 2>&1
   $ grep -c -F -- '/etc/bondi/alloy/config.alloy on server 127.0.0.1 was mode 0644, applied 0640' out.log
   1
-  $ grep -c -F -- 'setup corrected nothing on server 127.0.0.1' out.log
-  0
-  [1]
+  $ grep -F -- 'setup changed' out.log
+  setup changed on server 127.0.0.1: Alloy config mode corrected, Alloy recreated (not running)
 
 The reading really was taken before the write, which is the one thing about it
 that cannot be inferred from the line it produces: after the write the file sits
@@ -496,8 +501,8 @@ there was nothing to search.
   [1]
 
 A box with no config file at all is the ordinary first setup, and a creation is
-not a correction: there was no mode to diverge from, so the account says the run
-corrected nothing and the run says nothing about a reading it could not take. The
+not a correction: there was no mode to diverge from, so the closing line lists no
+mode and the run says nothing about a reading it could not take. The
 distinction matters because collapsing it onto the unreadable answer would report
 every first setup as a box whose posture could not be established.
 
@@ -508,8 +513,8 @@ every first setup as a box whose posture could not be established.
   $ grep -c 'could not read the mode' out.log
   0
   [1]
-  $ grep -c -F -- 'setup corrected nothing on server 127.0.0.1' out.log
-  1
+  $ grep -F -- 'setup changed' out.log
+  setup changed on server 127.0.0.1: Alloy recreated (not running)
 
 The affirmative arm for that second absence, and the other half of the earlier
 reading's negative space: a host that would not report the mode at all. Nothing
@@ -525,8 +530,8 @@ on.
   $ grep -c 'was mode' out.log
   0
   [1]
-  $ grep -c -F -- 'setup corrected nothing on server 127.0.0.1' out.log
-  1
+  $ grep -F -- 'setup changed' out.log
+  setup changed on server 127.0.0.1: Alloy recreated (not running)
 
 Two corrections in one run, and the order the account puts them in. The Alloy
 config mode is read back inside the plan the interpreter applies; the restart
@@ -542,9 +547,8 @@ lines and prints them backwards, and two presence counts would pass for it.
   1
   $ grep -c -F -- 'bondi-orchestrator on server 127.0.0.1 was restart policy no, applied unless-stopped' out.log
   1
-  $ grep -c -F -- 'setup corrected nothing on server 127.0.0.1' out.log
-  0
-  [1]
+  $ grep -F -- 'setup changed' out.log
+  setup changed on server 127.0.0.1: Alloy config mode corrected, Alloy recreated (not running), orchestrator restart policy corrected
   $ MODE=$(grep -n -F -- 'was mode 0644, applied 0640' out.log | head -1 | cut -d: -f1)
   $ POLICY=$(grep -n -F -- 'was restart policy no, applied unless-stopped' out.log | head -1 | cut -d: -f1)
   $ test "$MODE" -lt "$POLICY" && echo "the mode correction is accounted before the restart policy"

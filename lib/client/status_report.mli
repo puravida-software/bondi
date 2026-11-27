@@ -205,3 +205,15 @@ val render_json : server_report list -> string
     never told the host is healthy while the table says otherwise. The field is
     present on every server, and an empty list is the answer for a host whose
     two cron sources agree and were both read. *)
+
+val unreadable_line : address:string -> Remote_exec.failure -> string
+(** The line [status] writes to standard error for a server whose container
+    listing it could not obtain, naming the server and why.
+
+    The listing is the report's ground truth: without it the report cannot say
+    what runs on the box, so a run that met one ends non-zero, and this line is
+    what tells that exit apart from a configuration that could not be read. The
+    failure is worded by {!Remote_exec.explain}, so a box that was never reached
+    and one that ran the listing and refused it send an operator to different
+    places here exactly as they do in the table. It carries the address and
+    Bondi's own account of the failure, and no manifest value. *)

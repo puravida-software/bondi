@@ -102,6 +102,13 @@ type setup_context = {
   crontab : Crontab_listing.t;
 }
 
+(* The actions that start a container carry the change they make, as
+   [reports]. Why a container is started is something only the plan knows -- it
+   is the plan that compared the listing against the configuration -- so it is
+   decided there and carried here, and the interpreter adds it to the run's
+   account once the action has succeeded, deciding nothing. A removal always
+   reports the removal; when the run that follows it succeeds, the replacement
+   it was the first half of says so instead (see {!reported_change}). *)
 type action =
   | EnsureDocker
   | EnsureAcmeFile
@@ -113,7 +120,8 @@ type action =
   | CheckOrchestratorImage of image_check
   | StopOrchestrator
   | RemoveOrchestrator
-  | RunServer
+  | RunServer of { reports : Setup_changes.change }
+  | AwaitOrchestratorReady
   | EnsureJournalStorage
   | EnsureAlloyState
   | RequireAlloyCurl
@@ -123,13 +131,13 @@ type action =
   | CorrectAlloyConfigMode
   | EnsureAlloyConfig
   | WriteAlloyEnv
-  | RunAlloy
+  | RunAlloy of { reports : Setup_changes.change }
   | AwaitAlloyHealthy
   | StopAlloy
   | RemoveAlloy
   | CleanAlloyConfig
   | WriteManagedEnv of Managed_container.t
-  | RunManaged of Managed_container.t
+  | RunManaged of { spec : Managed_container.t; reports : Setup_changes.change }
   | StopManaged of string
   | RemoveManaged of string
   | CleanManagedConfig of string
@@ -159,7 +167,8 @@ let phase_of_action : action -> Setup_phases.phase = function
   | CheckOrchestratorImage _
   | StopOrchestrator
   | RemoveOrchestrator
-  | RunServer ->
+  | RunServer _
+  | AwaitOrchestratorReady ->
       Setup_phases.Orchestrator
   | EnsureJournalStorage
   | EnsureAlloyState
@@ -170,7 +179,7 @@ let phase_of_action : action -> Setup_phases.phase = function
   | CorrectAlloyConfigMode
   | EnsureAlloyConfig
   | WriteAlloyEnv
-  | RunAlloy
+  | RunAlloy _
   | AwaitAlloyHealthy
   | StopAlloy
   | RemoveAlloy
@@ -182,6 +191,63 @@ let phase_of_action : action -> Setup_phases.phase = function
   | RemoveManaged _
   | CleanManagedConfig _ ->
       Setup_phases.Managed
+
+(* What an action changed once it has succeeded, which is the change the plan
+   gave it for a start and the removal itself for a removal: the container is
+   gone from the box from that moment, whether or not what was meant to follow
+   it ever runs. A stop is reported the same way: when the removal after it
+   fails, the container is left stopped, and that is a change. A removal
+   followed by a successful start of the same container is a replacement, and
+   [Setup_changes.settled] folds the stop, the removal and the start into the
+   start's item, so a run reads "removed" only when nothing came back and
+   "stopped" only when nothing followed the stop. Every other
+   action reports nothing of its own: a check changes nothing, and the arms
+   whose change depends on what the host answers -- the Docker install --
+   report it themselves. *)
+let reported_change : action -> Setup_changes.change option = function
+  | RunServer { reports }
+  | RunAlloy { reports }
+  | RunManaged { reports; _ } ->
+      Some reports
+  | RemoveOrchestrator -> Some Setup_changes.Orchestrator_removed
+  | RemoveAlloy -> Some Setup_changes.Alloy_removed
+  | RemoveManaged name -> Some (Setup_changes.Managed_removed name)
+  | StopOrchestrator -> Some Setup_changes.Orchestrator_stopped
+  | StopAlloy -> Some Setup_changes.Alloy_stopped
+  | StopManaged name -> Some (Setup_changes.Managed_stopped name)
+  | EnsureDocker
+  | EnsureAcmeFile
+  | EnsureNetwork _
+  | RequireCronDocker
+  | RequireCronCurl
+  | PreserveCronPayloads _
+  | PullOrchestrator
+  | CheckOrchestratorImage _
+  | AwaitOrchestratorReady
+  | EnsureJournalStorage
+  | EnsureAlloyState
+  | RequireAlloyCurl
+  | RequireAlloyPort
+  | PullAlloy
+  | CheckAlloyImage _
+  | CorrectAlloyConfigMode
+  | EnsureAlloyConfig
+  | WriteAlloyEnv
+  | AwaitAlloyHealthy
+  | CleanAlloyConfig
+  | WriteManagedEnv _
+  | CleanManagedConfig _ ->
+      None
+
+(* The changes one applied action made, in the order it made them: the
+   corrections it made (those its arm made and those its follow-up made, such as
+   an image check's kept list) first, then what the arm reported from the host's
+   answer, then the change the plan gave the action. The closing line lists
+   changes in this order, so it is the order the run made them in. *)
+let changes_of_action ~corrections ~reported_by_arm action =
+  List.filter_map Setup_changes.of_correction corrections
+  @ reported_by_arm
+  @ Option.to_list (reported_change action)
 
 (* The whole sentence an operator is left with when an action fails: the host's
    own words, then the phase the run stopped in and the phases it never
@@ -568,7 +634,7 @@ let alloy_env_write_command ~mode =
    dropped connection arrives on, so the two would be one value. The probe says
    which on standard output and always exits zero, leaving the exit status to
    mean "the command could be run on that host" -- the separation
-   acme_probe_command already draws.
+   Acme_file.probe_command already draws.
 
    %04a rather than %a: `stat -c %a` prints 640 for a file at 0640, and the
    declared mode is written with four digits. Rendering at the width the
@@ -772,6 +838,32 @@ let alloy_env_pre_write_account =
 let alloy_file_chmod_command ~mode ~path =
   Printf.sprintf "sudo chmod %s %s" mode (Filename.quote path)
 
+(* Alloy created: its files, the run that reads them, and the wait for it to
+   answer healthy. [docker run -d] succeeds once the container exists, and an
+   Alloy that cannot bind its HTTP port exits after that, so the run alone says
+   nothing about whether Alloy came up. The wait sits right after the run, in
+   the one list every path that starts Alloy uses, so no such path can start one
+   without asking. [reports] is what the run says it did: created, or replaced
+   and why. *)
+let alloy_start ~reports =
+  [ EnsureAlloyConfig; WriteAlloyEnv; RunAlloy { reports }; AwaitAlloyHealthy ]
+
+(* Alloy torn down and created again. [RemoveAlloy] deletes the config
+   directory, so the River configuration and the credentials file are written
+   after it and before the run that reads them. One list for every route to a
+   replacement, for the reason [orchestrator_replacement] gives, differing only
+   in the reason the run reports.
+
+   The port check is the first action, ahead of the stop, on every path to a
+   replacement: a box whose port something else holds would lose the Alloy it
+   had and fail to start the next. A first install, which stops nothing, carries
+   it too, ahead of its run. *)
+let alloy_replacement reason =
+  RequireAlloyPort
+  :: StopAlloy
+  :: RemoveAlloy
+  :: alloy_start ~reports:(Setup_changes.Alloy_recreated reason)
+
 (* What the two readings taken ahead of a kept alloy call for.
 
    A file that is not there, either of them, is a replacement: both are bind
@@ -779,14 +871,18 @@ let alloy_file_chmod_command ~mode ~path =
    next restarts it and fails then, while the run reports success -- which the
    unconditional rewrite never allowed. The replacement writes both files again,
    so it is the whole of [alloy_replacement] and not a write of the one that is
-   missing.
+   missing, and it is carried here, with the reason it reports, so that the
+   interpreter that reads these files runs what this decided rather than
+   choosing a list itself.
 
    Otherwise a chmod for each file the host reported at another mode, and
    nothing for a file at the declared mode. One the host would not stat is not a
    mode to correct -- the account says it could not look, and a chmod would be
    issued blind. *)
 type alloy_kept_files_course =
-  | Alloy_files_replace
+  | Alloy_files_replace of action list
+      (** The replacement to run next, reporting the missing file as its reason.
+      *)
   | Alloy_files_chmod of (string * string) list
       (** Each file to correct as its path and the mode to bring it to. *)
 
@@ -800,7 +896,7 @@ let alloy_kept_files_course ~config ~env =
   match (config, env) with
   | Alloy_pre_write_absent, (Alloy_pre_write_absent | Alloy_pre_write_read _)
   | Alloy_pre_write_read _, Alloy_pre_write_absent ->
-      Alloy_files_replace
+      Alloy_files_replace (alloy_replacement Setup_changes.Mounted_file_missing)
   | Alloy_pre_write_read config, Alloy_pre_write_read env ->
       Alloy_files_chmod
         (chmod_if_differs ~mode:alloy_config_declared_mode
@@ -815,6 +911,25 @@ let alloy_kept_files_course ~config ~env =
    credential on disk with nothing failing. *)
 let alloy_remove_config_command =
   Printf.sprintf "sudo rm -rf %s" (Filename.quote alloy_config_dir)
+
+(* The clean-up of an undeclared Alloy's configuration directory, planned on
+   every run with Alloy undeclared, whether or not anything is there. [-v] makes
+   [rm] print a line for each path it deletes and nothing when there was none,
+   so the host's own answer says whether this run changed anything. *)
+let alloy_clean_config_command =
+  Printf.sprintf "sudo rm -rfv %s" (Filename.quote alloy_config_dir)
+
+(* What the clean-up changed, read from the deletions the host reported. A line
+   is a deletion only when it begins with [removed], which is how GNU [rm -v]
+   opens each one; silence is nothing there, and any other text is an answer
+   this run cannot read, which is not a change. *)
+let alloy_config_clean_changes (output : string) : Setup_changes.change list =
+  let deletion line =
+    Bondi_common.String_utils.starts_with ~prefix:"removed " line
+  in
+  if List.exists deletion (String.split_on_char '\n' output) then
+    [ Setup_changes.Alloy_config_removed ]
+  else []
 
 (* The directory Alloy keeps its journal read position in, created before every
    run because the run mounts it with --mount, which refuses a source that does
@@ -914,20 +1029,44 @@ let orchestrator_state_of_probe probe =
         { version = Server_version.version_of_listed_image image; spec_hash }
   | Container_listing.Undetermined err -> Orchestrator_undetermined err
 
-(* Why a running orchestrator whose configuration does not match is stopped.
-   The listing's version is [None] when the image column was an image id -- the
-   tag has moved under the container -- and that is worded as such rather than
-   compared as a string against the configured version, which would report a hex
-   id as the version running. *)
-let orchestrator_restart_reason ~wanted ~running ~spec_hash =
+(* Why a running orchestrator whose configuration does not match is replaced,
+   as the reason the run's closing line gives. The listing's version is [None]
+   when the image column was an image id -- the tag has moved under the
+   container -- and that is its own reason rather than a string comparison of a
+   hex id against the configured version. The line printed before the stop is
+   worded from this value by [orchestrator_restart_reason], so there is one
+   comparison and two renderings. *)
+let orchestrator_recreate_reason ~wanted ~running ~spec_hash :
+    Setup_changes.orchestrator_reason =
   match running with
-  | None -> "running an image its tag no longer names"
-  | Some running when running <> wanted ->
-      Printf.sprintf "version mismatch: running %s, want %s" running wanted
+  | None -> Setup_changes.Reason Setup_changes.Image_moved
+  | Some running when not (String.equal running wanted) ->
+      Setup_changes.Version
+        { running = Host_answer.of_host_output running; wanted }
   | Some _ -> (
       match spec_hash with
-      | None -> "it records no configuration digest"
-      | Some _ -> "its configuration changed")
+      | None -> Setup_changes.Reason Setup_changes.No_digest
+      | Some _ -> Setup_changes.Reason Setup_changes.Config_changed)
+
+(* The wording of the line printed ahead of the stop, for the moment before it:
+   the same reason the closing line gives afterwards. A replacement for a
+   container that was not running, or whose mounted file was missing, is never
+   decided by this comparison; those arms say what they are all the same. *)
+let orchestrator_restart_reason ~wanted ~running ~spec_hash =
+  match orchestrator_recreate_reason ~wanted ~running ~spec_hash with
+  | Setup_changes.Reason Setup_changes.Image_moved ->
+      "running an image its tag no longer names"
+  | Setup_changes.Version { running; wanted } ->
+      Printf.sprintf "version mismatch: running %s, want %s"
+        (Host_answer.to_string running)
+        wanted
+  | Setup_changes.Reason Setup_changes.No_digest ->
+      "it records no configuration digest"
+  | Setup_changes.Reason Setup_changes.Config_changed ->
+      "its configuration changed"
+  | Setup_changes.Reason Setup_changes.Not_running -> "it is not running"
+  | Setup_changes.Reason Setup_changes.Mounted_file_missing ->
+      "a file it mounts is missing"
 
 (* What the plan needs to know of alloy is whether the name is taken, and for a
    running container the digest it was created with. *)
@@ -1102,37 +1241,6 @@ let cron_docker_state_of_probe = function
               (Printf.sprintf "the host answered without saying which: %s"
                  (String.trim output)))
 
-(* What reading the ACME file established. [test -f] reports an absent file by
-   exiting non-zero, which is the channel a dropped connection arrives on too,
-   so the host's answer and the failure to get one were the same value. The
-   probe below always exits 0 and says which on standard output, leaving the
-   exit status to mean "the command could be run on that host" — the same
-   separation every other probe in this file draws. *)
-let acme_file_present_marker = "BONDI_ACME_PRESENT"
-let acme_file_absent_marker = "BONDI_ACME_ABSENT"
-
-let acme_probe_command ~path =
-  Printf.sprintf "if [ -f %s ]; then echo %s; else echo %s; fi"
-    (Filename.quote path) acme_file_present_marker acme_file_absent_marker
-
-type acme_file_state =
-  | Acme_file_present
-  | Acme_file_absent
-  | Acme_file_undetermined of string
-
-let acme_file_state_of_probe = function
-  | Error message -> Acme_file_undetermined message
-  | Ok output ->
-      let said marker =
-        Bondi_common.String_utils.contains ~needle:marker output
-      in
-      if said acme_file_present_marker then Acme_file_present
-      else if said acme_file_absent_marker then Acme_file_absent
-      else
-        Acme_file_undetermined
-          (Printf.sprintf "the host answered without saying which: %s"
-             (String.trim output))
-
 let gather_context ?session (server : Config_file.server) :
     (setup_context, string) result =
   let docker_status =
@@ -1239,8 +1347,10 @@ let alloy_river_config (config : Config_file.t) (alloy : Config_file.alloy) :
 (* Phase 2: Plan (pure)                                                      *)
 (* ------------------------------------------------------------------------- *)
 
-let has_user_services (config : Config_file.t) =
-  Option.is_some config.user_service
+(* Traefik is deployed only for a service that declares [traefik:]; a service
+   without it runs with no proxy and nothing reads an ACME file. *)
+let uses_traefik (config : Config_file.t) =
+  Option.is_some config.user_service && Option.is_some config.traefik
 
 let has_cron_jobs (config : Config_file.t) : bool =
   match config.cron_jobs with
@@ -1300,11 +1410,16 @@ let cron_payload_preserve (config : Config_file.t) (ctx : setup_context) :
    first where the host keeps any, then the stop, the removal and the run. One
    list, built here, for both routes to a replacement -- a configuration that
    differs, known when planning, and an image that moved behind its tag, known
-   only once the pull has run. *)
-let orchestrator_replacement (config : Config_file.t) (ctx : setup_context) :
-    action list =
+   only once the pull has run -- differing only in the reason its run reports. *)
+let orchestrator_replacement (config : Config_file.t) (ctx : setup_context)
+    ~reason : action list =
   cron_payload_preserve config ctx
-  @ [ StopOrchestrator; RemoveOrchestrator; RunServer ]
+  @ [
+      StopOrchestrator;
+      RemoveOrchestrator;
+      RunServer { reports = Setup_changes.Orchestrator_recreated reason };
+      AwaitOrchestratorReady;
+    ]
 
 (* Whether the running orchestrator was created with the command this setup
    would create it with: mounts, user and image included, since all of them are
@@ -1319,10 +1434,11 @@ let orchestrator_spec_matches (config : Config_file.t) (ctx : setup_context)
     spec_hash
 
 (* Converge on "the declared container is running". Every state that is not that
-   ends in [RunServer], and every state that leaves a container behind removes
-   it first: [docker run] refuses a name that is already taken, and without the
-   removal an orchestrator that died on startup would make the next [bondi
-   setup] — the command an operator reaches for to recover — fail too.
+   ends in [RunServer] and the readings that follow it, and every state that
+   leaves a container behind removes it first: [docker run] refuses a name that
+   is already taken, and without the removal an orchestrator that died on
+   startup would make the next [bondi setup] — the command an operator reaches
+   for to recover — fail too.
 
    Every state opens with the pull. Left to [docker run], the fetch happened
    after the old container was stopped and removed, so a registry that was down
@@ -1342,7 +1458,16 @@ let orchestrator_actions (config : Config_file.t) (ctx : setup_context) :
   match ctx.orchestrator with
   (* Nothing to copy out of: there is no container here, so nothing this run
      does can take a job's files with it. *)
-  | Orchestrator_absent -> [ PullOrchestrator; RunServer ]
+  | Orchestrator_absent ->
+      [
+        PullOrchestrator;
+        RunServer
+          {
+            reports =
+              Setup_changes.Orchestrator_created config.bondi_server.version;
+          };
+        AwaitOrchestratorReady;
+      ]
   (* Nothing is planned against a listing that never ran; [plan_for_config] is
      where that becomes an error rather than a silent no-op. *)
   | Orchestrator_undetermined _ -> []
@@ -1351,12 +1476,34 @@ let orchestrator_actions (config : Config_file.t) (ctx : setup_context) :
      and the files go with it unless they are copied out first. *)
   | Orchestrator_not_running ->
       (PullOrchestrator :: cron_payload_preserve config ctx)
-      @ [ RemoveOrchestrator; RunServer ]
-  | Orchestrator_running { version = _; spec_hash } ->
-      let replacement = orchestrator_replacement config ctx in
+      @ [
+          RemoveOrchestrator;
+          RunServer
+            {
+              reports =
+                Setup_changes.Orchestrator_recreated
+                  (Setup_changes.Reason Setup_changes.Not_running);
+            };
+          AwaitOrchestratorReady;
+        ]
+  | Orchestrator_running { version; spec_hash } ->
       if orchestrator_spec_matches config ctx ~spec_hash then
-        [ PullOrchestrator; CheckOrchestratorImage { kept = []; replacement } ]
-      else PullOrchestrator :: replacement
+        [
+          PullOrchestrator;
+          CheckOrchestratorImage
+            {
+              kept = [];
+              replacement =
+                orchestrator_replacement config ctx
+                  ~reason:(Setup_changes.Reason Setup_changes.Image_moved);
+            };
+        ]
+      else
+        PullOrchestrator
+        :: orchestrator_replacement config ctx
+             ~reason:
+               (orchestrator_recreate_reason ~wanted:config.bondi_server.version
+                  ~running:version ~spec_hash)
 
 let managed_state_of observed name =
   match List.assoc_opt name observed with
@@ -1369,12 +1516,14 @@ let managed_state_of observed name =
    does. *)
 let managed_convergence_for observed spec =
   let name = Managed_container.name spec in
-  let start = [ WriteManagedEnv spec; RunManaged spec ] in
+  let start ~reports = [ WriteManagedEnv spec; RunManaged { spec; reports } ] in
   match managed_state_of observed name with
-  | Managed_absent -> start
+  | Managed_absent -> start ~reports:(Setup_changes.Managed_created name)
   | Managed_present { spec_hash } ->
       if spec_hash = Managed_container.spec_hash spec then []
-      else [ StopManaged name; RemoveManaged name ] @ start
+      else
+        [ StopManaged name; RemoveManaged name ]
+        @ start ~reports:(Setup_changes.Managed_recreated name)
 
 (* A container withdrawn from configuration converges to stopped, removed, and
    its config directory — which holds its secrets — deleted. *)
@@ -1391,26 +1540,14 @@ let alloy_image (alloy : Config_file.alloy) =
   Bondi_common.Image_reference.to_string
     (Builtin_image.alloy ~declared:alloy.image)
 
-(* Alloy created: its files, the run that reads them, and the wait for it to
-   answer healthy. [docker run -d] succeeds once the container exists, and an
-   Alloy that cannot bind its HTTP port exits after that, so the run alone says
-   nothing about whether Alloy came up. The wait sits right after the run, in
-   the one list every path that starts Alloy uses, so no such path can start one
-   without asking. *)
-let alloy_start =
-  [ EnsureAlloyConfig; WriteAlloyEnv; RunAlloy; AwaitAlloyHealthy ]
-
-(* Alloy torn down and created again. [RemoveAlloy] deletes the config
-   directory, so the River configuration and the credentials file are written
-   after it and before the run that reads them. One list for both routes to a
-   replacement, for the reason [orchestrator_replacement] gives.
-
-   The port check is the first action, ahead of the stop, on every path to a
-   replacement: a box whose port something else holds would lose the Alloy it
-   had and fail to start the next. A first install, which stops nothing, carries
-   it too, ahead of its run. *)
-let alloy_replacement =
-  RequireAlloyPort :: StopAlloy :: RemoveAlloy :: alloy_start
+(* Why a running alloy whose digest does not match is replaced: one that records
+   none cannot be compared, and is replaced once so that it carries one from
+   then on; one that records another was created from a different command,
+   River configuration or credentials file. *)
+let alloy_recreate_reason ~spec_hash : Setup_changes.recreate_reason =
+  match spec_hash with
+  | None -> Setup_changes.No_digest
+  | Some _ -> Setup_changes.Config_changed
 
 (* Whether the running alloy was created with the command, River configuration
    and credentials this setup would write: all three are in its digest. *)
@@ -1460,8 +1597,8 @@ let after_image_check ~server ~container ~running
 
 let plan (config : Config_file.t) ~(specs : Managed_container.t list)
     (ctx : setup_context) : action list =
-  (* ACME only when we have user services (Traefik will be used) *)
-  let acme = if has_user_services config then [ EnsureAcmeFile ] else [] in
+  (* ACME only when a service declares [traefik:] (Traefik will be used) *)
+  let acme = if uses_traefik config then [ EnsureAcmeFile ] else [] in
   let server = orchestrator_actions config ctx in
   (* Every state that leaves a container behind removes it first, stopped ones
      included: [docker run] refuses a name that is already taken, so a stopped
@@ -1513,12 +1650,15 @@ let plan (config : Config_file.t) ~(specs : Managed_container.t list)
               CheckAlloyImage
                 {
                   kept = [ CorrectAlloyConfigMode; AwaitAlloyHealthy ];
-                  replacement = alloy_replacement;
+                  replacement = alloy_replacement Setup_changes.Image_moved;
                 };
             ]
-        else prepare @ alloy_replacement
-    | Some _, Alloy_not_running -> prepare @ alloy_replacement
-    | Some _, Alloy_absent -> prepare @ (RequireAlloyPort :: alloy_start)
+        else prepare @ alloy_replacement (alloy_recreate_reason ~spec_hash)
+    | Some _, Alloy_not_running ->
+        prepare @ alloy_replacement Setup_changes.Not_running
+    | Some _, Alloy_absent ->
+        prepare
+        @ (RequireAlloyPort :: alloy_start ~reports:Setup_changes.Alloy_created)
     (* Withdrawn from configuration. A stopped container has to go too, or the
        name stays taken and the wedge outlives the withdrawal. *)
     | None, (Alloy_not_running | Alloy_running _) -> [ StopAlloy; RemoveAlloy ]
@@ -1704,9 +1844,12 @@ let plan_for_config (config : Config_file.t) (ctx : setup_context) =
 
 let interpret ?session ~cron_payload_needed (server : Config_file.server)
     (config : Config_file.t) (actions : action list) :
-    Setup_phases.correction list * (unit, string) result =
+    Setup_phases.correction list
+    * Setup_changes.change list
+    * (unit, string) result =
   let ip_address = server.Config_file.ip_address in
-  (* One action, applied, and whatever divergence applying it corrected. No arm
+  (* One action, applied, and whatever divergence applying it corrected, beside
+     whatever change it made that only the host's answer decides. No arm
      here knows what follows it: the plan stops at the first failure, and saying
      what that leaves undone is [run]'s job below. Most arms correct nothing and
      say so with the empty list -- a write with no read-back after it has nothing
@@ -1727,7 +1870,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
       (Printf.sprintf "Pulled %s on server %s"
          (Bondi_common.Image_reference.to_string reference)
          ip_address);
-    Ok []
+    Ok ([], [])
   in
   (* The config file's mode read back after setup set it, for the write and for
      the in-place change alike: asking for a mode is not applying one. What the
@@ -1779,7 +1922,16 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
     print_endline line;
     Ok next
   in
-  let step : action -> (Setup_phases.correction list, string) result = function
+  (* What each arm returns is the pair a step adds to the run's account: the
+     divergences it read back and corrected, and the changes only the host's
+     answer decides, which today is the Docker install. A change the plan
+     decided is the one the action carries, read by [reported_change] in [run]
+     below once the arm has succeeded and never before, so a run stopped by the
+     arm lists only what was done ahead of it. *)
+  let step :
+      action ->
+      (Setup_phases.correction list * Setup_changes.change list, string) result
+      = function
     | EnsureDocker -> (
         (* The version is read again here rather than taken from the gathered
            context: this is a separate SSH round trip, and a host can change
@@ -1796,7 +1948,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
             print_endline
               (Printf.sprintf "Docker is already installed on server %s: %s"
                  ip_address version);
-            Ok []
+            Ok ([], [])
         | Docker_install ->
             print_endline
               (Printf.sprintf
@@ -1814,72 +1966,52 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
             print_endline
               (Printf.sprintf "Docker installed on server %s: %s" ip_address
                  (String.trim output));
-            Ok [])
-    | EnsureAcmeFile ->
-        let acme_dir = "/etc/traefik/acme" in
-        let acme_file = acme_dir ^ "/acme.json" in
-        (* What the reading may lead to is decided above; this arm only obtains
-           the host's answer and carries it out. *)
-        let* () =
-          match
-            acme_file_state_of_probe
-              (Remote_exec.command_output_text ?session
-                 ~timeout_seconds:host_command_seconds
-                 ~command:(acme_probe_command ~path:acme_file)
-                 server)
-          with
-          | Acme_file_undetermined message ->
-              Error
-                (Printf.sprintf
-                   "could not read whether %s exists on the server, so setup \
-                    will not act on whether it does: %s"
-                   acme_file message)
-          | Acme_file_present ->
-              let cmd =
-                Printf.sprintf "sudo chown root:root %s && sudo chmod 600 %s"
-                  acme_file acme_file
-              in
-              let* _ =
-                Remote_exec.command_output_text ?session
-                  ~timeout_seconds:host_command_seconds ~command:cmd server
-              in
-              print_endline
-                (Printf.sprintf "ACME file permissions updated on server %s: %s"
-                   ip_address acme_file);
-              Ok ()
-          | Acme_file_absent ->
-              let cmd =
-                Printf.sprintf
-                  "sudo mkdir -p %s && sudo touch %s && sudo chown root:root \
-                   %s && sudo chmod 600 %s"
-                  acme_dir acme_file acme_file acme_file
-              in
-              let* output =
-                Remote_exec.command_output_text ?session
-                  ~timeout_seconds:host_command_seconds ~command:cmd server
-              in
-              print_endline
-                (Printf.sprintf "ACME file created on server %s: %s" ip_address
-                   (String.trim output));
-              Ok ()
-        in
-        Ok []
-    | EnsureNetwork network_name ->
-        let cmd =
-          Printf.sprintf
-            "docker network inspect %s > /dev/null 2>&1 || docker network \
-             create %s"
-            (Filename.quote network_name)
-            (Filename.quote network_name)
-        in
-        let* _ =
+            Ok ([], [ Setup_changes.Docker_installed ]))
+    | EnsureAcmeFile -> (
+        let path = Bondi_common.Defaults.acme_file_path in
+        let host_command command =
           Remote_exec.command_output_text ?session
-            ~timeout_seconds:host_command_seconds ~command:cmd server
+            ~timeout_seconds:host_command_seconds ~command server
         in
-        print_endline
-          (Printf.sprintf "Network %s is present on server %s" network_name
-             ip_address);
-        Ok []
+        let read () =
+          Acme_file.state_of_probe ~expected:Acme_file.declared
+            (host_command (Acme_file.probe_command ~path))
+        in
+        (* What the reading leads to is decided in [Acme_file.course]; this arm
+           only obtains the host's answer and carries it out. *)
+        match Acme_file.course ~path (read ()) with
+        | Acme_file.Refuse message -> Error message
+        | Acme_file.Keep ->
+            print_endline
+              (Printf.sprintf "ACME file is already %s on server %s: %s"
+                 Acme_file.declared ip_address path);
+            Ok ([], [])
+        | Acme_file.Correct { command; found } ->
+            let* _ = host_command command in
+            let* correction =
+              Acme_file.confirmation ~path ~server:ip_address ~found (read ())
+            in
+            Ok ([ correction ], [])
+        | Acme_file.Create { command } ->
+            let* _ = host_command command in
+            (* A command that exited zero is not the file being there at what
+               Bondi declares: the change is recorded on the read-back, the
+               way a correction is. *)
+            let* () = Acme_file.confirmed ~path ~server:ip_address (read ()) in
+            print_endline
+              (Printf.sprintf "ACME file created on server %s: %s" ip_address
+                 path);
+            Ok ([], [ Setup_changes.Acme_file_created ]))
+    | EnsureNetwork network ->
+        let* line, changes =
+          Network_probe.account ~server:ip_address ~network
+            (Remote_exec.command_output_text ?session
+               ~timeout_seconds:host_command_seconds
+               ~command:(Network_probe.ensure_command ~network)
+               server)
+        in
+        print_endline line;
+        Ok ([], changes)
     | RequireCronDocker ->
         (* What counts as the host having answered is decided in
            [cron_docker_state_of_probe]; this arm only obtains the reply and
@@ -1914,7 +2046,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
         print_endline
           (Printf.sprintf "cron on server %s resolves docker at %s" ip_address
              path);
-        Ok []
+        Ok ([], [])
     | RequireCronCurl ->
         (* The version comparison is a pure decision in [Curl_version] and what
            counts as curl having answered is one in [cron_curl_verdict_of_probe];
@@ -1944,7 +2076,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
                 (match String.split_on_char '\n' output with
                 | [] -> output
                 | line :: _ -> line)));
-        Ok []
+        Ok ([], [])
     | PreserveCronPayloads { crontab } ->
         (* The copy runs on the box and the files never come here. What is
            preserved is a run payload and a credential file, and a client that
@@ -1977,7 +2109,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
         in
         List.iter print_endline
           (Cron_payload.report ~server:ip_address ~crontab listing);
-        Ok []
+        Ok ([], [])
     | PullOrchestrator ->
         let* reference =
           Builtin_image.orchestrator ~version:config.bondi_server.version
@@ -1987,7 +2119,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
        because what it yields is the actions that follow it. *)
     | CheckOrchestratorImage _
     | CheckAlloyImage _ ->
-        Ok []
+        Ok ([], [])
     | StopOrchestrator ->
         let* _ =
           Remote_exec.docker_command_output_text ?session
@@ -1998,7 +2130,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
         print_endline
           (Printf.sprintf "Stopped %s container on server %s"
              Builtin_container.orchestrator ip_address);
-        Ok []
+        Ok ([], [])
     | RemoveOrchestrator ->
         (* Asserts the outcome rather than the command's exit status: an
            orchestrator started by an older Bondi ran with --rm, so [docker
@@ -2020,16 +2152,22 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
         print_endline
           (Printf.sprintf "Removed %s container on server %s"
              Builtin_container.orchestrator ip_address);
-        Ok []
-    | RunServer ->
-        let image = orchestrator_image config in
+        Ok ([], [])
+    | RunServer { reports = _ } ->
         let run_cmd = orchestrator_run_command ~cron_payload_needed config in
         let* _ =
           Remote_exec.command_output_text ?session
             ~timeout_seconds:host_command_seconds ~command:run_cmd server
         in
+        Ok ([], [])
+    | AwaitOrchestratorReady ->
+        let image = orchestrator_image config in
         (* [docker run -d] reports that the container was created, which is not
-           the same fact as the server being up. Each reading's verdict is a
+           the same fact as the server being up, and the two are two actions
+           for that reason: the container is on the box once the run returns,
+           so the run is counted as a change then, and a reading that rejects
+           it afterwards fails the run without taking that back. Each reading's
+           verdict is a
            pure decision; this arm obtains the host's answers in the order the
            readings declare, stops at the first that rejects, and fetches the
            container's own account of the failure only when there is one to
@@ -2073,7 +2211,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
         print_endline
           (Printf.sprintf "%s is ready on server %s: %s"
              Builtin_container.orchestrator ip_address image);
-        Ok []
+        Ok ([], [])
     | EnsureJournalStorage -> (
         (* What a storage reading means, which commands it calls for and what
            the reading taken after them means are decided in
@@ -2095,7 +2233,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
               (Printf.sprintf
                  "Journal on server %s is stored persistently under %s"
                  ip_address Alloy_run_args.journal_path);
-            Ok []
+            Ok ([], [])
         | Journal_storage.Provision_then_recheck commands ->
             let* () =
               List.fold_left
@@ -2113,10 +2251,10 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
               (Printf.sprintf
                  "Provisioned persistent journal storage on server %s: %s"
                  ip_address Alloy_run_args.journal_path);
-            Ok [ Setup_phases.journal_storage_provisioned ])
+            Ok ([ Setup_phases.journal_storage_provisioned ], []))
     | EnsureAlloyConfig -> (
         match config.alloy with
-        | None -> Ok []
+        | None -> Ok ([], [])
         | Some alloy ->
             let river_config =
               Bondi_common.Alloy_river.generate
@@ -2196,10 +2334,10 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
                applied -- returns [Error] instead. A correction reported for a
                mode the host refused to take would be the reassurance this
                account replaces. *)
-            Ok pre_write_corrections)
+            Ok (pre_write_corrections, []))
     | WriteAlloyEnv -> (
         match config.alloy with
-        | None -> Ok []
+        | None -> Ok ([], [])
         | Some alloy ->
             let contents =
               Bondi_common.Alloy_river.env_file_contents
@@ -2226,22 +2364,22 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
             print_endline
               (Printf.sprintf "Wrote Alloy credentials file on server %s: %s"
                  ip_address alloy_env_path);
-            Ok [])
+            Ok ([], []))
     | EnsureAlloyState ->
         let* _ =
           Remote_exec.command_output_text ?session
             ~timeout_seconds:host_command_seconds
             ~command:alloy_state_dir_command server
         in
-        Ok []
+        Ok ([], [])
     | PullAlloy -> (
         match config.alloy with
-        | None -> Ok []
+        | None -> Ok ([], [])
         | Some alloy -> pull (Builtin_image.alloy ~declared:alloy.image))
-    | CorrectAlloyConfigMode -> Ok []
-    | RunAlloy -> (
+    | CorrectAlloyConfigMode -> Ok ([], [])
+    | RunAlloy { reports = _ } -> (
         match config.alloy with
-        | None -> Ok []
+        | None -> Ok ([], [])
         | Some alloy ->
             let image = alloy_image alloy in
             let* output =
@@ -2255,7 +2393,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
             print_endline
               (Printf.sprintf "%s container started on server %s: %s"
                  Builtin_container.alloy ip_address (String.trim output));
-            Ok [])
+            Ok ([], []))
     | RequireAlloyCurl ->
         (* What counts as the host having answered, and what each answer means,
            is [Alloy_preflight]'s; this arm obtains the reply and carries the
@@ -2275,7 +2413,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
         print_endline
           (Printf.sprintf "curl on server %s can ask Alloy on port %d"
              ip_address port);
-        Ok []
+        Ok ([], [])
     | RequireAlloyPort ->
         let port = Alloy_run_args.http_listen_port in
         let* output =
@@ -2292,7 +2430,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
         print_endline
           (Printf.sprintf "port %d on server %s is free for Alloy" port
              ip_address);
-        Ok []
+        Ok ([], [])
     | AwaitAlloyHealthy ->
         (* What the answer means is [Alloy_health]'s decision; this arm only
            obtains it and carries the verdict out. *)
@@ -2313,7 +2451,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
         print_endline
           (Printf.sprintf "%s answered healthy on server %s, port %d"
              Builtin_container.alloy ip_address port);
-        Ok []
+        Ok ([], [])
     | StopAlloy ->
         let* _ =
           Remote_exec.docker_command_output_text ?session
@@ -2324,7 +2462,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
         print_endline
           (Printf.sprintf "Stopped %s container on server %s"
              Builtin_container.alloy ip_address);
-        Ok []
+        Ok ([], [])
     | RemoveAlloy ->
         let* _ =
           Remote_exec.docker_command_output_text ?session
@@ -2340,18 +2478,18 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
         print_endline
           (Printf.sprintf "Removed %s container and config on server %s"
              Builtin_container.alloy ip_address);
-        Ok []
+        Ok ([], [])
     | CleanAlloyConfig ->
-        let* _ =
+        let* output =
           Remote_exec.command_output_text ?session
             ~timeout_seconds:host_command_seconds
-            ~command:alloy_remove_config_command server
+            ~command:alloy_clean_config_command server
         in
         print_endline
           (Printf.sprintf
              "No alloy is configured for server %s: %s is not on the host"
              ip_address alloy_config_dir);
-        Ok []
+        Ok ([], alloy_config_clean_changes output)
     | WriteManagedEnv spec ->
         let env_path = Managed_container.env_file_path spec in
         (* umask 077 makes the file mode 600 as it is created, rather than
@@ -2378,8 +2516,8 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
         print_endline
           (Printf.sprintf "Wrote secret environment file on server %s: %s"
              ip_address env_path);
-        Ok []
-    | RunManaged spec ->
+        Ok ([], [])
+    | RunManaged { spec; reports = _ } ->
         let args = Managed_container.run_args spec |> List.map Filename.quote in
         let* output =
           Remote_exec.docker_command_output_text ?session
@@ -2390,7 +2528,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
           (Printf.sprintf "%s container started on server %s: %s"
              (Managed_container.container_name spec)
              ip_address (String.trim output));
-        Ok []
+        Ok ([], [])
     | StopManaged name ->
         let container = Managed_container.container_name_of name in
         let* _ =
@@ -2402,7 +2540,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
         print_endline
           (Printf.sprintf "Stopped %s container on server %s" container
              ip_address);
-        Ok []
+        Ok ([], [])
     | RemoveManaged name ->
         let container = Managed_container.container_name_of name in
         let* _ =
@@ -2414,7 +2552,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
         print_endline
           (Printf.sprintf "Removed %s container on server %s" container
              ip_address);
-        Ok []
+        Ok ([], [])
     | CleanManagedConfig name ->
         let dir = Managed_container.config_dir_of name in
         let* _ =
@@ -2426,7 +2564,7 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
         print_endline
           (Printf.sprintf "Removed config directory on server %s: %s" ip_address
              dir);
-        Ok []
+        Ok ([], [])
   in
   (* [plan]'s concatenation is docker, network, cron curl, ACME, orchestrator,
      alloy, managed — so an action that fails half way down it leaves every
@@ -2437,13 +2575,13 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
      Naming the server is part of that wording, which is why no [step] arm above
      prefixes its own error: attribution belongs to whatever reports the
      failure, and every failure passes through here. *)
-  (* The account and the outcome are a pair rather than a result carrying
-     corrections in one arm, because a run that stopped part-way is exactly when
-     what it already changed matters most: reachable only through [Ok], the
-     corrections applied before a failure would be the same silence this account
-     exists to remove, arriving by another route. So both are returned on both
-     paths, in plan order, and the failing path returns everything the actions
-     above it corrected.
+  (* The account and the outcome are returned together rather than as a result
+     carrying the account in one arm, because a run that stopped part-way is
+     exactly when what it already changed matters most: reachable only through
+     [Ok], the corrections and changes made before a failure would be the same
+     silence this account exists to remove, arriving by another route. So both
+     are returned on both paths, in plan order, and the failing path returns
+     everything the actions above it corrected and changed.
 
      Accumulated reversed and turned over once at the end: an accumulator
      appended to on every action copies itself on every action, and the plan is
@@ -2482,12 +2620,12 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
           env_reading
     in
     match alloy_kept_files_course ~config:config_reading ~env:env_reading with
-    | Alloy_files_replace ->
+    | Alloy_files_replace replacement ->
         print_endline
           (Printf.sprintf
              "Alloy on server %s is missing a file it mounts, replacing it..."
              ip_address);
-        Ok (corrections, alloy_replacement)
+        Ok (corrections, replacement)
     | Alloy_files_chmod files ->
         let* () =
           List.fold_left
@@ -2541,13 +2679,14 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
     | PullOrchestrator
     | StopOrchestrator
     | RemoveOrchestrator
-    | RunServer
+    | RunServer _
+    | AwaitOrchestratorReady
     | EnsureJournalStorage
     | EnsureAlloyState
     | PullAlloy
     | EnsureAlloyConfig
     | WriteAlloyEnv
-    | RunAlloy
+    | RunAlloy _
     | AwaitAlloyHealthy
     | RequireAlloyCurl
     | RequireAlloyPort
@@ -2561,24 +2700,35 @@ let interpret ?session ~cron_payload_needed (server : Config_file.server)
     | CleanManagedConfig _ ->
         Ok ([], [])
   in
-  let rec run corrected = function
-    | [] -> (List.rev corrected, Ok ())
+  (* A correction is a change too, so each one an action made is counted among
+     the changes where that action made it: the changes come out in the order
+     the run made them, which is the order the closing line lists them in. *)
+  let rec run corrected changed = function
+    | [] -> (List.rev corrected, List.rev changed, Ok ())
     | action :: rest -> (
         let applied =
-          let* corrections = step action in
+          let* corrections, changes = step action in
           let* followed, next = then_run action in
-          Ok (corrections @ followed, next)
+          let corrections = corrections @ followed in
+          Ok
+            ( corrections,
+              changes_of_action ~corrections ~reported_by_arm:changes action,
+              next )
         in
         match applied with
-        | Ok (corrections, next) ->
-            run (List.rev_append corrections corrected) (next @ rest)
+        | Ok (corrections, changes, next) ->
+            run
+              (List.rev_append corrections corrected)
+              (List.rev_append changes changed)
+              (next @ rest)
         | Error reason ->
             ( List.rev corrected,
+              List.rev changed,
               Error
                 (action_failure_report ~server:ip_address ~failed:action
                    ~remaining:rest ~reason) ))
   in
-  run [] actions
+  run [] [] actions
 
 (* Docker's default restart policy is `no`, so creation is not the only moment a
    container's policy can be wrong: a docker-ce upgrade, a daemon crash or a
@@ -2687,7 +2837,7 @@ let setup_server config server =
   match Remote_exec.ssh_config server with
   | Error failure ->
       prerr_endline (Remote_exec.message failure);
-      ([], Error "missing ssh configuration")
+      ([], [], Error "missing ssh configuration")
   (* The credentials are read again by the session below, which is the module
      that owns the key on disk. What is decided here is only whether there are
      any: a server with no [ssh] block is reported once, by name, rather than
@@ -2698,8 +2848,8 @@ let setup_server config server =
       let converge ?session () =
         (* Nothing is read back before there is a plan, so a run that never got
            one has an empty account rather than no account -- which is what
-           [Setup_phases.corrections_report] has a sentence for, and why the pair
-           is returned from here too. *)
+           the closing line has a sentence for, and why the account is returned
+           from here too. *)
         let planned =
           let* context = gather_context ?session server in
           (* [plan_for_config] refuses a reading it could not take, and it does
@@ -2715,7 +2865,7 @@ let setup_server config server =
           Ok (context, actions)
         in
         match planned with
-        | Error message -> ([], Error message)
+        | Error message -> ([], [], Error message)
         | Ok (context, actions) -> (
             (* Log skip/restart reason when a container is already there *)
             (match context.orchestrator with
@@ -2744,7 +2894,7 @@ let setup_server config server =
                     (Printf.sprintf
                        "%s on server %s: %s, stopping to restart..."
                        Builtin_container.orchestrator ip_address reason));
-            let interpreted, applied =
+            let interpreted, changed, applied =
               interpret ?session
                 ~cron_payload_needed:(cron_payload_needed config context)
                 server config actions
@@ -2755,13 +2905,16 @@ let setup_server config server =
                which phases did not run, and issuing an inspect after that would
                report the policy of a box this run had stopped working on. *)
             match applied with
-            | Error message -> (interpreted, Error message)
+            | Error message -> (interpreted, changed, Error message)
             | Ok () ->
                 let converged, outcome =
                   converge_restart_policy ?session server
                     ~docker_status:context.docker_status
                 in
-                (interpreted @ converged, outcome))
+                ( interpreted @ converged,
+                  changed
+                  @ List.filter_map Setup_changes.of_correction converged,
+                  outcome ))
       in
       (* One staged key for the whole of a server's run, rather than one with
          every command in it. This is the client's longest sequence of remote
@@ -2781,14 +2934,16 @@ let setup_server config server =
       | Error _ -> converge ())
 
 (* What one server's run produced: whether it converged, what it corrected on the
-   way, and what the host holds afterwards. Three registers, kept apart because a
-   run that stopped part-way is exactly when the second and third are worth
-   reading, so none of them may stand in for another -- the plan's account of what
-   it executed is the thing that was never a report of the box, and a divergence
-   the run repaired is neither of those. *)
+   way, every change it made, and what the host holds afterwards. Kept apart
+   because a run that stopped part-way is exactly when all but the first are
+   worth reading, so none of them may stand in for another -- the plan's account
+   of what it executed is the thing that was never a report of the box, and a
+   divergence the run repaired is neither of those. The changes include the
+   corrections, which is why the closing line can be worded over them alone. *)
 type server_outcome = {
   converged : (unit, string) result;
   corrections : Setup_phases.correction list;
+  changes : Setup_changes.change list;
   report : Status_report.server_report;
 }
 
@@ -2801,7 +2956,7 @@ type server_outcome = {
    begins, because a run that stopped part-way is exactly when the report is
    worth taking, so this opens a second one rather than extending the first. *)
 let setup_and_report ~fetch config (server : Config_file.server) =
-  let corrections, converged = setup_server config server in
+  let corrections, changes, converged = setup_server config server in
   let taken ?session () =
     let reading =
       Status_gather.gather ?session ~timeout_seconds:host_command_seconds
@@ -2836,6 +2991,10 @@ let setup_and_report ~fetch config (server : Config_file.server) =
   {
     converged;
     corrections;
+    (* Settled here, once the run is over, because only the whole list can say
+       whether a removal was followed by the start that makes it a
+       replacement. *)
+    changes = Setup_changes.settled changes;
     report =
       Status_gather.report_of_reading ~config ~address:server.ip_address ~waits
         reading;
@@ -2860,8 +3019,9 @@ let run () =
       (* Said before the servers are looked at, because it is the file that is
          being reported on and not the estate: a bondi.yaml that declares a dead
          field and no server has two things wrong with it and an operator is
-         owed both. *)
-      List.iter print_endline (deprecation_notices config);
+         owed both. On stderr, as [deploy] writes the same sentences: stdout
+         carries what setup did, and a notice about the file is not that. *)
+      List.iter prerr_endline (deprecation_notices config);
       let servers = Config_file.servers config in
       if servers = [] then (
         prerr_endline
@@ -2895,9 +3055,11 @@ let run () =
          correction happened: a line written mid-transcript is scattered through
          the output of every other phase, and it is lost from view altogether on
          the run that stopped after it -- which is the run whose repairs matter
-         most. Printed for every server, including one whose run never started,
-         because an account nobody took and an account with nothing in it are
-         different facts and the sentence is what tells them apart.
+         most. The closing line follows each server's corrections and names every
+         change the run made there, or says it made none. Printed for every
+         server, including one whose run never started, because an account
+         nobody took and an account with nothing in it are different facts and
+         the closing line is what tells them apart.
 
          Nothing here reads [errors] or [health_failed] and nothing here decides
          an exit code: a correction is a write that succeeded, and refusing on one
@@ -2906,7 +3068,10 @@ let run () =
         (fun outcome ->
           List.iter print_endline
             (Setup_phases.corrections_report ~server:outcome.report.address
-               outcome.corrections))
+               outcome.corrections);
+          print_endline
+            (Setup_changes.closing_line ~server:outcome.report.address
+               outcome.changes))
         outcomes;
       (* The failure above says which phases did not run; this says what is on
          the box now. Both are printed, and this one last, because it is the

@@ -72,7 +72,7 @@ traefik:
                 (Bondi_common.Router_name.to_string service.name);
               check string "image" "registry.example.com/app"
                 (Bondi_common.Image_reference.to_string service.image);
-              check int "port" 8080 service.port;
+              check (option int) "port" (Some 8080) service.port;
               check (option string) "registry user" (Some "registry-user")
                 service.registry_user;
               check (option string) "registry pass" (Some "registry-pass")
@@ -1598,6 +1598,73 @@ let test_config_refuses_unroutable_service_name () =
              Bondi_common.Router_name.to_string service.name)
            config.user_service)
 
+(* A service whose [port] line and [traefik:] block are each present or not, so
+   that each arm below changes one of them on an otherwise identical manifest. *)
+let service_port_yaml ~port ~traefik =
+  let port_line =
+    match port with
+    | None -> ""
+    | Some port -> Printf.sprintf "  port: %d\n" port
+  in
+  let traefik_block =
+    match traefik with
+    | false -> ""
+    | true ->
+        {|traefik:
+  domain_name: example.com
+  image: "traefik:v3.6.8"
+  acme_email: admin@example.com
+|}
+  in
+  Printf.sprintf
+    {|service:
+  name: "my-worker"
+  image: "ghcr.io/acme/my-worker"
+%s  env_vars: {}
+  servers:
+    - ip_address: 203.0.113.10
+      ssh:
+        user: root
+bondi_server:
+  version: 0.1.0
+%s|}
+    port_line traefik_block
+
+let read_service_port yaml =
+  match read_images yaml with
+  | Error message -> fail ("expected the manifest to read: " ^ message)
+  | Ok config -> (
+      match config.user_service with
+      | None -> fail "expected a service"
+      | Some service ->
+          check string "the service read is the one written" "my-worker"
+            (Bondi_common.Router_name.to_string service.name);
+          service.port)
+
+(* Without a proxy nothing routes to the service's port, so a manifest that
+   leaves it out is a whole manifest. *)
+let test_proxyless_port_absent_decodes () =
+  check (option int) "an absent port reads as no port" None
+    (read_service_port (service_port_yaml ~port:None ~traefik:false))
+
+(* A proxy-less manifest that declares a port keeps reading, and the value is
+   kept as written. *)
+let test_proxyless_port_declared_decodes () =
+  check (option int) "a declared port reads back as written" (Some 8080)
+    (read_service_port (service_port_yaml ~port:(Some 8080) ~traefik:false))
+
+(* Traefik routes the domain to the service's port, so with [traefik:] the
+   field stays required, and its absence is refused when the file is read,
+   naming the field. The same manifest with the port declared reads. *)
+let test_traefik_without_port_refused () =
+  check_read_refused ~label:"traefik with no service port"
+    ~expected:
+      "invalid bondi.yaml: service.port is required when traefik: is declared: \
+       it is the port Traefik routes the domain to"
+    (service_port_yaml ~port:None ~traefik:true);
+  check (option int) "the same manifest with a port reads" (Some 8080)
+    (read_service_port (service_port_yaml ~port:(Some 8080) ~traefik:true))
+
 (* A cron job's name, schedule and secret entries are refused when bondi.yaml
    is read, before any server is contacted. A job runs in a container named
    after it, its schedule is written into root's crontab, and its secrets into
@@ -1916,6 +1983,12 @@ let () =
             test_config_refuses_http_acme_ca_server;
           test_case "an unroutable service name is refused, naming the field"
             `Quick test_config_refuses_unroutable_service_name;
+          test_case "a proxy-less service may leave out its port" `Quick
+            test_proxyless_port_absent_decodes;
+          test_case "a proxy-less service may declare a port" `Quick
+            test_proxyless_port_declared_decodes;
+          test_case "traefik with no service port is refused, naming the field"
+            `Quick test_traefik_without_port_refused;
         ] );
       ( "cron job inputs",
         [

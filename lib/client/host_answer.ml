@@ -21,8 +21,16 @@ type t = string
    not this bound. *)
 let limit = 240
 
+(* An ASCII control character or DEL in a host's answer would act on the
+   terminal the line is printed to, so each is replaced by a space, as the
+   flattening does for a newline. Bytes of 0x80 and above are left alone: they
+   are the parts of multi-byte characters. *)
+let without_controls =
+  String.map (fun c ->
+      if Char.code c < 0x20 || Char.code c = 0x7f then ' ' else c)
+
 let of_host_output answer =
   Bondi_common.String_utils.bounded ~limit
-    (Bondi_common.String_utils.single_line answer)
+    (without_controls (Bondi_common.String_utils.single_line answer))
 
 let to_string answer = answer

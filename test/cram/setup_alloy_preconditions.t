@@ -26,7 +26,8 @@ that passes are the same fixture with one variable changed.
   >     printf 'Status: Image is up to date for %s\n%s\n' "$ref" "$ref" ;;
   >   *BONDI_ALLOY_CURL_PRESENT*) echo "${ALLOY_CURL:-BONDI_ALLOY_CURL_PRESENT}" ;;
   >   *BONDI_ALLOY_PORT_FREE*) echo "${ALLOY_PORT:-BONDI_ALLOY_PORT_FREE}" ;;
-  >   *BONDI_ACME_PRESENT*) echo BONDI_ACME_PRESENT ;;
+  >   *BONDI_NETWORK_PRESENT*) echo BONDI_NETWORK_PRESENT ;;
+  >   *BONDI_ACME_PRESENT*) echo 'BONDI_ACME_PRESENT root:root 600' ;;
   >   *BONDI_JOURNAL_PRESENT*) echo BONDI_JOURNAL_PRESENT ;;
   >   'docker --version') echo 'Docker version 27.0.0, build deadbeef' ;;
   >   # The orchestrator as a 0.25.0 setup created it, so it is checked and kept.
@@ -75,6 +76,10 @@ that passes are the same fixture with one variable changed.
   >         user: deploy
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
+  > traefik:
+  >   domain_name: app.example.com
+  >   image: traefik:v3.6.8
+  >   acme_email: ops@example.com
   > bondi_server:
   >   version: "0.25.0"
   > alloy:

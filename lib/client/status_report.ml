@@ -617,3 +617,7 @@ let server_json report =
 
 let render_json reports =
   Yojson.Safe.pretty_to_string (`Assoc (List.map server_json reports))
+
+let unreadable_line ~address failure =
+  Printf.sprintf "status could not read server %s: %s" address
+    (Remote_exec.explain ~subject:"the container listing" failure)

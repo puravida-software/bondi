@@ -27,9 +27,9 @@ docker-all TAG: (check-version-floor TAG) (build-server TAG) (tag-server TAG) (v
 # a version that does not exist. So the tag is checked against the floor before
 # anything is built, and again wherever bondi.yaml is rewritten.
 #
-# The floor read is the volume floor, because it is the highest: a tag that
-# clears it clears the cron-line and command-surface floors by construction. A
-# floor added above it moves this recipe to read that one instead.
+# The floor read is the proxy-less floor, because it is the highest: a tag that
+# clears it clears every lower floor by construction. A floor added above it
+# moves this recipe to read that one instead.
 #
 # The floor is read out of the OCaml source that enforces it. A second copy of
 # the number here would be free to drift from the one that decides, which is the
@@ -40,11 +40,11 @@ check-version-floor TAG:
     #!/usr/bin/env bash
     set -euo pipefail
     source_file=lib/client/server_version.ml
-    floor_major=$(sed -n 's/^let volumes_major = \([0-9][0-9]*\)$/\1/p' "$source_file")
-    floor_minor=$(sed -n 's/^let volumes_minor = \([0-9][0-9]*\)$/\1/p' "$source_file")
+    floor_major=$(sed -n 's/^let proxyless_major = \([0-9][0-9]*\)$/\1/p' "$source_file")
+    floor_minor=$(sed -n 's/^let proxyless_minor = \([0-9][0-9]*\)$/\1/p' "$source_file")
     case "$floor_major:$floor_minor" in
         *[!0-9:]*|:*|*:|*:*:*)
-            echo "error: could not read exactly one volumes_major and one volumes_minor" >&2
+            echo "error: could not read exactly one proxyless_major and one proxyless_minor" >&2
             echo "       from $source_file. A release cannot be checked against a floor" >&2
             echo "       that was not read, and a check that cannot justify its answer" >&2
             echo "       fails rather than reporting one." >&2
@@ -72,10 +72,10 @@ check-version-floor TAG:
         exit 0
     fi
     echo "error: tag {{ TAG }} orders below $floor_major.$floor_minor.0, the floor" >&2
-    echo "       $source_file enforces before it will mount a service's volumes." >&2
-    echo "       Publishing it makes every deploy with volumes fail against this release." >&2
+    echo "       $source_file enforces before it will deploy a service with no traefik: block." >&2
+    echo "       Publishing it makes every such deploy fail against this release." >&2
     echo "       Either number the release $floor_major.$floor_minor.0 or later, or" >&2
-    echo "       lower volumes_major/volumes_minor and re-run the tests." >&2
+    echo "       lower proxyless_major/proxyless_minor and re-run the tests." >&2
     exit 1
 
 build-server TAG:
@@ -101,18 +101,22 @@ verify-server-image-negative TAG:
 # new tag runs, the old container is gone and a request through that Traefik
 # reaches the new one, two services deployed side by side are each reached
 # through their own container, and a deploy whose pull fails on a layer the
-# registry does not have leaves the old container serving. A deploy asking for a
-# Traefik image that cannot be pulled leaves the running Traefik serving, and
-# the last arm has a deploy replace that Traefik with one that orders its
-# certificate from a local Pebble the script also starts. No registry credential
-# is needed and no Let's Encrypt certificate is ordered, and the arms refuse to
-# start on an engine that already holds the network Bondi deploys to, a traefik
-# container, anything on host port 80, 443 or the registry's, or the host's
-# acme.json, so a box hosting a real Bondi deployment fails this recipe. The negative arm runs
-# in the same recipe rather than beside it, so this file and CI each hold one
-# line for the pair and cannot come to hold different numbers of them. The
-# script refuses any engine that is not Docker Engine: a rootless one
-# reinterprets the two flags it exercises.
+# registry does not have leaves the old container serving. A service that
+# declares no proxy is deployed under simple onto an engine with no network and
+# no Traefik: its container is replaced, carries no Traefik label, is reached by
+# name on the network and publishes no host port, and the same service asking
+# for blue-green is refused, naming it, with its container left running. A
+# deploy asking for a Traefik image that cannot be pulled leaves the running
+# Traefik serving, and the last arm has a deploy replace that Traefik with one
+# that orders its certificate from a local Pebble the script also starts. No
+# registry credential is needed and no Let's Encrypt certificate is ordered, and
+# the arms refuse to start on an engine that already holds the network Bondi
+# deploys to, a traefik container, anything on host port 80, 443 or the
+# registry's, or the host's acme.json, so a box hosting a real Bondi deployment
+# fails this recipe. The negative arm runs in the same recipe rather than
+# beside it, so this file and CI each hold one line for the pair and cannot come
+# to hold different numbers of them. The script refuses any engine that is not
+# Docker Engine: a rootless one reinterprets the two flags it exercises.
 # One assertion is opt-in: the outbound-TLS handshake reaches a host outside this
 # project, so it runs only under BONDI_CHECK_TLS_HANDSHAKE=1, which both release
 # workflows set at the step that calls this recipe. A local run without it prints

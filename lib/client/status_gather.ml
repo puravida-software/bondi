@@ -75,3 +75,8 @@ let report_of_reading ~config ~address ~waits reading :
       | Ok orchestrator -> orchestrator.warnings
       | Error _ -> []);
   }
+
+let unreadable_listing reading =
+  match reading.docker with
+  | Host_inventory.Unreadable_listing failure -> Some failure
+  | Host_inventory.Observed _ -> None

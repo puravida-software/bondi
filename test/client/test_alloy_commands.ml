@@ -1,6 +1,7 @@
 open Alcotest
 module Setup = Bondi_client.Cmd.Setup
 module Setup_phases = Bondi_client.Setup_phases
+module Setup_changes = Bondi_client.Setup_changes
 module Host_answer = Bondi_client.Host_answer
 
 let contains ~needle s = Bondi_common.String_utils.contains ~needle s
@@ -95,7 +96,7 @@ let test_write_command_reports_a_step_that_failed () =
 (* An unreadable file and a dropped connection must not arrive on the same
    channel. `stat` on a missing file exits non-zero, which is the channel a
    transport failure uses, so the probe answers on standard output and always
-   exits zero -- the separation acme_probe_command already draws. The marker is
+   exits zero -- the separation Acme_file.probe_command already draws. The marker is
    spelled out rather than read through the constant so that the probe and the
    verdict are pinned to the same wire word by the test rather than by sharing a
    let-binding. *)
@@ -317,19 +318,26 @@ let test_the_two_mode_commands_are_not_the_same_string () =
    that one is said out loud, because a run that could not look and did not say so
    reads exactly like a run that looked and found agreement.
 
-   Read through [Setup_phases.corrections_report] and through nothing else,
-   because that block is the whole of what an operator sees: both kinds of line
-   are worded there, both name the server there, and a correction holding the
+   Read through [Setup_phases.corrections_report] and the closing line that
+   follows it, and through nothing else, because those are the whole of what an
+   operator sees: both kinds of line are worded there, both name the server
+   there, and a correction holding the
    right pair in the wrong sentence is invisible to a length check. It is also
    the only register now -- the line about a reading nobody could take used to be
    printed where it was taken, which is where it went missing on a run that
    stopped two phases later. *)
 let test_the_pre_write_reading_feeds_the_account () =
   let rendered output =
+    let corrections =
+      Setup.alloy_config_pre_write_account ~expected:"0640"
+        (Setup.alloy_config_pre_write_mode_of_probe ~expected:"0640" output)
+    in
     String.concat "\n"
-      (Setup_phases.corrections_report ~server:"10.0.0.1"
-         (Setup.alloy_config_pre_write_account ~expected:"0640"
-            (Setup.alloy_config_pre_write_mode_of_probe ~expected:"0640" output)))
+      (Setup_phases.corrections_report ~server:"10.0.0.1" corrections
+      @ [
+          Setup_changes.closing_line ~server:"10.0.0.1"
+            (List.filter_map Setup_changes.of_correction corrections);
+        ])
   in
   (* The affirmative arm the three absences below need: this fixture does produce a
      correction, and it carries the mode the host had, the mode the run applied and
@@ -342,18 +350,18 @@ let test_the_pre_write_reading_feeds_the_account () =
     (contains ~needle:"was mode 0644" corrected);
   check bool "names the mode this run applied" true
     (contains ~needle:"applied 0640" corrected);
-  check bool "and does not also say the run corrected nothing" false
-    (contains ~needle:"corrected nothing" corrected);
+  check bool "and does not also say the run changed nothing" false
+    (contains ~needle:"changed nothing" corrected);
   check bool "and has nothing it could not read" false
     (contains ~needle:"could not read" corrected);
   let agreed = rendered "0640\n" in
-  check bool "a host already at the declared mode corrects nothing" true
-    (contains ~needle:"setup corrected nothing on server 10.0.0.1" agreed);
+  check bool "a host already at the declared mode changes nothing" true
+    (contains ~needle:"setup changed nothing on server 10.0.0.1" agreed);
   check bool "and says nothing about a reading it took" false
     (contains ~needle:"mode" agreed);
   let absent = rendered "BONDI_ALLOY_MODE_ABSENT\n" in
   check bool "a file that is not there is a creation, not a correction" true
-    (contains ~needle:"setup corrected nothing on server 10.0.0.1" absent);
+    (contains ~needle:"setup changed nothing on server 10.0.0.1" absent);
   check bool "and a creation is not something the host refused" false
     (contains ~needle:"could not read" absent);
   check bool "and it is not reported as a mode either" false
@@ -371,13 +379,13 @@ let test_the_pre_write_reading_feeds_the_account () =
     (contains ~needle:"on server 10.0.0.1" refused);
   check bool "and carries the host's own answer" true
     (contains ~needle:"answered BONDI_ALLOY_MODE_UNREADABLE" refused);
-  check bool "a mode the host would not report corrects nothing" true
-    (contains ~needle:"setup corrected nothing on server 10.0.0.1" refused);
+  check bool "a mode the host would not report changes nothing" true
+    (contains ~needle:"setup changed nothing on server 10.0.0.1" refused);
   check bool "and claims no mode the host never reported" false
     (contains ~needle:"was mode" refused);
   let silent = rendered "" in
   check bool "a host that said nothing is the same kind of answer" true
-    (contains ~needle:"setup corrected nothing on server 10.0.0.1" silent);
+    (contains ~needle:"setup changed nothing on server 10.0.0.1" silent);
   check bool "worded without a value to quote" true
     (contains ~needle:"the host reported nothing" silent);
   (* The account says what the box "was", never what it "is": a fixture elsewhere

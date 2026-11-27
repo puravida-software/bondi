@@ -28,7 +28,8 @@ runs below, so the exit code can only have followed from it.
   >     printf '%s: Pulling from %s\n' "${ref##*:}" "${ref%:*}"
   >     printf 'Digest: sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4\n'
   >     printf 'Status: Image is up to date for %s\n%s\n' "$ref" "$ref" ;;
-  >   *BONDI_ACME_PRESENT*) echo BONDI_ACME_PRESENT ;;
+  >   *BONDI_NETWORK_PRESENT*) echo BONDI_NETWORK_PRESENT ;;
+  >   *BONDI_ACME_PRESENT*) echo 'BONDI_ACME_PRESENT root:root 600' ;;
   >   'docker --version') echo 'Docker version 27.0.0, build deadbeef' ;;
   >   # The three readings setup takes off the box once it has started the
   >   # container: the wait for a running state, the server's own check inside
@@ -105,6 +106,10 @@ system's own and is normalised below.
   >         user: deploy
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
+  > traefik:
+  >   domain_name: app.example.com
+  >   image: traefik:v3.6.8
+  >   acme_email: ops@example.com
   > bondi_server:
   >   version: "0.15.0"
   > managed_containers:

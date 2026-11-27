@@ -13,7 +13,7 @@
 
    Keeping it correct is the release recipe's job, not a future reader's: the
    justfile refuses to publish a tag that orders below the highest floor, which
-   is the volume floor further down and sits above this one, so a release
+   is the proxy-less floor further down and sits above this one, so a release
    numbered beneath it fails once at the release instead of refusing every cron
    deploy in the estate.
 
@@ -144,15 +144,15 @@ let answers_command_surface version =
        without ever running."
     ~retry:"try again" version
 
-(* The third floor, and the highest: the first release whose server reads a
+(* The third floor: the first release whose server reads a
    service's volumes from the deploy payload and mounts them. A server before it
    reads the payload strictly and refuses the whole deploy over a field it does
    not know, which is loud but arrives after the payload was sent and names a
    field rather than the release that fixes it.
 
    The release that carries volumes carries the subcommands and the exec-line
-   writer by construction, so this is the floor the release recipe reads: a tag
-   that clears it clears the other two. The pair is held separately from the
+   writer by construction, so a payload that mounts volumes is held to this
+   floor alone. The pair is held separately from the
    string for the same reason the pairs above are, and the patch is not read
    because this floor's patch is 0. *)
 let volumes_major = 0
@@ -167,7 +167,7 @@ let mounts_volumes version =
       "An older server does not know the field and refuses the whole deploy."
     ~retry:"deploy again" version
 
-(* The fourth floor, and the highest: the first release whose server starts a
+(* The fourth floor: the first release whose server starts a
    cron job's container under the journald logging driver. The Alloy
    configuration this client generates reads cron jobs' lines from the host
    journal and no longer from the Docker path, so against an older server the
@@ -189,3 +189,27 @@ let captures_cron_to_journald version =
       "An older server logs cron jobs to the Docker path the configuration no \
        longer reads, so every cron line would be lost without an error."
     ~retry:"check it with bondi status" version
+
+(* The fifth floor, and the highest: the first release whose server deploys a
+   service with no traefik: block, under simple, with no Traefik labels. An
+   older server pulls the image and then refuses to build a container it cannot
+   label, so the deploy fails after the box has done work, naming a field
+   rather than the release that fixes it.
+
+   The release that carries it clears every lower floor by construction, so
+   this is the floor the release recipe reads. The pair is held separately from
+   the string for the same reason the pairs above are, and the patch is not read
+   because this floor's patch is 0. *)
+let proxyless_major = 0
+let proxyless_minor = 32
+let minimum_for_proxyless_service = "0.32.0"
+
+let deploys_proxyless_service version =
+  gate ~floor_major:proxyless_major ~floor_minor:proxyless_minor
+    ~minimum:minimum_for_proxyless_service
+    ~because:"the service declares no traefik: block"
+    ~unreadable_note:(Some ", which only a server from that release deploys")
+    ~consequence:
+      "An older server pulls the image and then fails, because it cannot run a \
+       service without Traefik labels."
+    ~retry:"deploy again" version

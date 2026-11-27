@@ -20,7 +20,8 @@
   test_acme_ca_server
   test_cron_schedule
   test_env_entry
-  test_cron_job_name)
+  test_cron_job_name
+  test_proxyless_strategy)
  (libraries
   alcotest
   qcheck-core

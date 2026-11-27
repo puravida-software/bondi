@@ -116,7 +116,7 @@ let config : Config_file.t =
         {
           name = Test_helpers.router_name "my-service";
           image = Test_helpers.image_reference "acme/app";
-          port = 8080;
+          port = Some 8080;
           registry_user = None;
           registry_pass = None;
           env_vars = [];
@@ -587,6 +587,39 @@ let test_a_declared_field_reaches_none_of_statuss_output () =
      contains ~needle:"bind_address" rendered
      || contains ~needle:"api_token" rendered)
 
+(* --- Whether the run can claim to have read the box ---
+
+   Each arm of the host's inventory is set on the reading directly, so the
+   answer can only have come from that arm. The empty listing is the absence
+   case and the one with containers is its affirmative twin: both are listings
+   that were taken, so neither may be mistaken for one that was not. The
+   orchestrator is left unreachable on every case, because a failed orchestrator
+   read is exactly what must not decide this. *)
+
+let failure_option =
+  option
+    (testable
+       (fun fmt failure ->
+         Format.pp_print_string fmt (Remote_exec.message failure))
+       ( = ))
+
+let test_unreadable_listing () =
+  let failure = Remote_exec.Ssh_failed { code = 255; output = "no route" } in
+  let listed =
+    reading ~orchestrator:(Error (Report.Not_consulted "not reached")) ()
+  in
+  let with_docker docker : Gather.reading = { listed with docker } in
+  check failure_option "a listing that was not taken is the failure"
+    (Some failure)
+    (Gather.unreadable_listing
+       (with_docker (Inventory.Unreadable_listing failure)));
+  check failure_option "a listing that found nothing is not a failure" None
+    (Gather.unreadable_listing (with_docker (Inventory.Observed [])));
+  check int "the fixture's listing holds containers" 2
+    (List.length (containers_of listed));
+  check failure_option "a listing that found containers is not a failure" None
+    (Gather.unreadable_listing listed)
+
 let () =
   run "status gather"
     [
@@ -609,6 +642,8 @@ let () =
             test_gather_payload_read_that_failed_is_a_value;
           test_case "the report carries the payload listing" `Quick
             test_report_carries_the_payload_listing;
+          test_case "only the container listing makes a box unreadable" `Quick
+            test_unreadable_listing;
         ] );
       ( "taking the reading",
         [

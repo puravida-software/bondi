@@ -31,7 +31,8 @@ sent, and the Alloy already running is not touched.
   >   'sudo systemctl restart systemd-journald') : ;;
   >   *BONDI_ALLOY_CURL_PRESENT*) echo BONDI_ALLOY_CURL_PRESENT ;;
   >   *BONDI_ALLOY_PORT_FREE*) echo "${ALLOY_PORT:-BONDI_ALLOY_PORT_FREE}" ;;
-  >   *BONDI_ACME_PRESENT*) echo BONDI_ACME_PRESENT ;;
+  >   *BONDI_NETWORK_PRESENT*) echo BONDI_NETWORK_PRESENT ;;
+  >   *BONDI_ACME_PRESENT*) echo 'BONDI_ACME_PRESENT root:root 600' ;;
   >   'docker --version') echo 'Docker version 27.0.0, build deadbeef' ;;
   >   # The orchestrator this file's box already runs, carrying the digest setup
   >   # stamps on a 0.25.0 orchestrator created without the cron payload mounts:
@@ -82,6 +83,10 @@ sent, and the Alloy already running is not touched.
   >         user: deploy
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
+  > traefik:
+  >   domain_name: app.example.com
+  >   image: traefik:v3.6.8
+  >   acme_email: ops@example.com
   > bondi_server:
   >   version: "0.25.0"
   > alloy:

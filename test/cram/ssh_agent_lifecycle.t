@@ -327,6 +327,10 @@ authorised nowhere.
   >         user: deploy
   >         private_key_contents: "LS0tLS1CRUdJTiBPUEVOU1NIIFBSSVZBVEUgS0VZLS0tLS0KYjNCbGJuTnphQzFyWlhrdGRqRUFBQUFBQ21GbGN6STFOaTFqZEhJQUFBQUdZbU55ZVhCMEFBQUFHQUFBQUJCNWFVamFYcApEUTFpR3cycUZNTVhMbUFBQUFHQUFBQUFFQUFBQXpBQUFBQzNOemFDMWxaREkxTlRFNUFBQUFJSUlpMWFBcFZBWWoxMjIvCm5DeXdxN2lNcWoyMk9Wd1d5NEdUK2pXOFFWTGRBQUFBa0NxbCtDN3IvRk9tQ1Vnc1JYRmJua216WW5XTXF2dDZYeG5yOCsKcFAzUEJOMmExWXRKeWRkdEwzMXl6dldrOXFzTFpqVHNmUnNBZmlDWEU0MjBDbVllSnNRNzRpMzhQQ1NCWFE3U0FJOHUyZQpvenNneHJCYUMwU1lJenppbUN4YVdZNVBTeWVEenFITkMwMFRSQUw2UkdMVWk1Wmg0UWdkM1ZzalpiV09hWTJ1NDBmL3ZqCm1UcDVTOURKb1d5ZjE5SUE9PQotLS0tLUVORCBPUEVOU1NIIFBSSVZBVEUgS0VZLS0tLS0K"
   >         private_key_pass: "fixture-passphrase"
+  > traefik:
+  >   domain_name: web.example.com
+  >   image: traefik:v3.6.8
+  >   acme_email: ops@example.com
   > bondi_server:
   >   version: "0.20.0"
   > EOF

@@ -31,7 +31,8 @@ leaves a running one.
   >     printf '%s: Pulling from %s\n' "${ref##*:}" "${ref%:*}"
   >     printf 'Digest: sha256:66a6306db78bf2dbf3487f293aa8d6990d8e506fdffab9cc43fe422becf886e4\n'
   >     printf 'Status: Image is up to date for %s\n%s\n' "$ref" "$ref" ;;
-  >   *BONDI_ACME_PRESENT*) echo BONDI_ACME_PRESENT ;;
+  >   *BONDI_NETWORK_PRESENT*) echo BONDI_NETWORK_PRESENT ;;
+  >   *BONDI_ACME_PRESENT*) echo 'BONDI_ACME_PRESENT root:root 600' ;;
   >   'docker --version') echo 'Docker version 27.0.0, build deadbeef' ;;
   >   *'name=^/bondi-orchestrator$'*'{{.State}}'*) cat "$ORCHESTRATOR_PS" ;;
   >   # The image check that follows the pull on an orchestrator whose recorded
@@ -173,6 +174,10 @@ sticks and one that does not are the two halves of the assertion below.
   >         user: deploy
   >         private_key_contents: "not-a-real-key"
   >         private_key_pass: ""
+  > traefik:
+  >   domain_name: app.example.com
+  >   image: traefik:v3.6.8
+  >   acme_email: ops@example.com
   > bondi_server:
   >   version: "0.15.0"
   > EOF
@@ -187,11 +192,11 @@ host holds.
   Processing server: 127.0.0.1
   Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 127.0.0.1
-  ACME file permissions updated on server 127.0.0.1: /etc/traefik/acme/acme.json
+  ACME file is already root:root 600 on server 127.0.0.1: /etc/traefik/acme/acme.json
   Pulled mlopez1506/bondi-server:0.15.0 on server 127.0.0.1
   bondi-orchestrator is ready on server 127.0.0.1: mlopez1506/bondi-server:0.15.0
   No alloy is configured for server 127.0.0.1: /etc/bondi/alloy is not on the host
-  setup corrected nothing on server 127.0.0.1
+  setup changed on server 127.0.0.1: orchestrator 0.15.0 created
   
   Server: 127.0.0.1
   
@@ -203,6 +208,8 @@ host holds.
   Infrastructure
     NAME                   SOURCE  IMAGE                            TAG          STATUS        RESTARTS  HEALTH
     bondi-orchestrator     docker  mlopez1506/bondi-server          0.15.0       running       0         no healthcheck defined
+                           orch    not reachable: <detail>
+    bondi-traefik          docker  -                                -            not found     -         -
                            orch    not reachable: <detail>
   
   Crontab
@@ -272,7 +279,7 @@ phases did not run; this one says what is on the box now, and both are printed.
   Processing server: 127.0.0.1
   Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 127.0.0.1
-  ACME file permissions updated on server 127.0.0.1: /etc/traefik/acme/acme.json
+  ACME file is already root:root 600 on server 127.0.0.1: /etc/traefik/acme/acme.json
   Pulled mlopez1506/bondi-server:0.15.0 on server 127.0.0.1
   Error: bondi-orchestrator did not come up on server 127.0.0.1.
   Image: mlopez1506/bondi-server:0.15.0
@@ -283,7 +290,7 @@ phases did not run; this one says what is on the box now, and both are printed.
   Error loading shared library libzstd.so.1: No such file or directory (needed by /usr/local/bin/bondi-server)
   The container was left in place so it can be inspected: run `docker logs bondi-orchestrator` on 127.0.0.1. To restore service, set bondi_server.version in bondi.yaml back to a version known to run on this host and run `bondi setup` again.
   setup stopped part-way through the orchestrator phase on server 127.0.0.1, so these phases did not run: alloy.
-  setup corrected nothing on server 127.0.0.1
+  setup changed on server 127.0.0.1: orchestrator 0.15.0 created
   
   Server: 127.0.0.1
   
@@ -295,6 +302,8 @@ phases did not run; this one says what is on the box now, and both are printed.
   Infrastructure
     NAME                   SOURCE  IMAGE                            TAG          STATUS        RESTARTS  HEALTH
     bondi-orchestrator     docker  mlopez1506/bondi-server          0.15.0       exited        0         no healthcheck defined
+                           orch    not reachable: <detail>
+    bondi-traefik          docker  -                                -            not found     -         -
                            orch    not reachable: <detail>
   
   Crontab
@@ -427,7 +436,7 @@ operator reaches for to recover — fail too.
   bondi-orchestrator on server 127.0.0.1 exists but is not running, replacing it...
   Docker is already installed on server 127.0.0.1: Docker version 27.0.0, build deadbeef
   Network bondi-network is present on server 127.0.0.1
-  ACME file permissions updated on server 127.0.0.1: /etc/traefik/acme/acme.json
+  ACME file is already root:root 600 on server 127.0.0.1: /etc/traefik/acme/acme.json
   Pulled mlopez1506/bondi-server:0.15.0 on server 127.0.0.1
   Removed bondi-orchestrator container on server 127.0.0.1
   bondi-orchestrator is ready on server 127.0.0.1: mlopez1506/bondi-server:0.15.0
@@ -511,6 +520,7 @@ accepting the command is not the same fact as the daemon having applied it.
   0
   $ grep 'restart policy' out.log
   bondi-orchestrator on server 127.0.0.1 was restart policy no, applied unless-stopped
+  setup changed on server 127.0.0.1: orchestrator restart policy corrected
   $ grep -c 'docker update --restart=unless-stopped bondi-orchestrator' ssh-argv.log
   1
   $ grep -c 'RestartPolicy' ssh-argv.log
@@ -521,17 +531,16 @@ accepting the command is not the same fact as the daemon having applied it.
 
 The line is the run's account of what it changed, collected at the end rather
 than written where the correction happened, and it names the container, what the
-host reported and what this run left it at. A run that corrected something must
-not also say it corrected nothing: the two sentences are the two halves of the
-same register and the converged fixture in setup_report.t asserts the other one
-positively, so this absence is this run having something to report rather than a
-needle that went stale. The exit code is asserted above because a correction is a
+host reported and what this run left it at. The closing line lists the
+correction among the run's changes and so does not say the run changed nothing;
+the fixture at the top of this file, which corrects nothing, is the other half,
+so this is this run having something to report rather than a line printed on
+every run. The exit code is asserted above because a correction is a
 write that succeeded -- reporting one must not fail the command that repaired the
 box.
 
-  $ grep -c 'setup corrected nothing' out.log
-  0
-  [1]
+  $ grep -F -- 'setup changed' out.log
+  setup changed on server 127.0.0.1: orchestrator restart policy corrected
 
 A host that still reports the old policy after the update fails the run and
 names both what it reported and what was asked for. Accepting the update as

@@ -64,13 +64,24 @@ let image_inspect_capture ~kind ~version =
       Alcotest.fail (Printf.sprintf "%s does not decode: %s" name msg)
 
 (* An in-memory Docker socket. The client opens one connection per request, so
-   each connection reads one request off its writes, records its method and
-   target, and answers it once from [respond]. What a test asserts is the list
-   of requests the deploy made, which is what "nothing moved" means. *)
+   each connection reads one request off its writes, records its method,
+   target and body, and answers it once from [respond]. What a test asserts is
+   the list of requests the deploy made, which is what "nothing moved" means,
+   and, where what was created matters, the body it was created with. *)
 module Fake_engine = struct
-  type t = { mutable requests : (string * string) list }
+  type t = {
+    mutable requests : (string * string * string) list;
+        (* mutable: justified because each connection's reader appends the
+           request it answered, from inside the client's own call, and the test
+           reads the whole list once the deploy returns. *)
+  }
 
-  let calls t = List.rev t.requests
+  let calls t =
+    List.rev_map (fun (meth, target, _) -> (meth, target)) t.requests
+
+  (* Every request as method, target and body, in the order made. The body is
+     what followed the head, as written to the socket. *)
+  let calls_with_bodies t = List.rev t.requests
 
   let header_end s =
     let rec go i =
@@ -121,7 +132,13 @@ module Fake_engine = struct
       | m :: target :: _ -> (m, target)
       | _ -> ("?", "?")
     in
-    engine.requests <- (meth, target) :: engine.requests;
+    let body =
+      match header_end request with
+      | Some body_at ->
+          String.sub request body_at (String.length request - body_at)
+      | None -> ""
+    in
+    engine.requests <- (meth, target, body) :: engine.requests;
     let code, body = respond meth target in
     Printf.sprintf
       "HTTP/1.1 %d X\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" code

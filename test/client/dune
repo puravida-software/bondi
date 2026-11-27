@@ -4,7 +4,10 @@
  (names
   test_config_file
   test_setup_plan
+  test_acme_file
+  test_network_probe
   test_setup_phases
+  test_setup_changes
   test_host_answer
   test_deploy_helpers
   test_status_format

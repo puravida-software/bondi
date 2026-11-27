@@ -195,17 +195,28 @@ let reported_orchestrator_version ?session (server : Config_file.server) =
    the same reason one level up: it is the highest of the three, and the release
    that carries it clears the other two, cron jobs or not.
 
+   A server whose payload carries a service with no domain is held to the
+   proxy-less floor alone, which is higher again, whatever else the payload
+   carries. "No proxy" is read as no domain, the field the orchestrator itself
+   decides on.
+
    The reader is a parameter rather than something called ahead of the decision
    so that this stays a decision made from a value, testable against a box that
    does not exist. It is called once, so a server is read once. *)
-let version_gate ~read_version ~volumes cron_jobs =
+let version_gate ~read_version ~service_name ~traefik_domain_name ~volumes
+    cron_jobs =
   let* version = read_version () in
-  match (volumes, cron_jobs) with
-  | Some (_ :: _), (None | Some [] | Some (_ :: _)) ->
-      Server_version.mounts_volumes version
-  | (None | Some []), Some (_ :: _) -> Server_version.writes_exec_lines version
-  | (None | Some []), (None | Some []) ->
-      Server_version.answers_command_surface version
+  match (service_name, traefik_domain_name) with
+  | Some _, None -> Server_version.deploys_proxyless_service version
+  | None, (None | Some _)
+  | Some _, Some _ -> (
+      match (volumes, cron_jobs) with
+      | Some (_ :: _), (None | Some [] | Some (_ :: _)) ->
+          Server_version.mounts_volumes version
+      | (None | Some []), Some (_ :: _) ->
+          Server_version.writes_exec_lines version
+      | (None | Some []), (None | Some []) ->
+          Server_version.answers_command_surface version)
 
 (* What the box's two cron sources say about each other, as the lines to print,
    for the servers this invocation is about to write cron jobs to.
@@ -370,6 +381,8 @@ let deploy_servers ~read_version ~check_volumes ~deploy servers_with_payloads =
           Result.bind
             (version_gate
                ~read_version:(fun () -> read_version server)
+               ~service_name:payload.service_name
+               ~traefik_domain_name:payload.traefik_domain_name
                ~volumes:payload.volumes payload.cron_jobs)
             (fun () ->
               Volume_check.refusal_for ~check:(check_volumes server)
@@ -436,6 +449,77 @@ let deprecation_notices (config : Config_file.t) =
   | None -> []
   | Some service -> Deprecations.service_messages service
 
+(* Blue-green without a domain, refused on the payload a server is about to be
+   sent: a run that does not deploy the service sends none, and is not refused
+   for a strategy it is not using. The decision and its sentence are
+   [Proxyless_strategy]'s, which the orchestrator asks too, so an operator sees
+   one sentence whichever side caught it. A token the orchestrator does not read
+   is not this refusal's to judge: the orchestrator refuses it in its own
+   words. *)
+let proxyless_blue_green (payload : deploy_payload) =
+  match (payload.service_name, payload.deployment_strategy) with
+  | Some name, Some token -> (
+      match
+        Option.bind
+          (Bondi_common.Proxyless_strategy.of_string token)
+          (Bondi_common.Proxyless_strategy.blue_green_refusal
+             ~service:(Some name) ~domain:payload.traefik_domain_name)
+      with
+      | Some sentence -> Error sentence
+      | None -> Ok ())
+  | None, (None | Some _)
+  | Some _, None ->
+      Ok ()
+
+(* A port declared without traefik: is used for nothing: no router sends
+   traffic to it and the service's container publishes no host port. The deploy
+   still proceeds and still sends it. *)
+let proxyless_port_notice (config : Config_file.t) =
+  match (config.user_service, config.traefik) with
+  | Some { port = Some port; _ }, None ->
+      Some
+        (Printf.sprintf
+           "service.port is set to %d and does nothing without a traefik: \
+            block: no proxy routes to it and no host port is published. Remove \
+            it from bondi.yaml, or declare traefik:."
+           port)
+  | Some { port = None; _ }, None
+  | Some _, Some _
+  | None, (None | Some _) ->
+      None
+
+(* A service that declares no strategy and no traefik: block is deployed with
+   simple, and the deploy says so. Decided from the manifest alone, as the
+   orchestrator decides it, so the client does not read the orchestrator's
+   report to say it. *)
+let proxyless_auto_notice (config : Config_file.t) =
+  match config.user_service with
+  | None -> None
+  | Some service ->
+      Bondi_common.Proxyless_strategy.auto_without_proxy_notice
+        ~service:(Bondi_common.Router_name.to_string service.name)
+        ~domain:
+          (Option.map
+             (fun (tr : Config_file.traefik) -> tr.domain_name)
+             config.traefik)
+        ~declared:service.deployment_strategy
+
+(* What this run says about the service's manifest entry. Said only when the run
+   deploys the service: a run that deploys cron jobs alone neither refuses the
+   service's strategy nor routes or publishes its port, so a sentence about
+   either would describe a deploy that is not happening. *)
+let service_notices (config : Config_file.t) ~deployments =
+  match config.user_service with
+  | Some service
+    when List.mem_assoc
+           (Bondi_common.Router_name.to_string service.name)
+           deployments ->
+      List.filter_map Fun.id
+        [ proxyless_port_notice config; proxyless_auto_notice config ]
+  | Some _
+  | None ->
+      []
+
 let payload_for (config : Config_file.t) ~deployments ~force_traefik_redeploy
     (server : Config_file.server) cron_jobs =
   let tag_of_name name = List.assoc_opt name deployments in
@@ -473,7 +557,7 @@ let payload_for (config : Config_file.t) ~deployments ~force_traefik_redeploy
         {
           service_name = Some (Bondi_common.Router_name.to_string service.name);
           image = Some image;
-          port = Some service.port;
+          port = service.port;
           env_vars = service.env_vars;
           traefik_domain_name =
             Option.map
@@ -564,8 +648,12 @@ let run force_traefik_redeploy deployments =
   | Ok config -> (
       (* Said before the targets are checked, for the reason [setup] says it
          before the servers are: what is being reported on is the file, and a
-         run refused for some other reason is still a run that read it. *)
-      List.iter print_endline (deprecation_notices config);
+         run refused for some other reason is still a run that read it. On
+         stderr, as [setup] writes the same sentences and as the port notice
+         below is written: stdout carries what the deploy did, and a notice
+         about the file is not that. *)
+      List.iter prerr_endline (deprecation_notices config);
+      List.iter prerr_endline (service_notices config ~deployments);
       (match validate_deployments config deployments with
       | Error msg ->
           prerr_endline msg;
@@ -586,7 +674,8 @@ let run force_traefik_redeploy deployments =
          about the paths it is about to mount, because both read them from the
          payload itself. It is built before any session is opened, so an image
          the run's tags do not compose into is refused before anything is
-         staged, dialled or stopped. *)
+         staged, dialled or stopped. A payload the orchestrator would refuse
+         for its strategy is refused here for the same reason. *)
       let payload_of (server : Config_file.server) =
         let* cron_jobs =
           cron_jobs_for_server server.ip_address config.cron_jobs deployments
@@ -595,6 +684,7 @@ let run force_traefik_redeploy deployments =
           payload_for config ~deployments ~force_traefik_redeploy server
             cron_jobs
         in
+        let* () = proxyless_blue_green payload in
         Ok (server, payload)
       in
       let payloads_per_server =

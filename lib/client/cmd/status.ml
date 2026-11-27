@@ -98,7 +98,11 @@ let run output_format () =
         | Some service -> Some (Bondi_common.Router_name.to_string service.name)
         | None -> None
       in
-      let reports =
+      (* Each server's reading is kept beside its report. The exit code is
+         decided from the reading, where a listing that could not be taken is
+         one value, rather than read back out of the report, where it is a cell
+         on every row. *)
+      let readings =
         List.map
           (fun (server : Config_file.server) ->
             let reading ?session () =
@@ -106,15 +110,11 @@ let run output_format () =
                 ~fetch:(orchestrator_reading ?session ~service_name)
                 server
             in
-            (* This command reports a health state and never waits for one: a
-               wait costs a bound per component, and an operator asking what is
-               running is not asking anyone to hold still while it settles. *)
-            Status_gather.report_of_reading ~config ~address:server.ip_address
-              ~waits:[]
-              (match
-                 Remote_exec.with_session ~timeout_seconds:read_seconds server
-                   (fun session -> reading ~session ())
-               with
+            ( server,
+              match
+                Remote_exec.with_session ~timeout_seconds:read_seconds server
+                  (fun session -> reading ~session ())
+              with
               | Ok taken -> taken
               (* A session that could not be staged is a server with no ssh
                  block, no ssh on this machine, or nowhere to write a key, and
@@ -123,17 +123,47 @@ let run output_format () =
                  derives it -- once per read, exactly as it was derived before
                  there was a session to open -- rather than reading anything
                  twice. *)
-              | Error _ -> reading ()))
+              | Error _ -> reading () ))
           (Config_file.servers config)
+      in
+      let reports =
+        List.map
+          (fun ((server : Config_file.server), reading) ->
+            (* This command reports a health state and never waits for one: a
+               wait costs a bound per component, and an operator asking what is
+               running is not asking anyone to hold still while it settles. *)
+            Status_gather.report_of_reading ~config ~address:server.ip_address
+              ~waits:[] reading)
+          readings
+      in
+      let unreadable =
+        List.filter_map
+          (fun ((server : Config_file.server), reading) ->
+            Option.map
+              (Status_report.unreadable_line ~address:server.ip_address)
+              (Status_gather.unreadable_listing reading))
+          readings
       in
       let output =
         match output_format with
         | Table -> Status_report.render_table reports
         | Json -> Status_report.render_json reports
       in
-      match String.equal output "" with
+      (match String.equal output "" with
       | true -> ()
-      | false -> print_string output)
+      | false -> print_string output);
+      (* The report is the whole of stdout and is out before the first stderr
+         line, so a caller reading both streams together sees every server's
+         account and then which of them could not be read. *)
+      flush stdout;
+      List.iter prerr_endline unreadable;
+      (* A server whose containers could not be listed leaves a report that
+         cannot say what runs there, so the run cannot claim to have read the
+         box. An orchestrator or a crontab that could not be read stays a cell:
+         the listing still says what runs. *)
+      match unreadable with
+      | [] -> ()
+      | _ :: _ -> exit 1)
 
 let output_format_arg =
   let formats = [ ("json", Json); ("table", Table) ] in

@@ -4,6 +4,7 @@ module Crontab_listing = Bondi_client.Crontab_listing
 module Setup_phases = Bondi_client.Setup_phases
 module Host_answer = Bondi_client.Host_answer
 module Managed_container = Bondi_common.Managed_container
+module Setup_changes = Bondi_client.Setup_changes
 
 let spec =
   match
@@ -24,6 +25,22 @@ let phase_string = function
   | Setup_phases.Alloy -> "Alloy"
   | Setup_phases.Managed -> "Managed"
 
+(* The actions that start or remove a container, each carrying a change. Which
+   change is beside the point here: the phase is chosen by the constructor. *)
+let run_server =
+  Setup.RunServer { reports = Setup_changes.Orchestrator_created "1.0.0" }
+
+let run_alloy = Setup.RunAlloy { reports = Setup_changes.Alloy_created }
+let remove_alloy = Setup.RemoveAlloy
+
+let run_managed spec =
+  Setup.RunManaged
+    {
+      spec;
+      reports = Setup_changes.Managed_created (Managed_container.name spec);
+    }
+
+let remove_managed name = Setup.RemoveManaged name
 let phase action = Setup.phase_of_action action
 let phases actions = List.map phase actions
 let contains = Test_helpers.contains
@@ -50,7 +67,8 @@ let test_phase_of_each_action_is_named () =
         "Orchestrator" );
       (Setup.StopOrchestrator, "Orchestrator");
       (Setup.RemoveOrchestrator, "Orchestrator");
-      (Setup.RunServer, "Orchestrator");
+      (run_server, "Orchestrator");
+      (Setup.AwaitOrchestratorReady, "Orchestrator");
       (Setup.EnsureJournalStorage, "Alloy");
       (Setup.EnsureAlloyState, "Alloy");
       (Setup.PullAlloy, "Alloy");
@@ -58,17 +76,17 @@ let test_phase_of_each_action_is_named () =
       (Setup.CorrectAlloyConfigMode, "Alloy");
       (Setup.EnsureAlloyConfig, "Alloy");
       (Setup.WriteAlloyEnv, "Alloy");
-      (Setup.RunAlloy, "Alloy");
+      (run_alloy, "Alloy");
       (Setup.AwaitAlloyHealthy, "Alloy");
       (Setup.RequireAlloyCurl, "Alloy");
       (Setup.RequireAlloyPort, "Alloy");
       (Setup.StopAlloy, "Alloy");
-      (Setup.RemoveAlloy, "Alloy");
+      (remove_alloy, "Alloy");
       (Setup.CleanAlloyConfig, "Alloy");
       (Setup.WriteManagedEnv spec, "Managed");
-      (Setup.RunManaged spec, "Managed");
+      (run_managed spec, "Managed");
       (Setup.StopManaged "gateway", "Managed");
-      (Setup.RemoveManaged "gateway", "Managed");
+      (remove_managed "gateway", "Managed");
       (Setup.CleanManagedConfig "gateway", "Managed");
     ]
   in
@@ -87,9 +105,8 @@ let test_phase_of_each_action_is_named () =
 let test_unfinished_phases_after_a_mid_plan_failure () =
   check (list string) "phases that did not run" [ "Managed" ]
     (List.map phase_string
-       (Setup_phases.unfinished_phases ~failed:(phase Setup.RunAlloy)
-          ~remaining:
-            (phases [ Setup.WriteManagedEnv spec; Setup.RunManaged spec ])))
+       (Setup_phases.unfinished_phases ~failed:(phase run_alloy)
+          ~remaining:(phases [ Setup.WriteManagedEnv spec; run_managed spec ])))
 
 (* Several actions share a phase, and the operator wants the phase named once.
    The failing phase is not among them: it is reported as the phase the run
@@ -99,15 +116,15 @@ let test_unfinished_phases_are_deduplicated_in_plan_order () =
   let remaining =
     [
       Setup.RemoveOrchestrator;
-      Setup.RunServer;
+      run_server;
       Setup.StopAlloy;
-      Setup.RemoveAlloy;
+      remove_alloy;
       Setup.EnsureAlloyConfig;
-      Setup.RunAlloy;
+      run_alloy;
       Setup.WriteManagedEnv spec;
-      Setup.RunManaged spec;
+      run_managed spec;
       Setup.StopManaged "old";
-      Setup.RemoveManaged "old";
+      remove_managed "old";
       Setup.CleanManagedConfig "old";
     ]
   in
@@ -125,7 +142,7 @@ let test_unfinished_phases_are_deduplicated_in_plan_order () =
 let test_unfinished_phases_is_empty_when_the_last_action_fails () =
   check (list string) "nothing after the last action" []
     (List.map phase_string
-       (Setup_phases.unfinished_phases ~failed:(phase Setup.RunAlloy)
+       (Setup_phases.unfinished_phases ~failed:(phase run_alloy)
           ~remaining:(phases [])))
 
 (* ------------------------------------------------------------------------- *)
@@ -138,9 +155,8 @@ let test_failure_message_names_the_failing_phase_and_the_skipped_ones () =
      container name \"/bondi-alloy\" is already in use"
   in
   let message =
-    Setup_phases.failure_message ~server:"10.0.0.1"
-      ~failed:(phase Setup.RunAlloy)
-      ~remaining:(phases [ Setup.WriteManagedEnv spec; Setup.RunManaged spec ])
+    Setup_phases.failure_message ~server:"10.0.0.1" ~failed:(phase run_alloy)
+      ~remaining:(phases [ Setup.WriteManagedEnv spec; run_managed spec ])
       ~reason
   in
   check bool "carries the host's own account" true
@@ -163,8 +179,8 @@ let test_failure_message_names_the_failing_phase_and_the_skipped_ones () =
   (* Same fixture, nothing left to run: the report must not name a phase that
      was never skipped, or the list above would read as boilerplate. *)
   let last =
-    Setup_phases.failure_message ~server:"10.0.0.1"
-      ~failed:(phase Setup.RunAlloy) ~remaining:(phases []) ~reason
+    Setup_phases.failure_message ~server:"10.0.0.1" ~failed:(phase run_alloy)
+      ~remaining:(phases []) ~reason
   in
   check bool "still carries the host's own account" true
     (contains ~needle:reason last);
@@ -200,6 +216,10 @@ let correction_of_site = function
         ~found:(Host_answer.of_host_output "no")
         ~applied:"unless-stopped"
   | Setup_phases.Journal_storage -> Setup_phases.journal_storage_provisioned
+  | Setup_phases.Acme_file_permissions ->
+      Setup_phases.acme_permissions_corrected
+        ~found:(Host_answer.of_host_output "root:root 644")
+        ~applied:"root:root 600"
 
 let rendered ~server corrections =
   String.concat "\n" (Setup_phases.corrections_report ~server corrections)
@@ -239,33 +259,46 @@ let test_corrections_report_names_what_was_found_and_applied () =
        report);
   check bool "names the server they are about" true
     (contains ~needle:"on server 10.0.0.1" report);
-  (* The absence arm of the pair below: a run that corrected something must not
-     also claim it corrected nothing. *)
-  check bool "claims nothing about a run that corrected nothing" false
-    (contains ~needle:"corrected nothing" report)
+  (* The account is only its lines: what the run says about itself as a whole
+     is the closing line, worded elsewhere over every change it made. *)
+  check bool "says nothing about the run as a whole" false
+    (contains ~needle:"setup changed" report)
 
-(* An empty account and an account never taken must not read alike. The
-   affirmative arm is the test above, on the same server, so an empty answer
-   here is a run with nothing to say rather than a function that says
-   nothing. *)
-let test_corrections_report_says_nothing_diverged_when_empty () =
-  let lines = Setup_phases.corrections_report ~server:"10.0.0.1" [] in
-  check int "one line, not none" 1 (List.length lines);
-  let report = String.concat "\n" lines in
-  check bool "says the run corrected nothing" true
-    (contains ~needle:"corrected nothing" report);
-  check bool "names the server it is about" true
-    (contains ~needle:"10.0.0.1" report);
-  (* This sentence is printed by every converged run, including the runs whose
-     cram fixtures assert that neither site reported anything --
-     test/cram/setup_orchestrator.t greps for "restart policy" expecting none of
-     it, and test/cram/setup_alloy_stopped.t for a mode reading. A sentence
-     carrying either reading turns both of those assertions into their
-     opposite while they still pass. *)
+(* The ACME file's site names the file, what the host had and what the run
+   applied, owner and mode together: they are set by one command and read back
+   by one stat, so the line reads them as one answer. *)
+let test_acme_permissions_corrected () =
+  check (list string) "the file, what it was and what was applied"
+    [
+      "/etc/traefik/acme/acme.json on server 10.0.0.1 was owner and mode \
+       root:root 644, applied root:root 600";
+    ]
+    (Setup_phases.corrections_report ~server:"10.0.0.1"
+       [ correction_of_site Setup_phases.Acme_file_permissions ])
+
+(* An empty account is no lines of its own, and the run still says it changed
+   nothing: that sentence is the closing line, worded over the changes, of
+   which an empty account has none. The affirmative arm is the test above, on
+   the same server, so the empty answer here is a run with nothing to say
+   rather than a function that says nothing. *)
+let test_an_empty_account_leaves_the_closing_line_to_say_nothing_changed () =
+  check (list string) "no line of its own" []
+    (Setup_phases.corrections_report ~server:"10.0.0.1" []);
+  let closing =
+    Setup_changes.closing_line ~server:"10.0.0.1"
+      (List.filter_map Setup_changes.of_correction [])
+  in
+  check string "the closing line says nothing changed"
+    "setup changed nothing on server 10.0.0.1" closing;
+  (* That line is printed by every converged run, including the runs whose cram
+     fixtures assert that neither site reported anything -- the orchestrator's
+     fixture greps for "restart policy" expecting none of it, and the stopped
+     alloy's for a mode reading. A sentence carrying either reading turns both
+     of those assertions into their opposite while they still pass. *)
   check bool "carries no reading of the restart policy" false
-    (contains ~needle:"restart policy" report);
+    (contains ~needle:"restart policy" closing);
   check bool "carries no reading of a mode" false
-    (contains ~needle:"mode" report)
+    (contains ~needle:"mode" closing)
 
 (* A reading nobody could take is the account's other kind of line, and it is a
    line of the same account: worded here, naming the server here, printed in the
@@ -274,9 +307,9 @@ let test_corrections_report_says_nothing_diverged_when_empty () =
    defect the block exists to remove, applied to a line the account's own
    machinery produced.
 
-   It corrects nothing, and the run still says so. A register that dropped the
-   nothing-corrected sentence as soon as it held any line at all would report a
-   run that could not look as one that repaired something. *)
+   It changes nothing, and the run still says so. A closing line that counted
+   any line of the account as a change would report a run that could not look
+   as one that repaired something. *)
 let test_an_unreadable_reading_is_reported_and_corrects_nothing () =
   let lines =
     Setup_phases.corrections_report ~server:"10.0.0.1"
@@ -299,20 +332,23 @@ let test_an_unreadable_reading_is_reported_and_corrects_nothing () =
      that count a converged run's readings search for exactly that phrasing. *)
   check bool "claims no mode the host never reported" false
     (contains ~needle:"was mode" report);
-  check bool "and still says the run corrected nothing" true
-    (contains ~needle:"setup corrected nothing on server 10.0.0.1" report);
-  (* The affirmative arm on the same function: a real correction does suppress
-     that sentence, so its presence above is the unreadable reading's doing and
-     not a report that always says it. *)
-  let corrected =
-    String.concat "\n"
-      (Setup_phases.corrections_report ~server:"10.0.0.1"
-         [ correction_of_site Setup_phases.Alloy_config_mode ])
+  let closing corrections =
+    Setup_changes.closing_line ~server:"10.0.0.1"
+      (List.filter_map Setup_changes.of_correction corrections)
   in
-  check bool
-    "a run that corrected something does not also say it corrected nothing"
-    false
-    (contains ~needle:"corrected nothing" corrected)
+  check string "and the run still says it changed nothing"
+    "setup changed nothing on server 10.0.0.1"
+    (closing
+       [
+         Setup_phases.unreadable_reading ~site:Setup_phases.Alloy_config_mode
+           ~detail:"the host reported nothing";
+       ]);
+  (* The affirmative arm on the same site: a real correction is a change, so
+     the sentence above is the unreadable reading's doing and not a closing
+     line that always says nothing changed. *)
+  check string "a run that corrected something lists it"
+    "setup changed on server 10.0.0.1: Alloy config mode corrected"
+    (closing [ correction_of_site Setup_phases.Alloy_config_mode ])
 
 (* The bound is log hygiene, not redaction: what the host said is the only thing
    that says what the box reported, so it is flattened and cut rather than
@@ -361,8 +397,10 @@ let corrections_tests =
   [
     test_case "a report names what was found and what was applied" `Quick
       test_corrections_report_names_what_was_found_and_applied;
-    test_case "a run that corrected nothing says so" `Quick
-      test_corrections_report_says_nothing_diverged_when_empty;
+    test_case "the ACME file's correction names owner and mode" `Quick
+      test_acme_permissions_corrected;
+    test_case "an empty account leaves the closing line to say so" `Quick
+      test_an_empty_account_leaves_the_closing_line_to_say_nothing_changed;
     test_case "a reading nobody could take is a line of the same account" `Quick
       test_an_unreadable_reading_is_reported_and_corrects_nothing;
     test_case "a multi-line host answer is bounded, not dropped" `Quick
